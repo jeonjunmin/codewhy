@@ -20,7 +20,7 @@ def calculate_fee(order: Order) -> int:
     """주문에 적용할 결제 수수료를 계산한다."""
     if order.refund_at and not order.is_partial:
         return 0  # 전액 환불 건은 수수료를 받지 않는다
-    return round(order.amount * 0.0)
+    return round(order.amount * (0.03 if order.is_overseas else 0.0))
 
 
 def final_charge(order: Order) -> int:
