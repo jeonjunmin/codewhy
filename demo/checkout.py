@@ -23,6 +23,13 @@ def calculate_fee(order: Order) -> int:
     return round(order.amount * (0.03 if order.is_overseas else 0.0))
 
 
+def _assert_valid(order: Order) -> None:
+    """결제 금액이 음수면 정산을 거부한다."""
+    if order.amount < 0:
+        raise ValueError("주문 금액은 음수가 될 수 없습니다")
+
+
 def final_charge(order: Order) -> int:
     """수수료를 포함한 최종 청구액."""
+    _assert_valid(order)
     return order.amount + calculate_fee(order)
