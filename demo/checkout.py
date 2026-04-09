@@ -33,3 +33,8 @@ def final_charge(order: Order) -> int:
     """수수료를 포함한 최종 청구액."""
     _assert_valid(order)
     return order.amount + calculate_fee(order)
+
+
+def apply_coupon(amount: int, coupon_rate: float) -> int:
+    """쿠폰 할인율을 적용한 금액을 반환한다."""
+    return round(amount * (1 - coupon_rate))
