@@ -23,6 +23,9 @@ def calculate_fee(order: Order) -> int:
     return round(order.amount * (0.03 if order.is_overseas else 0.0))
 
 
+VAT_RATE = 0.10  # 부가가치세율
+
+
 def _assert_valid(order: Order) -> None:
     """결제 금액이 음수면 정산을 거부한다."""
     if order.amount < 0:
@@ -38,3 +41,8 @@ def final_charge(order: Order) -> int:
 def apply_coupon(amount: int, coupon_rate: float) -> int:
     """쿠폰 할인율을 적용한 금액을 반환한다."""
     return round(amount * (1 - coupon_rate))
+
+
+def vat(amount: int) -> int:
+    """부가가치세를 계산한다."""
+    return round(amount * VAT_RATE)
