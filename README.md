@@ -34,8 +34,8 @@
   - 터미널에서 "Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process" 명령어 실행
   - 터미널에서 "npm run compile " 명령어 실행
 * 실행
-- 컴파일: npm run compile
-- 디버깅 시작: F5 키 눌러서 새창 띄우고 test.ts 생성 후 hello 입력
-- 확인: 새로 뜬 창에서 test.ts 파일 열고 hello 위에 마우스 올리기
+  - 컴파일: npm run compile
+  - 디버깅 시작: F5 키 눌러서 새창 띄우고 test.ts 생성 후 hello 입력
+  - 확인: 새로 뜬 창에서 test.ts 파일 열고 hello 위에 마우스 올리기
   
 
