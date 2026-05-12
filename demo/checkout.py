@@ -46,3 +46,10 @@ def apply_coupon(amount: int, coupon_rate: float) -> int:
 def vat(amount: int) -> int:
     """부가가치세를 계산한다."""
     return round(amount * VAT_RATE)
+
+
+def settlement_total(order: Order, coupon_rate: float = 0.0) -> int:
+    """수수료·쿠폰·부가세를 반영한 최종 정산액."""
+    charged = final_charge(order)
+    discounted = apply_coupon(charged, coupon_rate)
+    return discounted + vat(discounted)
