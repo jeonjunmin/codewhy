@@ -1,7 +1,7 @@
 {
   "name": "codewhy",
-  "displayName": "codewhy",
-  "description": "",
+  "displayName": "CodeWhy",
+  "description": "AI 기반 코드 컨텍스트 분석 - 컨텍스트 블레임, 타임라인 요약, 요구사항 역추적",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.118.0"
@@ -9,18 +9,57 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [
-    "onLanguage:typescript",
-    "onLanguage:javascript"
-  ],
+  "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "codewhy.helloWorld",
-        "title": "Hello World"
+        "command": "codewhy.contextBlame",
+        "title": "CodeWhy: 이 코드, 왜 바꿨어? (Context Blame)"
+      },
+      {
+        "command": "codewhy.timelineSummary",
+        "title": "CodeWhy: 이 파일의 역사 요약 (Timeline Summary)"
+      },
+      {
+        "command": "codewhy.requirementTrace",
+        "title": "CodeWhy: 원본 기획서 찾기 (Requirement Trace)"
       }
-    ]
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "codewhy.contextBlame",
+          "group": "codewhy@1"
+        },
+        {
+          "command": "codewhy.timelineSummary",
+          "group": "codewhy@2"
+        },
+        {
+          "command": "codewhy.requirementTrace",
+          "group": "codewhy@3"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "CodeWhy",
+      "properties": {
+        "codewhy.backendUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "CodeWhy Python 백엔드 서버 URL"
+        },
+        "codewhy.documentPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "기획서/문서 폴더 경로 목록 (요구사항 역추적에 사용)"
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
@@ -28,16 +67,21 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
-    "test": "vscode-test"
+    "test": "vscode-test",
+    "backend:install": "python -m pip install -r backend/requirements.txt",
+    "backend:dev": "python -m uvicorn app.main:app --reload --port 8000 --app-dir backend"
   },
   "devDependencies": {
-    "@types/vscode": "^1.118.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "22.x",
-    "typescript-eslint": "^8.56.1",
+    "@types/vscode": "^1.118.0",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
     "eslint": "^9.39.3",
     "typescript": "^5.9.3",
-    "@vscode/test-cli": "^0.0.12",
-    "@vscode/test-electron": "^2.5.2"
+    "typescript-eslint": "^8.56.1"
+  },
+  "dependencies": {
+    "axios": "^1.16.0"
   }
 }

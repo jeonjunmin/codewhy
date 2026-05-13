@@ -1,5 +1,16 @@
+# TypeScript / VSCode Extension
 out
 dist
 node_modules
 .vscode-test/
 *.vsix
+
+# Python Backend
+backend/.env
+backend/__pycache__/
+backend/**/__pycache__/
+backend/.venv/
+backend/venv/
+*.pyc
+*.pyo
+.pytest_cache/
