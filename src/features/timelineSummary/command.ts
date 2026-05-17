@@ -29,7 +29,7 @@ export async function runTimelineSummary(context: vscode.ExtensionContext) {
                     filePath: ctx.filePath,
                     repoPath: ctx.repoPath,
                 });
-                showTimelineSummaryView(context, ctx, result);
+                showTimelineSummaryView(ctx, result);
             } catch (err) {
                 vscode.window.showErrorMessage(
                     `Timeline Summary 실패: ${(err as Error).message}`
