@@ -7,6 +7,7 @@ git 로 라인 단위 마지막 커밋을 가져와 Claude 에게 "왜 바꿨는
 
 from app.core import git
 from app.core.ai_client import call_claude
+from app.core.config import get_anthropic_api_key
 
 
 def analyze_blame(repo_path: str, file_path: str, line: int) -> dict:
@@ -21,6 +22,10 @@ def analyze_blame(repo_path: str, file_path: str, line: int) -> dict:
 
 
 def _explain_blame(info: git.BlameInfo) -> str:
+    # API 키가 없으면 git 커밋 메시지를 그대로 반환 (개발/테스트용 폴백)
+    if not get_anthropic_api_key():
+        return f"[API 키 미설정] 커밋 메시지: {info.message or '(메시지 없음)'}"
+
     prompt = f"""다음 git 커밋 정보를 바탕으로, 개발자가 이 코드를 왜 변경했는지 한국어로 1~2문장으로 설명해주세요.
 비개발자도 이해할 수 있게 쉽게 작성하세요.
 

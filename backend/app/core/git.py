@@ -5,6 +5,7 @@
 
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 
 @dataclass
@@ -22,6 +23,7 @@ def get_blame_info(repo_path: str, file_path: str, line: int) -> BlameInfo:
         ["git", "blame", "-L", f"{line},{line}", "--porcelain", file_path],
         cwd=repo_path,
         text=True,
+        encoding="utf-8",
     )
 
     lines = blame_out.splitlines()
@@ -30,10 +32,14 @@ def get_blame_info(repo_path: str, file_path: str, line: int) -> BlameInfo:
         (l.removeprefix("author ") for l in lines if l.startswith("author ")),
         "",
     )
-    date = next(
+    raw_ts = next(
         (l.removeprefix("author-time ") for l in lines if l.startswith("author-time ")),
         "",
     )
+    try:
+        date = datetime.fromtimestamp(int(raw_ts), tz=timezone.utc).strftime("%Y-%m-%d")
+    except (ValueError, OSError):
+        date = raw_ts  # 파싱 실패 시 원본 그대로
     message = _get_commit_message(repo_path, commit_hash)
     diff = _get_commit_diff(repo_path, commit_hash, file_path)
 
@@ -52,6 +58,7 @@ def get_file_log(repo_path: str, file_path: str) -> list[dict]:
         ["git", "log", "--follow", "--format=%H|%an|%ad|%s", "--date=short", file_path],
         cwd=repo_path,
         text=True,
+        encoding="utf-8",
     )
     commits = []
     for line in out.strip().splitlines():
@@ -73,6 +80,7 @@ def _get_commit_message(repo_path: str, commit_hash: str) -> str:
         ["git", "log", "-1", "--format=%B", commit_hash],
         cwd=repo_path,
         text=True,
+        encoding="utf-8",
     ).strip()
 
 
@@ -81,4 +89,5 @@ def _get_commit_diff(repo_path: str, commit_hash: str, file_path: str) -> str:
         ["git", "show", "--stat", commit_hash, "--", file_path],
         cwd=repo_path,
         text=True,
+        encoding="utf-8",
     ).strip()

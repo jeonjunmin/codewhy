@@ -24,6 +24,22 @@
       {
         "command": "codewhy.requirementTrace",
         "title": "CodeWhy: 원본 기획서 찾기 (Requirement Trace)"
+      },
+      {
+        "command": "codewhy.blame.openCommit",
+        "title": "CodeWhy: 커밋 상세 보기"
+      },
+      {
+        "command": "codewhy.blame.pin",
+        "title": "CodeWhy: 현재 라인 블레임 고정/해제"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "codewhy.blame.pin",
+        "key": "ctrl+alt+b",
+        "mac": "cmd+alt+b",
+        "when": "editorTextFocus"
       }
     ],
     "menus": {
