@@ -17,6 +17,11 @@ export interface BlameResult {
     commitHash: string;
     author: string;
     date: string;
+    // "이름표 대신 사유서" 카드의 칩/AI 추론 영역용 — 백엔드 점진 도입을 위해 옵셔널
+    ticket?: string;        // 예: "PAY-2041"
+    specRef?: string;       // 예: "기획서 §4.2"
+    team?: string;          // 예: "결제팀"
+    aiSuggestion?: string;  // AI 개선 제안 한 문장
 }
 
 // --- Timeline Summary (담당: 개발자 B) ------------------------------
