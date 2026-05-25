@@ -25,8 +25,11 @@
     "views": {
       "codewhy": [
         {
-          "id": "codewhy.mainView",
-          "name": "CodeWhy"
+          "type": "webview",
+          "id": "codewhy.contextBlame",
+          "name": "Context Blame",
+          "icon": "images/codewhy-icon.svg",
+          "contextualTitle": "CodeWhy"
         }
       ]
     },

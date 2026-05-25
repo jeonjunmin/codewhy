@@ -22,6 +22,26 @@ export interface BlameResult {
     specRef?: string;       // 예: "기획서 §4.2"
     team?: string;          // 예: "결제팀"
     aiSuggestion?: string;  // AI 개선 제안 한 문장
+
+    // ── Context Blame 사이드바 추가 필드 (모두 옵셔널, 점진 도입) ──────────
+    /** PR 단위 변경 통계 — 헤더 메타 테이블의 "변경" 칸. */
+    changeStats?: { added: number; removed: number };
+    /** 같은 PR의 총 라인 수 등 PR 컨텍스트 — "동일 PR 23 라인". */
+    prInfo?: { url?: string; lines: number };
+    /** 기획서 원문 위치 — 예: "2026_결제_기획서.pdf §4.2". */
+    sourceRef?: string;
+    /** "이 변경과 함께 일어난 일" 섹션에 들어가는 관련 변경들. */
+    relatedChanges?: RelatedChange[];
+}
+
+/**
+ * 같은 PR 또는 인접 시점에 일어난 관련 변경 한 건.
+ * 사이드바의 "이 변경과 함께 일어난 일" 리스트에 한 행으로 렌더된다.
+ */
+export interface RelatedChange {
+    kind: 'doc' | 'branch' | 'security' | 'commit';
+    title: string;   // 예: "기획서 §4.2 조항 추가"
+    meta: string;    // 예: "PAY-2041 · 김기획" / "+78 라인 · 같은 PR"
 }
 
 // --- Timeline Summary (담당: 개발자 B) ------------------------------
