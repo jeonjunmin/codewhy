@@ -18,6 +18,25 @@ def get_aws_region() -> str:
     return os.getenv("AWS_REGION", "ap-northeast-2")
 
 
+# ─── AWS Bedrock (Context Blame RAG) ────────────────────────────────
+def get_bedrock_model_id() -> str:
+    """Converse API 로 호출할 Bedrock 모델 ID (inference profile ID 권장)."""
+    return os.getenv("BEDROCK_MODEL_ID", "apac.anthropic.claude-3-5-sonnet-20241022-v2:0")
+
+
+def get_bedrock_kb_id() -> str:
+    """기획서 단락을 조회할 Bedrock Knowledge Base ID. 미설정 시 RAG 생략."""
+    return os.getenv("BEDROCK_KNOWLEDGE_BASE_ID", "")
+
+
+def get_bedrock_kb_max_results() -> int:
+    """Knowledge Base 한 번 조회 시 가져올 기획서 단락 수."""
+    try:
+        return int(os.getenv("BEDROCK_KB_MAX_RESULTS", "4"))
+    except ValueError:
+        return 4
+
+
 def get_document_paths() -> list[str]:
     raw = os.getenv("DOCUMENT_PATHS", "")
     return [p.strip() for p in raw.split(",") if p.strip()]
