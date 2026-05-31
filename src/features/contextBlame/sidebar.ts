@@ -30,7 +30,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     constructor(
         private readonly extensionUri: vscode.Uri,
         private readonly handlers: {
-            onOpenSpec: () => void;
+            onOpenSpec: (sourceRef: string | null) => void;
             onOpenCommit: (commitHash: string, repoPath: string) => void;
             onOpenHistory: () => void;
             onTogglePin: (filePath: string, line: number) => void;
@@ -73,13 +73,18 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         this.view.webview.postMessage({ type: 'pinned', pinned });
     }
 
+    /** "AI에게 더 묻기" 답변을 질문 버블과 함께 표시. answer='…' 면 로딩 상태. */
+    showAnswer(question: string, answer: string) {
+        this.view?.webview.postMessage({ type: 'answer', payload: { question, answer } });
+    }
+
     // ─── 메시지 라우팅 ────────────────────────────────────────────────────
     private handleMessage(msg: { type: string; payload?: any }) {
         if (!this.last) { return; }
         const { ctx, result } = this.last;
         switch (msg.type) {
             case 'openSpec':
-                this.handlers.onOpenSpec();
+                this.handlers.onOpenSpec(result.sourceRef ?? result.specRef ?? null);
                 break;
             case 'openCommit':
                 this.handlers.onOpenCommit(result.commitHash, ctx.repoPath);
@@ -314,6 +319,28 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
     .ask__input::placeholder { color: var(--fg-mute); font-style: italic; }
 
+    /* ── AI 질문/답변 스레드 ─────────────────────────────────────── */
+    .ask-thread { display: flex; flex-direction: column; gap: 8px; }
+    .qa { display: flex; flex-direction: column; gap: 4px; }
+    .qa__q {
+        align-self: flex-end; max-width: 90%;
+        background: var(--line); color: var(--fg);
+        padding: 6px 10px; border-radius: 9px 9px 2px 9px;
+        font-size: 12px;
+    }
+    .qa__a {
+        align-self: flex-start; max-width: 95%;
+        background: var(--callout-bg); color: var(--fg);
+        border: 1px solid var(--line-soft);
+        padding: 8px 11px; border-radius: 9px 9px 9px 2px;
+        font-size: 12.5px; line-height: 1.55;
+    }
+    .qa__a code {
+        background: var(--code-bg); color: var(--code-fg);
+        padding: 1px 5px; border-radius: 4px; font-size: 11.5px;
+    }
+    .qa__a.loading { color: var(--fg-mute); font-style: italic; }
+
     /* ── 푸터: CTA + 보조 액션 ───────────────────────────────────── */
     .footer { display: flex; gap: 6px; align-items: stretch; }
     .cta {
@@ -408,6 +435,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             <input class="ask__input" id="ask-input" type="text" placeholder='"왜 4%가 아닌 3%일까?"' />
         </div>
 
+        <div id="ask-thread" class="ask-thread hidden"></div>
+
         <div class="footer">
             <button class="cta" data-action="openSpec">
                 <span id="ico-cta"></span><span id="cta-label">기획서 열기</span>
@@ -449,8 +478,38 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             document.getElementById('content').classList.add('hidden');
         } else if (msg.type === 'pinned') {
             setPin(msg.pinned);
+        } else if (msg.type === 'answer') {
+            renderAnswer(msg.payload);
         }
     });
+
+    let pendingAnswerEl = null;
+    function renderAnswer(p) {
+        const thread = document.getElementById('ask-thread');
+        thread.classList.remove('hidden');
+        const loading = p.answer === '…';
+        if (loading || !pendingAnswerEl) {
+            // 새 질문 → 질문/답변 버블 한 쌍 추가
+            const qa = document.createElement('div');
+            qa.className = 'qa';
+            const q = document.createElement('div');
+            q.className = 'qa__q';
+            q.textContent = p.question;
+            const a = document.createElement('div');
+            a.className = 'qa__a' + (loading ? ' loading' : '');
+            if (loading) { a.textContent = '답변 작성 중…'; } else { a.innerHTML = decorate(p.answer); }
+            qa.appendChild(q);
+            qa.appendChild(a);
+            thread.appendChild(qa);
+            pendingAnswerEl = loading ? a : null;
+        } else {
+            // 직전 로딩 버블을 실제 답변으로 교체
+            pendingAnswerEl.classList.remove('loading');
+            pendingAnswerEl.innerHTML = decorate(p.answer);
+            pendingAnswerEl = null;
+        }
+        thread.lastElementChild.scrollIntoView({ block: 'nearest' });
+    }
 
     function setPin(pinned) {
         const btn = document.getElementById('btn-pin');
@@ -508,6 +567,12 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
 
         // cta label
         document.getElementById('cta-label').textContent = (p.specRef || '기획서') + ' 열기';
+
+        // 라인이 바뀌면 이전 Q&A 스레드는 초기화
+        const thread = document.getElementById('ask-thread');
+        thread.innerHTML = '';
+        thread.classList.add('hidden');
+        pendingAnswerEl = null;
 
         setPin(!!p.pinned);
     }

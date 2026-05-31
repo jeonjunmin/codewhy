@@ -12,6 +12,8 @@ EC2 배포 시 IAM Instance Profile 을 사용하면 세 변수 모두 비워도
 boto3 자격증명 체인: 환경변수 → ~/.aws/credentials → EC2 Instance Profile
 """
 
+import json
+import os
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -98,6 +100,35 @@ def get_bedrock_kb_max_results() -> int:
 def get_document_paths() -> list[str]:
     raw = get_settings().DOCUMENT_PATHS
     return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+# ─── Context Blame: 팀 매핑 / VCS 연동 ──────────────────────────────
+def get_team_map() -> dict[str, str]:
+    """작성자(이름 또는 이메일) → 팀명 매핑.
+
+    CODEWHY_TEAM_MAP 가 가리키는 JSON 파일을 읽는다. 미설정·파일 없음·파싱 실패 시
+    빈 dict 를 돌려주어(=team 칸 생략) 기능이 깨지지 않게 한다.
+    """
+    path = os.getenv("CODEWHY_TEAM_MAP", "")
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def get_github_token() -> str:
+    """GitHub PR 조회용 토큰. 미설정 시 PR 연동 생략."""
+    return os.getenv("GITHUB_TOKEN", "")
+
+
+def get_gitlab_token() -> str:
+    """GitLab MR 조회용 토큰. 미설정 시 MR 연동 생략."""
+    return os.getenv("GITLAB_TOKEN", "")
+
 
 def get_dynamo_blame_table() -> str:
     return get_settings().DYNAMO_BLAME_TABLE

@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { EditorContext } from '../../shared/editor';
 import { BlameResult } from '../../shared/types';
-import { fetchContextBlame } from './api';
+import { askBlame, fetchContextBlame } from './api';
 import { ContextBlameSidebarProvider, VIEW_ID } from './sidebar';
 
 /**
@@ -77,7 +77,7 @@ function ensureInitialized(context: vscode.ExtensionContext) {
 
     // ── 사이드바 Provider 등록 ─────────────────────────────────────
     sidebar = new ContextBlameSidebarProvider(context.extensionUri, {
-        onOpenSpec: () => vscode.commands.executeCommand('codewhy.requirementTrace'),
+        onOpenSpec: (sourceRef) => openSpecDocument(sourceRef),
         onOpenCommit: (commitHash, repoPath) =>
             vscode.commands.executeCommand('codewhy.blame.openCommit', { commitHash, repoPath }),
         onOpenHistory: () => vscode.commands.executeCommand('codewhy.timelineSummary'),
@@ -288,12 +288,60 @@ function refreshPinnedDecorations(editor: vscode.TextEditor) {
 // ─────────────────────────────────────────────────────────────────────────────
 // 5. AI 후속 질문 — 사이드바 인풋에서 Enter 친 경우
 // ─────────────────────────────────────────────────────────────────────────────
-async function handleAskAi(question: string, ctx: EditorContext, result: BlameResult) {
-    // TODO: 백엔드에 /api/blame/ask 엔드포인트가 생기면 스트리밍 응답을 사이드바에 흘리도록 연결.
-    // 임시로 알림창에 질문을 띄워 동작만 확인.
-    vscode.window.showInformationMessage(
-        `CodeWhy: "${question}" — 라인 ${ctx.line} (${result.author}) 에 대한 후속 질문은 곧 지원됩니다.`,
-    );
+// ─────────────────────────────────────────────────────────────────────────────
+// 5-b. 기획서 열기 — sourceRef("파일명.pdf §4.2")의 문서를 documentPaths 에서 찾아 연다
+// ─────────────────────────────────────────────────────────────────────────────
+async function openSpecDocument(sourceRef: string | null) {
+    const fileName = extractSpecFileName(sourceRef);
+    if (fileName) {
+        const uri = await findDocumentUri(fileName);
+        if (uri) {
+            await vscode.commands.executeCommand('vscode.open', uri);
+            if (/§/.test(sourceRef ?? '')) {
+                vscode.window.setStatusBarMessage(`CodeWhy: ${sourceRef} 로 이동했어요 (섹션은 문서에서 확인).`, 4000);
+            }
+            return;
+        }
+        vscode.window.showWarningMessage(
+            `CodeWhy: "${fileName}" 문서를 documentPaths 설정에서 찾지 못했어요. 요구사항 역추적으로 대신 검색합니다.`,
+        );
+    }
+    // 파일명을 못 뽑았거나 문서를 못 찾으면 기존 요구사항 역추적으로 폴백
+    vscode.commands.executeCommand('codewhy.requirementTrace');
+}
+
+/** "2026_결제_기획서.pdf §4.2" → "2026_결제_기획서.pdf" */
+function extractSpecFileName(sourceRef: string | null): string | null {
+    if (!sourceRef) { return null; }
+    const m = sourceRef.match(/[^\s§]+\.(pdf|docx|xlsx|md|txt)/i);
+    return m ? m[0] : null;
+}
+
+/** documentPaths 설정의 폴더들에서 파일명이 일치하는 문서를 찾는다. */
+async function findDocumentUri(fileName: string): Promise<vscode.Uri | undefined> {
+    const folders = vscode.workspace.getConfiguration('codewhy').get<string[]>('documentPaths') ?? [];
+    for (const folder of folders) {
+        const pattern = new vscode.RelativePattern(folder, `**/${fileName}`);
+        const hits = await vscode.workspace.findFiles(pattern, undefined, 1);
+        if (hits.length) { return hits[0]; }
+    }
+    return undefined;
+}
+
+async function handleAskAi(question: string, ctx: EditorContext, _result: BlameResult) {
+    if (!sidebar) { return; }
+    sidebar.showAnswer(question, '…'); // 즉시 질문 버블 + 로딩 표시
+    try {
+        const { answer } = await askBlame({
+            filePath: ctx.filePath,
+            line: ctx.line,
+            repoPath: ctx.repoPath,
+            question,
+        });
+        sidebar.showAnswer(question, answer);
+    } catch (err) {
+        sidebar.showAnswer(question, `답변을 가져오지 못했어요: ${(err as Error).message}`);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
