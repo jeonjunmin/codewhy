@@ -12,6 +12,7 @@ import anthropic
 import boto3
 from app.core.config import (
     get_anthropic_api_key,
+    get_aws_credentials,
     get_aws_region,
     get_bedrock_model_id,
 )
@@ -42,7 +43,7 @@ def call_claude(prompt: str, *, max_tokens: int = 600, model: str = DEFAULT_MODE
 def _get_bedrock_runtime():
     global _bedrock_runtime
     if _bedrock_runtime is None:
-        _bedrock_runtime = boto3.client("bedrock-runtime", region_name=get_aws_region())
+        _bedrock_runtime = boto3.client("bedrock-runtime", region_name=get_aws_region(), **get_aws_credentials())
     return _bedrock_runtime
 
 

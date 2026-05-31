@@ -18,6 +18,19 @@ def get_aws_region() -> str:
     return os.getenv("AWS_REGION", "ap-northeast-2")
 
 
+def get_aws_credentials() -> dict:
+    """MFA STS 임시 자격증명. 미설정 시 빈 dict → boto3가 ~/.aws/credentials 폴백."""
+    key = os.getenv("AWS_ACCESS_KEY_ID", "")
+    secret = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+    token = os.getenv("AWS_SESSION_TOKEN", "")
+    if key and secret:
+        creds = {"aws_access_key_id": key, "aws_secret_access_key": secret}
+        if token:
+            creds["aws_session_token"] = token
+        return creds
+    return {}
+
+
 # ─── AWS Bedrock (Context Blame RAG) ────────────────────────────────
 def get_bedrock_model_id() -> str:
     """Converse API 로 호출할 Bedrock 모델 ID (inference profile ID 권장)."""

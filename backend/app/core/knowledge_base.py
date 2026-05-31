@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 import boto3
 
-from app.core.config import get_aws_region, get_bedrock_kb_id, get_bedrock_kb_max_results
+from app.core.config import get_aws_credentials, get_aws_region, get_bedrock_kb_id, get_bedrock_kb_max_results
 
 _agent_runtime = None
 
@@ -26,7 +26,7 @@ class Passage:
 def _get_agent_runtime():
     global _agent_runtime
     if _agent_runtime is None:
-        _agent_runtime = boto3.client("bedrock-agent-runtime", region_name=get_aws_region())
+        _agent_runtime = boto3.client("bedrock-agent-runtime", region_name=get_aws_region(), **get_aws_credentials())
     return _agent_runtime
 
 
