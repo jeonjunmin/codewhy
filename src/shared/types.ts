@@ -45,9 +45,17 @@ export interface RelatedChange {
 }
 
 // --- Timeline Summary (담당: 개발자 B) ------------------------------
+export interface CommitInput {
+    hash: string;
+    author: string;
+    date: string;    // YYYY-MM-DD
+    subject: string;
+}
+
 export interface TimelineRequest {
     filePath: string;
     repoPath: string;
+    commits: CommitInput[];   // 확장이 로컬 git log 를 수집해서 전송
 }
 
 export interface TimelineMilestone {
