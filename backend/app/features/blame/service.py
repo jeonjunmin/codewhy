@@ -1,33 +1,124 @@
 """Context Blame 비즈니스 로직.
 
-git 로 라인 단위 마지막 커밋을 가져와 Claude 에게 "왜 바꿨는지" 설명을 부탁한다.
+git 으로 라인 단위 마지막 커밋(diff + 커밋 메시지)을 가져오고,
+커밋 메시지 키워드로 Bedrock Knowledge Base 에서 연관 기획서 단락을 조회한 뒤,
+코드 + 커밋 메시지 + 기획서 단락을 Bedrock 에 한꺼번에 넣어 "진짜 변경 이유"를 추론한다.
+
+RAG 흐름:
+  1. git.get_blame_info  — diff + 커밋 메시지 추출
+  2. extract_keywords    — 커밋 메시지에서 KB 조회용 키워드 추출
+  3. knowledge_base      — 키워드로 기획서 단락 retrieve
+  4. _explain_blame      — 코드 + 커밋 + 기획서 단락을 Bedrock Converse 로 정렬
 
 👤 담당: 개발자 A
 """
 
-from app.core import git
-from app.core.ai_client import call_claude
+import re
+
+from app.core import git, knowledge_base
+from app.core.ai_client import call_bedrock
+from app.core.knowledge_base import Passage
+
+_SYSTEM_PROMPT = (
+    "당신은 코드 변경의 '기획 의도'를 설명하는 도우미입니다. "
+    "git 커밋 메시지의 기술적 표현 뒤에 숨은, 기획서상의 진짜 이유를 추론해 "
+    "비개발자도 이해할 수 있는 한국어로 설명하세요."
+)
+
+# KB 검색 정확도를 위해 우대할 결제/정산 도메인 용어 (검색 쿼리 맨 앞에 배치)
+_DOMAIN_TERMS = {
+    "매입채권", "정산", "환율", "수수료", "결제", "정산서", "지급", "청구",
+    "세금계산서", "부가세", "원천징수", "선정산", "후정산", "여신", "한도",
+}
+
+# 검색에 무의미한 노이즈 토큰 (conventional-commit 동사 + 일반어)
+_STOPWORDS = {
+    "feat", "fix", "refactor", "chore", "docs", "test", "perf", "style", "build",
+    "ci", "revert", "wip", "update", "add", "remove", "delete", "change", "modify",
+    "the", "a", "an", "to", "of", "and", "or", "for", "in", "on", "with",
+    "수정", "추가", "변경", "삭제", "반영", "개선", "적용",
+}
 
 
 def analyze_blame(repo_path: str, file_path: str, line: int) -> dict:
     info = git.get_blame_info(repo_path, file_path, line)
-    explanation = _explain_blame(info)
+    keywords = extract_keywords(info.message)
+    passages = knowledge_base.retrieve_passages(" ".join(keywords))
+
+    explanation = _explain_blame(info, passages)
+    source_ref = _format_source_ref(passages)
+
     return {
         "explanation": explanation,
         "commitHash": info.commit_hash,
         "author": info.author,
         "date": info.date,
+        "sourceRef": source_ref,
+        "specRef": source_ref,
     }
 
 
-def _explain_blame(info: git.BlameInfo) -> str:
-    prompt = f"""다음 git 커밋 정보를 바탕으로, 개발자가 이 코드를 왜 변경했는지 한국어로 1~2문장으로 설명해주세요.
-비개발자도 이해할 수 있게 쉽게 작성하세요.
+def extract_keywords(commit_message: str) -> list[str]:
+    """커밋 메시지에서 Knowledge Base 조회에 쓸 키워드를 뽑는다.
 
-작성자: {info.author}
-날짜: {info.date}
-커밋 메시지: {info.message}
-변경 내용:
-{info.diff}"""
+    이 키워드가 RAG 검색 품질을 좌우한다 — 어떤 단어로 KB 를 조회하느냐에 따라
+    가져오는 기획서 단락이 달라지기 때문이다.
 
-    return call_claude(prompt, max_tokens=300)
+    전략: conventional-commit prefix 제거 → 한글/영숫자 토큰 추출 → 불용어 제거 →
+    결제/정산 도메인 용어를 쿼리 앞으로 끌어올린다(중복 제거, 순서 보존).
+    """
+    first_line = commit_message.strip().splitlines()[0] if commit_message.strip() else ""
+    body = re.sub(r"^\w+(?:\[[^\]]+\])?:\s*", "", first_line)
+
+    tokens = re.findall(r"[가-힣]+|[A-Za-z0-9]{2,}", body)
+
+    seen: set[str] = set()
+    domain, rest = [], []
+    for tok in tokens:
+        low = tok.lower()
+        if low in _STOPWORDS or tok in seen:
+            continue
+        seen.add(tok)
+        (domain if tok in _DOMAIN_TERMS else rest).append(tok)
+
+    return domain + rest
+
+
+def _explain_blame(info: git.BlameInfo, passages: list[Passage]) -> str:
+    """코드 + 커밋 메시지 + 기획서 단락을 Bedrock 에 넣어 변경 사유를 추론한다.
+
+    Bedrock 호출이 불가한 환경(자격증명 없음 등)에서는 커밋 메시지를 그대로 반환한다.
+    """
+    spec_block = _format_passages(passages)
+
+    prompt = f"""아래 정보를 종합해, 개발자가 이 코드를 왜 변경했는지 한국어로 1~2문장으로 설명하세요.
+기술적 커밋 메시지가 아니라, 기획서가 알려주는 '비즈니스상의 진짜 이유'를 우선해 설명하세요.
+기획서 단락에 근거가 있으면 핵심 표현을 큰따옴표("…")로 인용하세요.
+
+[작성자] {info.author}
+[날짜] {info.date}
+[커밋 메시지]
+{info.message}
+
+[변경 내용]
+{info.diff}
+
+[연관 기획서 단락]
+{spec_block}"""
+
+    try:
+        return call_bedrock(prompt, system=_SYSTEM_PROMPT, max_tokens=300).strip()
+    except Exception:
+        # Bedrock 미설정/호출 실패 시 git 커밋 메시지로 폴백 (개발/테스트용)
+        return f"[Bedrock 미연동] 커밋 메시지: {info.message or '(메시지 없음)'}"
+
+
+def _format_passages(passages: list[Passage]) -> str:
+    if not passages:
+        return "(연관 기획서 단락 없음 — 커밋 메시지와 변경 내용만으로 추론하세요.)"
+    return "\n\n".join(f"- ({p.source}) {p.text}" for p in passages)
+
+
+def _format_source_ref(passages: list[Passage]) -> str | None:
+    """사이드바 '출처' 칸에 표시할, 가장 연관도 높은 기획서 출처."""
+    return passages[0].source if passages else None
