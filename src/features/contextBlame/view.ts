@@ -2,18 +2,20 @@ import * as vscode from 'vscode';
 import { EditorContext } from '../../shared/editor';
 import { BlameResult } from '../../shared/types';
 import { fetchContextBlame } from './api';
+import { ContextBlameSidebarProvider, VIEW_ID } from './sidebar';
 
 /**
- * Context Blame UI 레이어.
+ * Context Blame UI 레이어 — 사이드바(WebviewView) 와 에디터 보조 UI 를 연결한다.
  *
  * 동작 흐름:
  *  1. 확장 활성화 → registerContextBlameCodeLens()
- *  2. 커서가 있는 라인에 🔍 CodeLens 표시
- *  3. 렌즈 클릭 → 백엔드 분석(캐시 있으면 스킵)
- *  4. 해당 라인으로 커서 이동 + editor.action.showHover 실행
- *  5. HoverProvider가 캐시에서 결과를 꺼내 에디터 위 팝업으로 렌더링
+ *     · CodeLens (커서 라인에 🔍 렌즈)
+ *     · HoverProvider (분석 끝난 라인에 짧은 마크다운 팝업)
+ *     · 사이드바 Provider (CONTEXT BLAME 패널)
+ *  2. 렌즈 클릭 → 백엔드 분석 → 사이드바에 결과 push
  *
- * 호버는 CodeLens 클릭 때만 트리거 — 마우스-오버만으로는 분석 전 팝업이 뜨지 않는다.
+ * 호버는 사이드바와 별개로 "이 라인 분석되어 있음" 확인용 라이트 카드.
+ * 풀-디자인은 사이드바가 담당.
  *
  * 👤 담당: 개발자 A
  */
@@ -28,6 +30,7 @@ const pinned = new Set<string>();
 let statusBar: vscode.StatusBarItem | undefined;
 let pinDecoration: vscode.TextEditorDecorationType | undefined;
 let codeLensEmitter: vscode.EventEmitter<void> | undefined;
+let sidebar: ContextBlameSidebarProvider | undefined;
 let currentFilePath = '';
 let currentCursorLine = -1;
 let initialized = false;
@@ -50,7 +53,7 @@ export function showContextBlameView(
     ensureInitialized(context);
     blameCache.set(cacheKey(ctx.filePath, ctx.line), { ctx, result });
     updateStatusBar(ctx.line, result);
-    triggerHoverAtLine(ctx.filePath, ctx.line);
+    pushToSidebar(ctx, result);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,7 +75,27 @@ function ensureInitialized(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(pinDecoration);
 
-    // HoverProvider — 캐시에 분석 결과가 있는 라인만 팝업 표시
+    // ── 사이드바 Provider 등록 ─────────────────────────────────────
+    sidebar = new ContextBlameSidebarProvider(context.extensionUri, {
+        onOpenSpec: () => vscode.commands.executeCommand('codewhy.requirementTrace'),
+        onOpenCommit: (commitHash, repoPath) =>
+            vscode.commands.executeCommand('codewhy.blame.openCommit', { commitHash, repoPath }),
+        onOpenHistory: () => vscode.commands.executeCommand('codewhy.timelineSummary'),
+        onTogglePin: (filePath, line) =>
+            vscode.commands.executeCommand('codewhy.blame.pin', { filePath, line }),
+        onAskAi: (question, ctx, result) => handleAskAi(question, ctx, result),
+        onCopy: (text) => {
+            vscode.env.clipboard.writeText(text);
+            vscode.window.setStatusBarMessage('CodeWhy: 카드 내용을 클립보드에 복사했어요.', 2000);
+        },
+    });
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(VIEW_ID, sidebar, {
+            webviewOptions: { retainContextWhenHidden: true },
+        }),
+    );
+
+    // ── HoverProvider — 캐시에 분석 결과가 있는 라인만 짧은 마크다운 팝업
     context.subscriptions.push(
         vscode.languages.registerHoverProvider({ scheme: 'file' }, {
             provideHover(document, position) {
@@ -87,7 +110,7 @@ function ensureInitialized(context: vscode.ExtensionContext) {
         }),
     );
 
-    // CodeLens — 커서가 있는 라인에만 🔍 렌즈 표시
+    // ── CodeLens — 커서가 있는 라인에만 🔍 렌즈 표시
     codeLensEmitter = new vscode.EventEmitter<void>();
     context.subscriptions.push(codeLensEmitter);
     context.subscriptions.push(
@@ -116,7 +139,7 @@ function ensureInitialized(context: vscode.ExtensionContext) {
         ),
     );
 
-    // 커서 이동 감지 → CodeLens 위치 갱신
+    // ── 커서 이동 감지 → CodeLens 위치 갱신 + 캐시 있으면 사이드바 자동 갱신
     context.subscriptions.push(
         vscode.window.onDidChangeTextEditorSelection(e => {
             const newLine = e.selections[0].active.line;
@@ -125,6 +148,10 @@ function ensureInitialized(context: vscode.ExtensionContext) {
                 currentCursorLine = newLine;
                 currentFilePath = newPath;
                 codeLensEmitter!.fire();
+
+                // 이미 분석된 라인이면 사이드바도 그 라인으로 따라간다
+                const entry = blameCache.get(cacheKey(newPath, newLine + 1));
+                if (entry) { pushToSidebar(entry.ctx, entry.result); }
             }
         }),
         vscode.window.onDidChangeActiveTextEditor(editor => {
@@ -132,7 +159,7 @@ function ensureInitialized(context: vscode.ExtensionContext) {
         }),
     );
 
-    // 보조 명령 등록
+    // ── 보조 명령 등록
     context.subscriptions.push(
         vscode.commands.registerCommand('codewhy.blame.analyzeAndShow', handleAnalyzeAndShow),
         vscode.commands.registerCommand('codewhy.blame.openCommit', openCommitInTerminal),
@@ -141,7 +168,7 @@ function ensureInitialized(context: vscode.ExtensionContext) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. CodeLens 클릭 → 분석 → 에디터 위 팝업
+// 2. CodeLens 클릭 → 분석 → 사이드바 push
 // ─────────────────────────────────────────────────────────────────────────────
 async function handleAnalyzeAndShow(args: { filePath: string; line: number; repoPath: string }) {
     const key = cacheKey(args.filePath, args.line);
@@ -164,27 +191,17 @@ async function handleAnalyzeAndShow(args: { filePath: string; line: number; repo
 
     if (!entry) { return; }
     updateStatusBar(args.line, entry.result);
-    triggerHoverAtLine(args.filePath, args.line);
+    pushToSidebar(entry.ctx, entry.result);
+}
+
+function pushToSidebar(ctx: EditorContext, r: BlameResult) {
+    if (!sidebar) { return; }
+    const isPinned = pinned.has(cacheKey(ctx.filePath, ctx.line));
+    sidebar.setBlame(ctx, r, isPinned);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. 에디터 위 호버 팝업 — 커서를 해당 라인으로 이동 후 강제 표시
-// ─────────────────────────────────────────────────────────────────────────────
-function triggerHoverAtLine(filePath: string, line: number) {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor || editor.document.uri.fsPath !== filePath) { return; }
-    const pos = new vscode.Position(line - 1, 0);
-    editor.selection = new vscode.Selection(pos, pos);
-    editor.revealRange(
-        new vscode.Range(pos, pos),
-        vscode.TextEditorRevealType.InCenterIfOutsideViewport,
-    );
-    // 캐시가 확실히 존재하므로 HoverProvider가 즉시 렌더링
-    vscode.commands.executeCommand('editor.action.showHover');
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 4. 호버 마크다운 빌더 — 디자인 시안 재현
+// 3. 호버 마크다운 — "이 라인 분석됨" 라이트 카드
 // ─────────────────────────────────────────────────────────────────────────────
 function buildHoverMarkdown(ctx: EditorContext, r: BlameResult): vscode.MarkdownString {
     const md = new vscode.MarkdownString(undefined, true);
@@ -192,57 +209,23 @@ function buildHoverMarkdown(ctx: EditorContext, r: BlameResult): vscode.Markdown
     md.supportThemeIcons = true;
     md.supportHtml = true;
 
-    const initial = r.author.slice(0, 1);
-    const shortHash = (r.commitHash || '').slice(0, 7);
-    const displayDate = formatDisplayDate(r.date);
-    const relative = formatRelativeKo(r.date);
-    // 따옴표로 묶인 텍스트 → 코드스팬으로 강조
-    const highlighted = r.explanation.replace(/"([^"]+)"/g, '`$1`');
+    const fileName = ctx.filePath.split(/[\\/]/).pop() ?? ctx.filePath;
+    const date = formatDisplayDate(r.date);
 
-    const commitArgs = encodeURIComponent(JSON.stringify([{ commitHash: r.commitHash, repoPath: ctx.repoPath }]));
-    const pinArgs = encodeURIComponent(JSON.stringify([{ filePath: ctx.filePath, line: ctx.line }]));
-    const isPinned = pinned.has(cacheKey(ctx.filePath, ctx.line));
-
-    // ── 헤더: 배지 + 라인 번호 ──────────────────────────────────────
     md.appendMarkdown(
-        `<span style="background:#2563EB;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700">` +
-        `● Context Blame</span>&nbsp;&nbsp;` +
-        `<span style="opacity:0.6;font-size:12px">라인 ${ctx.line}</span>\n\n`,
+        `<span style="color:#A78BFA;font-weight:700">$(sparkle) ${escapeMd(r.author)}</span>` +
+        `&nbsp;·&nbsp;<span style="opacity:0.65">${escapeMd(date)}</span>` +
+        `&nbsp;·&nbsp;<span style="opacity:0.55;font-size:11px">${escapeMd(fileName)}:L${ctx.line}</span>\n\n` +
+        `${escapeMd(r.explanation)}\n\n` +
+        `[$(arrow-right) CONTEXT BLAME 사이드바에서 자세히](command:codewhy.contextBlame.focus)`,
     );
-
-    md.appendMarkdown(`---\n\n`);
-
-    // ── 작성자 행 ────────────────────────────────────────────────────
-    md.appendMarkdown(
-        `\`${initial}\`&nbsp;&nbsp;` +
-        `**${escapeMd(r.author)}**` +
-        `&nbsp;&nbsp;<span style="opacity:0.65">${escapeMd(displayDate)}` +
-        (relative ? `&nbsp;·&nbsp;${escapeMd(relative)}` : '') +
-        `</span>` +
-        (shortHash ? `&nbsp;&nbsp;$(git-branch)&nbsp;\`${shortHash}\`` : '') +
-        `\n\n`,
-    );
-
-    // ── 설명 ─────────────────────────────────────────────────────────
-    md.appendMarkdown(`${highlighted}\n\n`);
-
-    md.appendMarkdown(`---\n\n`);
-
-    // ── 액션 버튼 ────────────────────────────────────────────────────
-    md.appendMarkdown(
-        `[$(file-text) 기획서 열기](command:codewhy.requirementTrace)` +
-        `&nbsp;&nbsp;[$(git-commit) 커밋 보기](command:codewhy.blame.openCommit?${commitArgs})` +
-        `&nbsp;&nbsp;[$(history) 히스토리](command:codewhy.timelineSummary)` +
-        `&nbsp;&nbsp;&nbsp;&nbsp;[$(${isPinned ? 'pinned' : 'pin'}) ${isPinned ? '고정 해제' : '고정'} \`⌘B\`](command:codewhy.blame.pin?${pinArgs})`,
-    );
-
     return md;
 }
 
 const escapeMd = (s: string) => s.replace(/[\\`*_{}[\]()#+\-.!|]/g, '\\$&');
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. 보조 명령
+// 4. 보조 명령
 // ─────────────────────────────────────────────────────────────────────────────
 function updateStatusBar(line: number, r: BlameResult) {
     if (!statusBar) { return; }
@@ -266,9 +249,9 @@ async function openCommitInTerminal(args: { commitHash: string; repoPath: string
 
 async function togglePin(args?: { filePath: string; line: number }) {
     const editor = vscode.window.activeTextEditor;
-    if (!editor) { return; }
-    const filePath = args?.filePath ?? editor.document.uri.fsPath;
-    const line = args?.line ?? editor.selection.active.line + 1;
+    if (!editor && !args) { return; }
+    const filePath = args?.filePath ?? editor!.document.uri.fsPath;
+    const line = args?.line ?? editor!.selection.active.line + 1;
     const key = cacheKey(filePath, line);
 
     if (!blameCache.has(key)) {
@@ -276,7 +259,8 @@ async function togglePin(args?: { filePath: string; line: number }) {
         return;
     }
     pinned.has(key) ? pinned.delete(key) : pinned.add(key);
-    refreshPinnedDecorations(editor);
+    if (editor) { refreshPinnedDecorations(editor); }
+    sidebar?.refreshPinned(pinned.has(key));
 }
 
 function refreshPinnedDecorations(editor: vscode.TextEditor) {
@@ -302,30 +286,23 @@ function refreshPinnedDecorations(editor: vscode.TextEditor) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 5. AI 후속 질문 — 사이드바 인풋에서 Enter 친 경우
+// ─────────────────────────────────────────────────────────────────────────────
+async function handleAskAi(question: string, ctx: EditorContext, result: BlameResult) {
+    // TODO: 백엔드에 /api/blame/ask 엔드포인트가 생기면 스트리밍 응답을 사이드바에 흘리도록 연결.
+    // 임시로 알림창에 질문을 띄워 동작만 확인.
+    vscode.window.showInformationMessage(
+        `CodeWhy: "${question}" — 라인 ${ctx.line} (${result.author}) 에 대한 후속 질문은 곧 지원됩니다.`,
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 6. 날짜 유틸
 // ─────────────────────────────────────────────────────────────────────────────
 function formatDisplayDate(s: string): string {
     const d = parseDateLoose(s);
     if (!d) { return s; }
     return d.toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric' });
-}
-
-function formatRelativeKo(s: string): string {
-    const d = parseDateLoose(s);
-    if (!d) { return ''; }
-    const sec = Math.floor((Date.now() - d.getTime()) / 1000);
-    if (sec < 60) { return '방금'; }
-    const min = Math.floor(sec / 60);
-    if (min < 60) { return `${min}분 전`; }
-    const hour = Math.floor(min / 60);
-    if (hour < 24) { return `${hour}시간 전`; }
-    const day = Math.floor(hour / 24);
-    if (day < 7) { return `${day}일 전`; }
-    const week = Math.floor(day / 7);
-    if (week < 5) { return `${week}주 전`; }
-    const month = Math.floor(day / 30);
-    if (month < 12) { return `${month}개월 전`; }
-    return `${Math.floor(day / 365)}년 전`;
 }
 
 function parseDateLoose(s: string): Date | null {
