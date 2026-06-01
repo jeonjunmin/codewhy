@@ -79,6 +79,7 @@ def analyze_blame(repo_path: str, file_path: str, line: int) -> dict:
         "changeStats": {"added": info.added, "removed": info.removed},
         "prInfo": ({"url": pr.url, "lines": pr.added + pr.removed} if pr else None),
         "relatedChanges": related,
+        "aiSuggestion": _suggest_improvement(info, passages),
     }
 
 
@@ -235,6 +236,44 @@ def _explain_blame(info: git.BlameInfo, passages: list[Passage]) -> str:
     except Exception:
         # Bedrock 미설정/호출 실패 시 git 커밋 메시지로 폴백 (개발/테스트용)
         return f"[Bedrock 미연동] 커밋 메시지: {info.message or '(메시지 없음)'}"
+
+
+def _suggest_improvement(info: git.BlameInfo, passages: list[Passage]) -> str | None:
+    """이 변경 맥락에서 '앞으로 고려하면 좋을 점' 한 문장을 Bedrock 으로 추론한다.
+
+    사이드바 'AI 추론' 섹션용. 단순 코드 리뷰 지적이 아니라, 기획서/커밋 맥락 위에서
+    "이 부분은 이후 ~를 함께 보면 좋겠다" 류의 한 문장을 한국어로 뽑는다.
+
+    설명문(_explain_blame)과 달리, Bedrock 호출이 불가하거나 마땅한 제안이 없으면
+    None 을 반환한다 — 사이드바는 값이 없으면 'AI 추론' 섹션을 숨기므로,
+    유령 텍스트("[Bedrock 미연동]…")를 넣지 않는다.
+    """
+    spec_block = _format_passages(passages)
+
+    prompt = f"""아래는 어떤 코드 한 줄의 변경 맥락입니다. 이 맥락을 바탕으로,
+앞으로 이 코드를 다룰 때 함께 고려하면 좋을 점을 한국어로 딱 한 문장 제안하세요.
+- 단순한 코드 스타일 지적이 아니라, 기획·도메인 맥락에서 의미 있는 한 가지를 짚으세요.
+- 맥락이 빈약해 의미 있는 제안이 어렵다면, 다른 말 없이 정확히 "NONE" 만 출력하세요.
+
+[작성자] {info.author}
+[날짜] {info.date}
+[커밋 메시지]
+{info.message}
+
+[변경 내용]
+{info.diff}
+
+[연관 기획서 단락]
+{spec_block}"""
+
+    try:
+        suggestion = call_bedrock(prompt, system=_SYSTEM_PROMPT, max_tokens=200).strip()
+    except Exception:
+        return None  # Bedrock 미설정/호출 실패 — 섹션을 숨긴다
+
+    if not suggestion or suggestion.upper().strip(' ."') == "NONE":
+        return None
+    return suggestion
 
 
 def _format_passages(passages: list[Passage]) -> str:
