@@ -30,7 +30,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     constructor(
         private readonly extensionUri: vscode.Uri,
         private readonly handlers: {
-            onOpenSpec: () => void;
+            onOpenSpec: (sourceRef: string | null) => void;
             onOpenCommit: (commitHash: string, repoPath: string) => void;
             onOpenHistory: () => void;
             onTogglePin: (filePath: string, line: number) => void;
@@ -73,13 +73,18 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         this.view.webview.postMessage({ type: 'pinned', pinned });
     }
 
+    /** "AI에게 더 묻기" 답변을 질문 버블과 함께 표시. answer='…' 면 로딩 상태. */
+    showAnswer(question: string, answer: string) {
+        this.view?.webview.postMessage({ type: 'answer', payload: { question, answer } });
+    }
+
     // ─── 메시지 라우팅 ────────────────────────────────────────────────────
     private handleMessage(msg: { type: string; payload?: any }) {
         if (!this.last) { return; }
         const { ctx, result } = this.last;
         switch (msg.type) {
             case 'openSpec':
-                this.handlers.onOpenSpec();
+                this.handlers.onOpenSpec(result.sourceRef ?? result.specRef ?? null);
                 break;
             case 'openCommit':
                 this.handlers.onOpenCommit(result.commitHash, ctx.repoPath);
@@ -314,6 +319,28 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
     .ask__input::placeholder { color: var(--fg-mute); font-style: italic; }
 
+    /* ── AI 질문/답변 스레드 ─────────────────────────────────────── */
+    .ask-thread { display: flex; flex-direction: column; gap: 8px; }
+    .qa { display: flex; flex-direction: column; gap: 4px; }
+    .qa__q {
+        align-self: flex-end; max-width: 90%;
+        background: var(--line); color: var(--fg);
+        padding: 6px 10px; border-radius: 9px 9px 2px 9px;
+        font-size: 12px;
+    }
+    .qa__a {
+        align-self: flex-start; max-width: 95%;
+        background: var(--callout-bg); color: var(--fg);
+        border: 1px solid var(--line-soft);
+        padding: 8px 11px; border-radius: 9px 9px 9px 2px;
+        font-size: 12.5px; line-height: 1.55;
+    }
+    .qa__a code {
+        background: var(--code-bg); color: var(--code-fg);
+        padding: 1px 5px; border-radius: 4px; font-size: 11.5px;
+    }
+    .qa__a.loading { color: var(--fg-mute); font-style: italic; }
+
     /* ── 푸터: CTA + 보조 액션 ───────────────────────────────────── */
     .footer { display: flex; gap: 6px; align-items: stretch; }
     .cta {
@@ -408,6 +435,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             <input class="ask__input" id="ask-input" type="text" placeholder='"왜 4%가 아닌 3%일까?"' />
         </div>
 
+        <div id="ask-thread" class="ask-thread hidden"></div>
+
         <div class="footer">
             <button class="cta" data-action="openSpec">
                 <span id="ico-cta"></span><span id="cta-label">기획서 열기</span>
@@ -449,8 +478,38 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             document.getElementById('content').classList.add('hidden');
         } else if (msg.type === 'pinned') {
             setPin(msg.pinned);
+        } else if (msg.type === 'answer') {
+            renderAnswer(msg.payload);
         }
     });
+
+    let pendingAnswerEl = null;
+    function renderAnswer(p) {
+        const thread = document.getElementById('ask-thread');
+        thread.classList.remove('hidden');
+        const loading = p.answer === '…';
+        if (loading || !pendingAnswerEl) {
+            // 새 질문 → 질문/답변 버블 한 쌍 추가
+            const qa = document.createElement('div');
+            qa.className = 'qa';
+            const q = document.createElement('div');
+            q.className = 'qa__q';
+            q.textContent = p.question;
+            const a = document.createElement('div');
+            a.className = 'qa__a' + (loading ? ' loading' : '');
+            if (loading) { a.textContent = '답변 작성 중…'; } else { a.innerHTML = decorate(p.answer); }
+            qa.appendChild(q);
+            qa.appendChild(a);
+            thread.appendChild(qa);
+            pendingAnswerEl = loading ? a : null;
+        } else {
+            // 직전 로딩 버블을 실제 답변으로 교체
+            pendingAnswerEl.classList.remove('loading');
+            pendingAnswerEl.innerHTML = decorate(p.answer);
+            pendingAnswerEl = null;
+        }
+        thread.lastElementChild.scrollIntoView({ block: 'nearest' });
+    }
 
     function setPin(pinned) {
         const btn = document.getElementById('btn-pin');
@@ -508,6 +567,12 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
 
         // cta label
         document.getElementById('cta-label').textContent = (p.specRef || '기획서') + ' 열기';
+
+        // 라인이 바뀌면 이전 Q&A 스레드는 초기화
+        const thread = document.getElementById('ask-thread');
+        thread.innerHTML = '';
+        thread.classList.add('hidden');
+        pendingAnswerEl = null;
 
         setPin(!!p.pinned);
     }
@@ -594,15 +659,36 @@ function plainTextOf(ctx: EditorContext, r: BlameResult): string {
     ].filter(Boolean).join('\n');
 }
 
+/**
+ * 한글 조사 선택 — 단어의 마지막 글자에 받침(종성)이 있으면 withFinal, 없으면 withoutFinal.
+ *
+ * 한글 음절은 0xAC00 부터 28칸 간격으로 종성이 순환한다.
+ * (code - 0xAC00) % 28 === 0 이면 종성 없음(받침 없음).
+ * 한글이 아닌 문자(영문 이름·숫자 등)로 끝나면 받침 없음으로 처리한다.
+ *
+ * 예: josa('홍길동', '이', '가') → '이' / josa('철수', '이', '가') → '가'
+ */
+function josa(word: string, withFinal: string, withoutFinal: string): string {
+    const ch = (word ?? '').trim().slice(-1);
+    const code = ch.charCodeAt(0);
+    const isHangul = code >= 0xac00 && code <= 0xd7a3;
+    if (!isHangul) { return withoutFinal; }
+    return (code - 0xac00) % 28 !== 0 ? withFinal : withoutFinal;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 콜아웃 본문 — "홍길동님이 3월 15일에 \"…\" 기획 내용을 반영하기 위해 추가했습니다."
 //
-// TODO(개발자 A) — 시안 톤으로 한 문장 다듬어주세요. 5~10줄 분량.
-//   1) r.explanation 안의 "..." 인용은 그대로 살려서 사이드바가 <code> 로 강조하게.
-//   2) "3월 15일" 처럼 연도 생략한 한국식 날짜로.
-//   3) 받침 유무로 "님이/가/이", "을/를" 분기.
-//   4) 인용이 없을 땐 explanation 본문이 자연스럽게 한 문장으로 흐르도록.
-//   임시 폴백은 시안 톤이 안 살아납니다.
+// 이미 갖춰진 것(중복 작업 불필요):
+//   · 작성자 조사 "님이" 고정 — "님"(받침 ㅁ) 뒤는 항상 "이" 라 분기 불필요.
+//   · 인용 "..." → <code> 강조 : 웹뷰 decorate() 가 처리하므로 따옴표를 그대로 통과시키면 됨.
+//   · 연도 생략 한국식 날짜      : formatDisplayDate() 가 "3월 15일" 형태로 반환.
+//   · josa() 헬퍼는 목적어 조사("을/를" 등) 분기에 필요하면 쓸 수 있게 남겨둠.
+//
+// TODO(개발자 A) — 아래 본문 한 문장을 시안 톤으로 다듬어주세요. 남은 확인 포인트 2가지:
+//   (a) "…에 {explanation}" 연결 톤 — explanation 은 이미 완결된 한 문장이라
+//       "3월 15일에 " 뒤에 그대로 붙으면 어색할 수 있음. 연결 표현/어미를 다듬을 것.
+//   (b) explanation 에 인용 "..." 이 없는 경우에도 한 문장으로 매끄럽게 흐르는지 확인.
 // ─────────────────────────────────────────────────────────────────────────────
 export function formatNarrative(r: BlameResult): string {
     return `${r.author}님이 ${formatDisplayDate(r.date)}에 ${r.explanation}`;

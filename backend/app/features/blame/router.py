@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.db import dynamodb
 from app.features.blame import service
-from app.features.blame.schemas import BlameRequest, BlameResponse
+from app.features.blame.schemas import AskRequest, AskResponse, BlameRequest, BlameResponse
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -40,3 +40,14 @@ def context_blame(req: BlameRequest):
         pass  # 캐시 저장 실패는 응답에 영향 없음
 
     return response
+
+
+@router.post("/ask", response_model=AskResponse)
+def ask_blame(req: AskRequest):
+    """AI에게 더 묻기 — 현재 라인 블레임 맥락 위에서 후속 질문에 답한다."""
+    try:
+        answer = service.ask_followup(req.repoPath, req.filePath, req.line, req.question)
+    except Exception as e:
+        logger.exception("blame ask 실패 — repo=%s file=%s line=%s", req.repoPath, req.filePath, req.line)
+        raise HTTPException(status_code=500, detail=f"blame ask 실패: {e}")
+    return AskResponse(answer=answer)
