@@ -1,61 +1,62 @@
 """설정 관리 — pydantic-settings 기반.
 
-pydantic-settings 가 앱 시작 시 backend/.env 파일을 자동으로 읽어
-os.environ 에 주입한다. 이후 boto3 는 별도 코드 없이 아래 표준 환경변수를
-자동으로 인식한다:
+pydantic-settings 가 backend/.env 를 읽어 os.environ 에 주입한다.
+boto3 는 아래 표준 환경변수를 자동 인식한다:
 
-    AWS_ACCESS_KEY_ID      → boto3 자격증명
-    AWS_SECRET_ACCESS_KEY  → boto3 자격증명
-    AWS_DEFAULT_REGION     → boto3 리전 (boto3 공식 표준 이름)
+    AWS_ACCESS_KEY_ID      → 자격증명
+    AWS_SECRET_ACCESS_KEY  → 자격증명
+    AWS_SESSION_TOKEN      → 임시 자격증명(STS/SSO) 사용 시 필수
+    AWS_DEFAULT_REGION     → 리전
 
-EC2 배포 시 IAM Instance Profile 을 사용하면 세 변수 모두 비워도 된다.
-boto3 자격증명 체인: 환경변수 → ~/.aws/credentials → EC2 Instance Profile
+boto3 자격증명 탐색 순서: 환경변수 → ~/.aws/credentials → EC2 Instance Profile
 """
 
 from functools import lru_cache
 
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# boto3 는 os.environ 을 직접 읽으므로, pydantic-settings 가 읽기 전에
+# load_dotenv() 로 .env → os.environ 에 먼저 주입해야 한다.
+load_dotenv(override=False)
 
 
 class Settings(BaseSettings):
     # ── AWS 공통 ──────────────────────────────────────────────────────────────
-    # 로컬: .env 에 실제 키 입력 / EC2: 비워두면 Instance Profile 자동 사용
     AWS_ACCESS_KEY_ID: str = ""
     AWS_SECRET_ACCESS_KEY: str = ""
-    AWS_DEFAULT_REGION: str = "ap-northeast-2"   # boto3 표준 환경변수명
+    AWS_SESSION_TOKEN: str = ""          # STS/SSO 임시 자격증명 세션 토큰
+    AWS_DEFAULT_REGION: str = "ap-northeast-2"
 
     # ── AWS Bedrock ───────────────────────────────────────────────────────────
     BEDROCK_MODEL_ID: str = "anthropic.claude-3-5-sonnet-20240620-v1:0"
 
-    # ── AWS RDS (PostgreSQL) ──────────────────────────────────────────────────
-    RDS_URL: str = "postgresql+asyncpg://postgres:password@localhost:5432/codewhy"
-    RDS_URL_SYNC: str = "postgresql+psycopg2://postgres:password@localhost:5432/codewhy"
-
     # ── AWS DynamoDB ──────────────────────────────────────────────────────────
+    DYNAMODB_COMMIT_TABLE: str = "codewhy_commit_logs"
+    DYNAMODB_URL: str = ""               # 로컬 Docker 엔드포인트 (운영 시 빈 값)
+
     DYNAMO_BLAME_TABLE: str = "codewhy_blame_cache"
     DYNAMO_TIMELINE_TABLE: str = "codewhy_timeline_cache"
 
-    # ── Anthropic (blame/traceability 전용) ───────────────────────────────────
+    # ── Anthropic ─────────────────────────────────────────────────────────────
     ANTHROPIC_API_KEY: str = ""
 
     # ── 기타 ──────────────────────────────────────────────────────────────────
-    AUTO_CREATE_TABLES: bool = False
     DOCUMENT_PATHS: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        extra="ignore",   # .env 에 알 수 없는 키가 있어도 오류 없이 무시
+        extra="ignore",
     )
 
 
 @lru_cache
 def get_settings() -> Settings:
-    """앱 전역 싱글턴 설정 인스턴스. 최초 호출 시 .env 를 파싱한다."""
     return Settings()
 
 
-# ── 하위 호환 헬퍼 (기존 코드가 get_*() 형태로 import 하므로 유지) ─────────────
+# ── 하위 호환 헬퍼 ────────────────────────────────────────────────────────────
 
 def get_anthropic_api_key() -> str:
     return get_settings().ANTHROPIC_API_KEY
@@ -75,12 +76,3 @@ def get_dynamo_timeline_table() -> str:
 
 def get_bedrock_model_id() -> str:
     return get_settings().BEDROCK_MODEL_ID
-
-def get_rds_url() -> str:
-    return get_settings().RDS_URL
-
-def get_rds_url_sync() -> str:
-    return get_settings().RDS_URL_SYNC
-
-def auto_create_tables() -> bool:
-    return get_settings().AUTO_CREATE_TABLES
