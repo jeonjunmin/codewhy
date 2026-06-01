@@ -19,3 +19,8 @@ class BlameResponse(BaseModel):
     commitHash: str
     author: str
     date: str
+    # "이름표 대신 사유서" 카드의 칩/AI 추론용 — 백엔드 점진 도입을 위해 옵셔널
+    ticket: str | None = None        # 예: "PAY-2041"
+    specRef: str | None = None       # 예: "기획서 §4.2"
+    team: str | None = None          # 예: "결제팀"
+    aiSuggestion: str | None = None  # AI 개선 제안 한 문장
