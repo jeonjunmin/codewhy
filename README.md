@@ -152,3 +152,17 @@ codewhy/
 ## 라이선스
 
 MIT License
+
+
+## AWS 접속 정보
+1. AWS로그인 후 codewhy 인스턴스에 접근 로컬 IP 방화벽 등록 (로컬 IP 확인 방법 : 네이버에 "내 IP"검색으로 나오는 공인 IP)
+    >> AWS 접속 -> EC2 -> 네트워크 보안 -> 보안그룹 -> launch-wizard-28 선택후 인바운드 규칙 추가 [22번포트(OS접근) / 5432포트(DBMS접근) ]
+2. CMD 창 오픈 후 "ssh -i ./codewhykey.pem ec2-user@3.37.125.200" 접속
+    >> codewhykey.pem 파일은 프로젝트 최상단 존재
+
+## PostgreSQL 접속 정보
+Host: 3.37.125.200
+Port: 5432
+Database: mydb
+Username: postgres
+Password: postgres
