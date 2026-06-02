@@ -8,9 +8,18 @@
 from pydantic import BaseModel
 
 
+class CommitInput(BaseModel):
+    """확장이 로컬 git log 에서 수집해 전송하는 커밋 한 건."""
+    hash: str
+    author: str
+    date: str      # YYYY-MM-DD
+    subject: str
+
+
 class TimelineRequest(BaseModel):
     filePath: str
     repoPath: str
+    commits: list[CommitInput]   # 확장이 로컬 git log 를 수집해서 보냄
 
 
 class Milestone(BaseModel):

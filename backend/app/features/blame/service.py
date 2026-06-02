@@ -3,20 +3,24 @@
 git 으로 라인 단위 마지막 커밋(diff + 커밋 메시지)을 가져오고,
 커밋 메시지 키워드로 Bedrock Knowledge Base 에서 연관 기획서 단락을 조회한 뒤,
 코드 + 커밋 메시지 + 기획서 단락을 Bedrock 에 한꺼번에 넣어 "진짜 변경 이유"를 추론한다.
+여기에 호스팅(PR) 맥락과 후속 커밋을 더해 사이드바 디자인의 모든 필드를 채운다.
 
 RAG 흐름:
-  1. git.get_blame_info  — diff + 커밋 메시지 추출
+  1. git.get_blame_info  — diff + 커밋 메시지 + 변경 라인 수 추출
   2. extract_keywords    — 커밋 메시지에서 KB 조회용 키워드 추출
   3. knowledge_base      — 키워드로 기획서 단락 retrieve
   4. _explain_blame      — 코드 + 커밋 + 기획서 단락을 Bedrock Converse 로 정렬
+  5. vcs / followups     — PR 단위 변경 + 같은 티켓 후속 커밋으로 '함께 일어난 일' 조립
 
 👤 담당: 개발자 A
 """
 
+import os
 import re
 
-from app.core import git, knowledge_base
+from app.core import git, knowledge_base, vcs
 from app.core.ai_client import call_bedrock
+from app.core.config import get_team_map
 from app.core.knowledge_base import Passage
 
 _SYSTEM_PROMPT = (
@@ -24,6 +28,12 @@ _SYSTEM_PROMPT = (
     "git 커밋 메시지의 기술적 표현 뒤에 숨은, 기획서상의 진짜 이유를 추론해 "
     "비개발자도 이해할 수 있는 한국어로 설명하세요."
 )
+
+# 이슈 트래커 키 패턴 — 예: PAY-2041, KYC-12
+_TICKET_RE = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
+
+# 후속 변경을 'security' 로 분류할 도메인 신호어
+_SECURITY_TERMS = ("KYC", "감사", "audit", "보안", "security", "권한", "auth")
 
 # KB 검색 정확도를 위해 우대할 결제/정산 도메인 용어 (검색 쿼리 맨 앞에 배치)
 _DOMAIN_TERMS = {
@@ -48,14 +58,61 @@ def analyze_blame(repo_path: str, file_path: str, line: int) -> dict:
     explanation = _explain_blame(info, passages)
     source_ref = _format_source_ref(passages)
 
+    branch = git.get_current_branch(repo_path)
+    ticket = extract_ticket(info.message, branch)
+    team = get_team_map().get(info.author)
+
+    pr = _safe_find_pr(repo_path, info.commit_hash)
+    followups = git.find_followup_commits(repo_path, ticket, exclude_hash=info.commit_hash)
+
+    related = _build_related_changes(passages, pr, followups, file_path)
+
     return {
         "explanation": explanation,
         "commitHash": info.commit_hash,
         "author": info.author,
         "date": info.date,
+        "ticket": ticket,
+        "team": team,
         "sourceRef": source_ref,
         "specRef": source_ref,
+        "changeStats": {"added": info.added, "removed": info.removed},
+        "prInfo": ({"url": pr.url, "lines": pr.added + pr.removed} if pr else None),
+        "relatedChanges": related,
+        "aiSuggestion": _suggest_improvement(info, passages),
     }
+
+
+def ask_followup(repo_path: str, file_path: str, line: int, question: str) -> str:
+    """현재 라인 블레임 맥락 위에서 들어온 후속 질문에 답한다.
+
+    같은 코드/커밋/기획서 단락을 컨텍스트로 다시 모아, 사용자의 질문에 한국어로 답한다.
+    """
+    info = git.get_blame_info(repo_path, file_path, line)
+    passages = knowledge_base.retrieve_passages(" ".join(extract_keywords(info.message)))
+    spec_block = _format_passages(passages)
+
+    prompt = f"""아래는 어떤 코드 한 줄의 변경 맥락입니다. 이 맥락에 근거해 사용자의 질문에 한국어로 1~2문장으로 답하세요.
+근거가 기획서 단락에 있으면 핵심 표현을 큰따옴표("…")로 인용하고, 맥락에 없으면 모른다고 솔직히 답하세요.
+
+[작성자] {info.author}
+[날짜] {info.date}
+[커밋 메시지]
+{info.message}
+
+[변경 내용]
+{info.diff}
+
+[연관 기획서 단락]
+{spec_block}
+
+[사용자 질문]
+{question}"""
+
+    try:
+        return call_bedrock(prompt, system=_SYSTEM_PROMPT, max_tokens=300).strip()
+    except Exception:
+        return "[Bedrock 미연동] 후속 질문에 답하려면 AWS Bedrock 자격증명이 필요합니다."
 
 
 def extract_keywords(commit_message: str) -> list[str]:
@@ -82,6 +139,74 @@ def extract_keywords(commit_message: str) -> list[str]:
         (domain if tok in _DOMAIN_TERMS else rest).append(tok)
 
     return domain + rest
+
+
+def extract_ticket(commit_message: str, branch: str = "") -> str | None:
+    """커밋 메시지 또는 브랜치명에서 이슈 키(예: PAY-2041)를 추출한다.
+
+    커밋 메시지를 우선 보고, 없으면 브랜치명(feat/PAY-2041-... 등)에서 찾는다.
+    """
+    for text in (commit_message, branch):
+        m = _TICKET_RE.search(text or "")
+        if m:
+            return m.group(1)
+    return None
+
+
+def _safe_find_pr(repo_path: str, commit_hash: str):
+    """PR 조회 — 어떤 이유로든 실패하면 None (로컬 결과는 그대로 유지)."""
+    try:
+        return vcs.find_pr_for_commit(repo_path, commit_hash)
+    except Exception:
+        return None
+
+
+def _build_related_changes(passages, pr, followups, current_file: str) -> list[dict]:
+    """'이 변경과 함께 일어난 일' 목록을 조립한다.
+
+    구성: ① 연관 기획서 단락(doc) ② 같은 PR 의 다른 파일(branch/commit)
+          ③ 같은 티켓 후속 커밋(security/commit)
+    """
+    related: list[dict] = []
+
+    # ① 기획서 단락
+    if passages:
+        top = passages[0]
+        section = f" §{top.section}" if top.section else ""
+        related.append({
+            "kind": "doc",
+            "title": f"{top.source}{section} 단락",
+            "meta": "연관 기획서",
+        })
+
+    # ② 같은 PR 의 다른 파일들 (현재 파일 제외)
+    if pr:
+        current_name = os.path.basename(current_file)
+        for f in pr.files:
+            if os.path.basename(f.path) == current_name:
+                continue
+            is_new = f.status == "added"
+            related.append({
+                "kind": "branch" if is_new else "commit",
+                "title": f"{os.path.basename(f.path)} {'신규 생성' if is_new else '변경'}",
+                "meta": f"+{f.added} 라인 · 같은 PR",
+            })
+            if len(related) >= 5:  # 사이드바 과밀 방지
+                break
+
+    # ③ 같은 티켓을 참조한 후속 커밋
+    for c in followups:
+        subject = c.get("subject", "")
+        is_security = any(term.lower() in subject.lower() for term in _SECURITY_TERMS)
+        related.append({
+            "kind": "security" if is_security else "commit",
+            "title": subject,
+            "meta": f"{c.get('date', '')} · {c.get('author', '')}".strip(" ·"),
+        })
+        if len(related) >= 6:
+            break
+
+    return related
 
 
 def _explain_blame(info: git.BlameInfo, passages: list[Passage]) -> str:
@@ -113,6 +238,44 @@ def _explain_blame(info: git.BlameInfo, passages: list[Passage]) -> str:
         return f"[Bedrock 미연동] 커밋 메시지: {info.message or '(메시지 없음)'}"
 
 
+def _suggest_improvement(info: git.BlameInfo, passages: list[Passage]) -> str | None:
+    """이 변경 맥락에서 '앞으로 고려하면 좋을 점' 한 문장을 Bedrock 으로 추론한다.
+
+    사이드바 'AI 추론' 섹션용. 단순 코드 리뷰 지적이 아니라, 기획서/커밋 맥락 위에서
+    "이 부분은 이후 ~를 함께 보면 좋겠다" 류의 한 문장을 한국어로 뽑는다.
+
+    설명문(_explain_blame)과 달리, Bedrock 호출이 불가하거나 마땅한 제안이 없으면
+    None 을 반환한다 — 사이드바는 값이 없으면 'AI 추론' 섹션을 숨기므로,
+    유령 텍스트("[Bedrock 미연동]…")를 넣지 않는다.
+    """
+    spec_block = _format_passages(passages)
+
+    prompt = f"""아래는 어떤 코드 한 줄의 변경 맥락입니다. 이 맥락을 바탕으로,
+앞으로 이 코드를 다룰 때 함께 고려하면 좋을 점을 한국어로 딱 한 문장 제안하세요.
+- 단순한 코드 스타일 지적이 아니라, 기획·도메인 맥락에서 의미 있는 한 가지를 짚으세요.
+- 맥락이 빈약해 의미 있는 제안이 어렵다면, 다른 말 없이 정확히 "NONE" 만 출력하세요.
+
+[작성자] {info.author}
+[날짜] {info.date}
+[커밋 메시지]
+{info.message}
+
+[변경 내용]
+{info.diff}
+
+[연관 기획서 단락]
+{spec_block}"""
+
+    try:
+        suggestion = call_bedrock(prompt, system=_SYSTEM_PROMPT, max_tokens=200).strip()
+    except Exception:
+        return None  # Bedrock 미설정/호출 실패 — 섹션을 숨긴다
+
+    if not suggestion or suggestion.upper().strip(' ."') == "NONE":
+        return None
+    return suggestion
+
+
 def _format_passages(passages: list[Passage]) -> str:
     if not passages:
         return "(연관 기획서 단락 없음 — 커밋 메시지와 변경 내용만으로 추론하세요.)"
@@ -120,5 +283,5 @@ def _format_passages(passages: list[Passage]) -> str:
 
 
 def _format_source_ref(passages: list[Passage]) -> str | None:
-    """사이드바 '출처' 칸에 표시할, 가장 연관도 높은 기획서 출처."""
-    return passages[0].source if passages else None
+    """사이드바 '출처' 칸에 표시할, 가장 연관도 높은 기획서 출처(§섹션 포함)."""
+    return passages[0].source_ref() if passages else None

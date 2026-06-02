@@ -1,22 +1,70 @@
-"""환경변수 / 설정값 로더.
+"""설정 관리 — pydantic-settings 기반.
 
-`.env` 파일은 backend/.env.example 을 참고해 backend/.env 로 복사한 뒤 작성한다.
-세 기능에서 모두 import 해 쓰므로 가능한 한 단순하게 유지한다.
+pydantic-settings 가 backend/.env 를 읽어 os.environ 에 주입한다.
+boto3 는 아래 표준 환경변수를 자동 인식한다:
+
+    AWS_ACCESS_KEY_ID      → 자격증명
+    AWS_SECRET_ACCESS_KEY  → 자격증명
+    AWS_SESSION_TOKEN      → 임시 자격증명(STS/SSO) 사용 시 필수
+    AWS_DEFAULT_REGION     → 리전
+
+boto3 자격증명 탐색 순서: 환경변수 → ~/.aws/credentials → EC2 Instance Profile
 """
 
+import json
 import os
+from functools import lru_cache
+
 from dotenv import load_dotenv
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-load_dotenv()
+# boto3 는 os.environ 을 직접 읽으므로, pydantic-settings 가 읽기 전에
+# load_dotenv() 로 .env → os.environ 에 먼저 주입해야 한다.
+load_dotenv(override=False)
 
+
+class Settings(BaseSettings):
+    # ── AWS 공통 ──────────────────────────────────────────────────────────────
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
+    AWS_SESSION_TOKEN: str = ""          # STS/SSO 임시 자격증명 세션 토큰
+    AWS_DEFAULT_REGION: str = "ap-northeast-2"
+
+    # ── AWS Bedrock ───────────────────────────────────────────────────────────
+    BEDROCK_MODEL_ID: str = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+
+    # ── AWS DynamoDB ──────────────────────────────────────────────────────────
+    DYNAMODB_COMMIT_TABLE: str = "codewhy_commit_logs"
+    DYNAMODB_URL: str = ""               # 로컬 Docker 엔드포인트 (운영 시 빈 값)
+
+    DYNAMO_BLAME_TABLE: str = "codewhy_blame_cache"
+    DYNAMO_TIMELINE_TABLE: str = "codewhy_timeline_cache"
+
+    # ── Anthropic ─────────────────────────────────────────────────────────────
+    ANTHROPIC_API_KEY: str = ""
+
+    # ── 기타 ──────────────────────────────────────────────────────────────────
+    DOCUMENT_PATHS: str = ""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+# ── 하위 호환 헬퍼 ────────────────────────────────────────────────────────────
 
 def get_anthropic_api_key() -> str:
-    return os.getenv("ANTHROPIC_API_KEY", "")
-
+    return get_settings().ANTHROPIC_API_KEY
 
 def get_aws_region() -> str:
-    return os.getenv("AWS_REGION", "ap-northeast-2")
-
+    return get_settings().AWS_DEFAULT_REGION
 
 def get_aws_credentials() -> dict:
     """MFA STS 임시 자격증명. 미설정 시 빈 dict → boto3가 ~/.aws/credentials 폴백."""
@@ -51,13 +99,43 @@ def get_bedrock_kb_max_results() -> int:
 
 
 def get_document_paths() -> list[str]:
-    raw = os.getenv("DOCUMENT_PATHS", "")
+    raw = get_settings().DOCUMENT_PATHS
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 
-def get_dynamo_blame_table() -> str:
-    return os.getenv("DYNAMO_BLAME_TABLE", "codewhy_blame_cache")
+# ─── Context Blame: 팀 매핑 / VCS 연동 ──────────────────────────────
+def get_team_map() -> dict[str, str]:
+    """작성자(이름 또는 이메일) → 팀명 매핑.
 
+    CODEWHY_TEAM_MAP 가 가리키는 JSON 파일을 읽는다. 미설정·파일 없음·파싱 실패 시
+    빈 dict 를 돌려주어(=team 칸 생략) 기능이 깨지지 않게 한다.
+    """
+    path = os.getenv("CODEWHY_TEAM_MAP", "")
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def get_github_token() -> str:
+    """GitHub PR 조회용 토큰. 미설정 시 PR 연동 생략."""
+    return os.getenv("GITHUB_TOKEN", "")
+
+
+def get_gitlab_token() -> str:
+    """GitLab MR 조회용 토큰. 미설정 시 MR 연동 생략."""
+    return os.getenv("GITLAB_TOKEN", "")
+
+
+def get_dynamo_blame_table() -> str:
+    return get_settings().DYNAMO_BLAME_TABLE
 
 def get_dynamo_timeline_table() -> str:
-    return os.getenv("DYNAMO_TIMELINE_TABLE", "codewhy_timeline_cache")
+    return get_settings().DYNAMO_TIMELINE_TABLE
+
+def get_bedrock_model_id() -> str:
+    return get_settings().BEDROCK_MODEL_ID

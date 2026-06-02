@@ -44,10 +44,30 @@ export interface RelatedChange {
     meta: string;    // 예: "PAY-2041 · 김기획" / "+78 라인 · 같은 PR"
 }
 
+/** "AI에게 더 묻기" — 현재 라인 블레임 맥락 위에서의 후속 질문. */
+export interface AskRequest {
+    filePath: string;
+    line: number;
+    repoPath: string;
+    question: string;
+}
+
+export interface AskResult {
+    answer: string;
+}
+
 // --- Timeline Summary (담당: 개발자 B) ------------------------------
+export interface CommitInput {
+    hash: string;
+    author: string;
+    date: string;    // YYYY-MM-DD
+    subject: string;
+}
+
 export interface TimelineRequest {
     filePath: string;
     repoPath: string;
+    commits: CommitInput[];   // 확장이 로컬 git log 를 수집해서 전송
 }
 
 export interface TimelineMilestone {

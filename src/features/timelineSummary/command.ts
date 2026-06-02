@@ -1,14 +1,14 @@
+import { execSync } from 'child_process';
 import * as vscode from 'vscode';
 import { getEditorContext } from '../../shared/editor';
+import { CommitInput } from '../../shared/types';
 import { fetchTimelineSummary } from './api';
 import { showTimelineSummaryView } from './view';
 
 /**
  * `codewhy.timelineSummary` 명령 핸들러.
  *
- * 1. 현재 파일/레포 경로를 얻고
- * 2. 백엔드에 요약을 요청하고
- * 3. 결과를 view 모듈에 전달한다.
+ * ① 로컬 git log 수집 → ② EC2 서버로 전송 → ⑤ Webview 출력
  *
  * 👤 담당: 개발자 B
  */
@@ -18,16 +18,20 @@ export async function runTimelineSummary(context: vscode.ExtensionContext) {
         return;
     }
 
+    const commits = collectGitLog(ctx.repoPath, ctx.filePath);
+    if (commits.length === 0) {
+        vscode.window.showWarningMessage('CodeWhy: 이 파일의 git 커밋 이력을 찾을 수 없습니다.');
+        return;
+    }
+
     await vscode.window.withProgress(
-        {
-            location: vscode.ProgressLocation.Notification,
-            title: 'CodeWhy: 파일 역사 요약 중...',
-        },
+        { location: vscode.ProgressLocation.Notification, title: 'CodeWhy: 파일 역사 요약 중...' },
         async () => {
             try {
                 const result = await fetchTimelineSummary({
                     filePath: ctx.filePath,
                     repoPath: ctx.repoPath,
+                    commits,
                 });
                 showTimelineSummaryView(ctx, result);
             } catch (err) {
@@ -37,4 +41,24 @@ export async function runTimelineSummary(context: vscode.ExtensionContext) {
             }
         }
     );
+}
+
+/**
+ * 로컬 git log 에서 파일별 커밋 이력을 수집한다.
+ * EC2 서버는 로컬 파일시스템에 접근할 수 없으므로 확장이 직접 수집해 전송한다.
+ */
+function collectGitLog(repoPath: string, filePath: string): CommitInput[] {
+    try {
+        const out = execSync(
+            `git log --follow --format="%H|%an|%ad|%s" --date=short -- "${filePath}"`,
+            { cwd: repoPath, timeout: 10_000 }
+        ).toString().trim();
+
+        return out.split('\n').filter(Boolean).map(line => {
+            const [hash, author, date, ...rest] = line.split('|');
+            return { hash, author, date, subject: rest.join('|') };
+        });
+    } catch {
+        return [];
+    }
 }
