@@ -3,12 +3,15 @@
 import logging
 from contextlib import asynccontextmanager
 
-import boto3
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+)
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
-from app.db.dynamo_session import get_client_kwargs
 from app.features.blame.router import router as blame_router
 from app.features.timeline.router import router as timeline_router
 from app.features.traceability.router import router as traceability_router
@@ -18,14 +21,24 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ── DynamoDB 연결 확인 (startup) ──────────────────────────────────────────
-    try:
-        boto3.client("dynamodb", **get_client_kwargs()).describe_limits()
-        logger.info("DynamoDB 연결 성공")
-    except Exception as e:
-        logger.warning("DynamoDB 연결 실패 — 로컬 Docker가 실행 중인지 확인하세요: %s", e)
+    # ── PostgreSQL 연결 확인 + 테이블 자동 생성 ───────────────────────────────
+    from app.db.postgres import async_engine, Base
+    import app.db.models  # noqa: F401 — Base.metadata 에 모델 등록
 
-    yield  # ── 서버 실행 중 ───────────────────────────────────────────────────
+    try:
+        async with async_engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        logger.info("PostgreSQL 연결 성공")
+
+        # 테이블이 없으면 자동 생성 (운영에서는 alembic 사용 권장)
+        async with async_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("테이블 준비 완료")
+
+    except Exception as e:
+        logger.warning("PostgreSQL 연결 실패: %s", e)
+
+    yield
 
 
 app = FastAPI(

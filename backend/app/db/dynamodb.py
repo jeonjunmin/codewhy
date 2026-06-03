@@ -1,52 +1,54 @@
-"""DynamoDB 헬퍼 — blame/traceability 결과 캐시.
+"""캐시 헬퍼 — PostgreSQL 전환 버전.
 
-blame_cache     테이블: PK=repo_path, SK=file_line("{file_path}#{line}")
-timeline_cache  테이블: PK=repo_path, SK=file_path
+기존 DynamoDB 방식에서 SQLAlchemy sync 세션으로 교체.
+함수 시그니처는 동일하게 유지해 blame/traceability 라우터 변경 없음.
 """
 
-import boto3
-from boto3.dynamodb.conditions import Key
-
-from app.core.config import get_settings
-from app.db.dynamo_session import get_resource_kwargs
-
-_dynamodb = None
-
-
-def get_dynamodb():
-    global _dynamodb
-    if _dynamodb is None:
-        _dynamodb = boto3.resource("dynamodb", **get_resource_kwargs())
-    return _dynamodb
-
-
-def get_table(table_name: str):
-    return get_dynamodb().Table(table_name)
+from app.db.models import BlameCache, TimelineSummaryCache
+from app.db.postgres import SyncSessionLocal
 
 
 # ── blame_cache ───────────────────────────────────────────────────────────────
 
 def get_blame_cache(repo_path: str, file_path: str, line: int) -> dict | None:
-    table = get_table(get_settings().DYNAMO_BLAME_TABLE)
-    resp = table.get_item(
-        Key={"repo_path": repo_path, "file_line": f"{file_path}#{line}"}
-    )
-    return resp.get("Item")
+    file_line = f"{file_path}#{line}"
+    with SyncSessionLocal() as db:
+        row = db.query(BlameCache).filter_by(
+            repo_path=repo_path, file_line=file_line
+        ).first()
+        return dict(row.data) if row else None
 
 
-def put_blame_cache(repo_path: str, file_path: str, line: int, item: dict):
-    table = get_table(get_settings().DYNAMO_BLAME_TABLE)
-    table.put_item(Item={"repo_path": repo_path, "file_line": f"{file_path}#{line}", **item})
+def put_blame_cache(repo_path: str, file_path: str, line: int, item: dict) -> None:
+    file_line = f"{file_path}#{line}"
+    with SyncSessionLocal() as db:
+        row = db.query(BlameCache).filter_by(
+            repo_path=repo_path, file_line=file_line
+        ).first()
+        if row:
+            row.data = item
+        else:
+            db.add(BlameCache(repo_path=repo_path, file_line=file_line, data=item))
+        db.commit()
 
 
-# ── timeline_cache ────────────────────────────────────────────────────────────
+# ── timeline_summary_cache ────────────────────────────────────────────────────
 
 def get_timeline_cache(repo_path: str, file_path: str) -> dict | None:
-    table = get_table(get_settings().DYNAMO_TIMELINE_TABLE)
-    resp = table.get_item(Key={"repo_path": repo_path, "file_path": file_path})
-    return resp.get("Item")
+    with SyncSessionLocal() as db:
+        row = db.query(TimelineSummaryCache).filter_by(
+            repo_path=repo_path, file_path=file_path
+        ).first()
+        return dict(row.data) if row else None
 
 
-def put_timeline_cache(repo_path: str, file_path: str, item: dict):
-    table = get_table(get_settings().DYNAMO_TIMELINE_TABLE)
-    table.put_item(Item={"repo_path": repo_path, "file_path": file_path, **item})
+def put_timeline_cache(repo_path: str, file_path: str, item: dict) -> None:
+    with SyncSessionLocal() as db:
+        row = db.query(TimelineSummaryCache).filter_by(
+            repo_path=repo_path, file_path=file_path
+        ).first()
+        if row:
+            row.data = item
+        else:
+            db.add(TimelineSummaryCache(repo_path=repo_path, file_path=file_path, data=item))
+        db.commit()

@@ -4,10 +4,9 @@ pydantic>=2.11.0
 pydantic-settings>=2.0.0
 python-dotenv>=1.0.1
 
-# AWS — DynamoDB(커밋 저장 + 캐시) + Bedrock(LLM)
+# AWS — Bedrock(LLM) + Knowledge Base
 boto3>=1.35.0
-aioboto3>=12.0.0          # DynamoDB 비동기 접근 (FastAPI async 호환)
-langchain-aws>=0.2.0      # ChatBedrock
+langchain-aws>=0.2.0
 
 # Anthropic SDK — blame/traceability 기능용
 anthropic>=0.34.0
@@ -16,3 +15,9 @@ langchain-anthropic>=0.3.0
 # LangGraph / LangChain
 langgraph>=0.2.0
 langchain-core>=0.3.0
+
+# PostgreSQL (RDS)
+sqlalchemy[asyncio]>=2.0.0   # ORM + 비동기 지원
+asyncpg>=0.29.0               # FastAPI async 드라이버
+psycopg2-binary>=2.9.0        # alembic / 캐시 sync 드라이버
+alembic>=1.13.0               # DB 스키마 마이그레이션

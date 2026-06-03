@@ -2,7 +2,7 @@
 
 데이터 흐름:
   ① 확장이 보낸 commits
-  → ② DynamoDB upsert 후 전체 이력 조회 (crud.py)
+  → ② PostgreSQL upsert 후 전체 이력 조회 (crud.py)
   → ③ LangGraph Map-Reduce + Bedrock 요약 (app/ai/graph.py)
   → ④ 결과 반환
 
@@ -14,7 +14,7 @@ from app.features.timeline import crud
 
 
 async def summarize(repo_path: str, file_path: str, commits: list[dict]) -> dict:
-    # ② DynamoDB에 upsert 후 전체 이력 조회
+    # ② PostgreSQL에 upsert 후 전체 이력 조회
     await crud.upsert_commits(repo_path, file_path, commits)
     stored = await crud.get_commits(repo_path, file_path)
 

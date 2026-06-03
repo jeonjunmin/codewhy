@@ -15,30 +15,31 @@ import json
 import os
 from functools import lru_cache
 
+from pathlib import Path
+
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# boto3 는 os.environ 을 직접 읽으므로, pydantic-settings 가 읽기 전에
-# load_dotenv() 로 .env → os.environ 에 먼저 주입해야 한다.
-load_dotenv(override=False)
+# backend/.env 를 파일 위치 기준 절대 경로로 로드 — CWD 에 무관하게 동작
+_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(_ENV_PATH, override=False)
 
 
 class Settings(BaseSettings):
     # ── AWS 공통 ──────────────────────────────────────────────────────────────
     AWS_ACCESS_KEY_ID: str = ""
     AWS_SECRET_ACCESS_KEY: str = ""
-    AWS_SESSION_TOKEN: str = ""          # STS/SSO 임시 자격증명 세션 토큰
+    AWS_SESSION_TOKEN: str = ""
     AWS_DEFAULT_REGION: str = "ap-northeast-2"
 
     # ── AWS Bedrock ───────────────────────────────────────────────────────────
     BEDROCK_MODEL_ID: str = "anthropic.claude-3-5-sonnet-20240620-v1:0"
 
-    # ── AWS DynamoDB ──────────────────────────────────────────────────────────
-    DYNAMODB_COMMIT_TABLE: str = "codewhy_commit_logs"
-    DYNAMODB_URL: str = ""               # 로컬 Docker 엔드포인트 (운영 시 빈 값)
-
-    DYNAMO_BLAME_TABLE: str = "codewhy_blame_cache"
-    DYNAMO_TIMELINE_TABLE: str = "codewhy_timeline_cache"
+    # ── PostgreSQL (RDS) ──────────────────────────────────────────────────────
+    # asyncpg 드라이버 (FastAPI async) — .env 의 DATABASE_URL 로 주입
+    DATABASE_URL: str = ""
+    # psycopg2 드라이버 (alembic / 캐시 헬퍼 sync) — .env 의 DATABASE_URL_SYNC 로 주입
+    DATABASE_URL_SYNC: str = ""
 
     # ── Anthropic ─────────────────────────────────────────────────────────────
     ANTHROPIC_API_KEY: str = ""
@@ -55,7 +56,19 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    """앱 전역 싱글턴. 최초 호출 시 .env 를 한 번만 파싱한다."""
     return Settings()
+
+
+# ── DB URL 헬퍼 ───────────────────────────────────────────────────────────────
+
+def get_database_url() -> str:
+    """asyncpg 비동기 URL (FastAPI 앱용)."""
+    return get_settings().DATABASE_URL
+
+def get_database_url_sync() -> str:
+    """psycopg2 동기 URL (alembic / 캐시 헬퍼용)."""
+    return get_settings().DATABASE_URL_SYNC
 
 
 # ── 하위 호환 헬퍼 ────────────────────────────────────────────────────────────
@@ -67,7 +80,7 @@ def get_aws_region() -> str:
     return get_settings().AWS_DEFAULT_REGION
 
 def get_aws_credentials() -> dict:
-    """MFA STS 임시 자격증명. 미설정 시 빈 dict → boto3가 ~/.aws/credentials 폴백."""
+    """STS 임시 자격증명. 미설정 시 빈 dict → boto3가 ~/.aws/credentials 폴백."""
     key = os.getenv("AWS_ACCESS_KEY_ID", "")
     secret = os.getenv("AWS_SECRET_ACCESS_KEY", "")
     token = os.getenv("AWS_SESSION_TOKEN", "")
@@ -78,38 +91,25 @@ def get_aws_credentials() -> dict:
         return creds
     return {}
 
-
-# ─── AWS Bedrock (Context Blame RAG) ────────────────────────────────
 def get_bedrock_model_id() -> str:
-    """Converse API 로 호출할 Bedrock 모델 ID (inference profile ID 권장)."""
-    return os.getenv("BEDROCK_MODEL_ID", "apac.anthropic.claude-3-5-sonnet-20241022-v2:0")
-
+    return get_settings().BEDROCK_MODEL_ID
 
 def get_bedrock_kb_id() -> str:
     """기획서 단락을 조회할 Bedrock Knowledge Base ID. 미설정 시 RAG 생략."""
     return os.getenv("BEDROCK_KNOWLEDGE_BASE_ID", "")
 
-
 def get_bedrock_kb_max_results() -> int:
-    """Knowledge Base 한 번 조회 시 가져올 기획서 단락 수."""
     try:
         return int(os.getenv("BEDROCK_KB_MAX_RESULTS", "4"))
     except ValueError:
         return 4
 
-
 def get_document_paths() -> list[str]:
     raw = get_settings().DOCUMENT_PATHS
     return [p.strip() for p in raw.split(",") if p.strip()]
 
-
-# ─── Context Blame: 팀 매핑 / VCS 연동 ──────────────────────────────
 def get_team_map() -> dict[str, str]:
-    """작성자(이름 또는 이메일) → 팀명 매핑.
-
-    CODEWHY_TEAM_MAP 가 가리키는 JSON 파일을 읽는다. 미설정·파일 없음·파싱 실패 시
-    빈 dict 를 돌려주어(=team 칸 생략) 기능이 깨지지 않게 한다.
-    """
+    """작성자 → 팀명 매핑 JSON 파일. 미설정·오류 시 빈 dict."""
     path = os.getenv("CODEWHY_TEAM_MAP", "")
     if not path or not os.path.isfile(path):
         return {}
@@ -120,22 +120,8 @@ def get_team_map() -> dict[str, str]:
     except (OSError, json.JSONDecodeError):
         return {}
 
-
 def get_github_token() -> str:
-    """GitHub PR 조회용 토큰. 미설정 시 PR 연동 생략."""
     return os.getenv("GITHUB_TOKEN", "")
 
-
 def get_gitlab_token() -> str:
-    """GitLab MR 조회용 토큰. 미설정 시 MR 연동 생략."""
     return os.getenv("GITLAB_TOKEN", "")
-
-
-def get_dynamo_blame_table() -> str:
-    return get_settings().DYNAMO_BLAME_TABLE
-
-def get_dynamo_timeline_table() -> str:
-    return get_settings().DYNAMO_TIMELINE_TABLE
-
-def get_bedrock_model_id() -> str:
-    return get_settings().BEDROCK_MODEL_ID
