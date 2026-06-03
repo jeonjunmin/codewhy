@@ -5,6 +5,12 @@ node_modules
 .vscode-test/
 *.vsix
 
+# 보안: 개인 키 / 인증서는 절대 커밋하지 않는다
+*.pem
+*.key
+*.p12
+*.pfx
+
 # Python Backend
 backend/.env
 backend/__pycache__/
