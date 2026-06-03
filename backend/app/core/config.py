@@ -96,6 +96,30 @@ def get_bedrock_kb_max_results() -> int:
         return 4
 
 
+# ─── 브라운필드 온보딩: 문서 인덱싱 + 커밋 백필 ──────────────────────
+def get_doc_index_bucket() -> str:
+    """KB 데이터소스가 읽는 S3 버킷. 미설정 시 시맨틱 인덱싱 생략(=no-op)."""
+    return os.getenv("DOC_INDEX_S3_BUCKET", "")
+
+
+def get_doc_index_prefix() -> str:
+    """인덱싱 문서를 올릴 S3 key prefix."""
+    return os.getenv("DOC_INDEX_S3_PREFIX", "codewhy-docs/")
+
+
+def get_bedrock_kb_data_source_id() -> str:
+    """ingestion job 을 트리거할 KB 데이터소스 ID. 미설정 시 자동 ingestion 생략."""
+    return os.getenv("BEDROCK_KB_DATA_SOURCE_ID", "")
+
+
+def get_trace_backfill_min_confidence() -> float:
+    """커밋↔문서 백필 시 링크를 생성할 최소 시맨틱 점수(0~1)."""
+    try:
+        return float(os.getenv("TRACE_BACKFILL_MIN_CONFIDENCE", "0.4"))
+    except ValueError:
+        return 0.4
+
+
 def get_documents_dir() -> str:
     """업로드된 기획 문서 바이너리를 저장/조회할 서버 디렉터리."""
     return get_settings().DOCUMENTS_DIR

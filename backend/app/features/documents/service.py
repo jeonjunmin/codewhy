@@ -8,9 +8,11 @@ DB(documents)에는 메타데이터만 둔다. document_links 가 문서를 git 
 
 import os
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import doc_index
 from app.core.config import get_documents_dir
 from app.core.tickets import extract_tickets
 from app.db.models import Document, DocumentLink
@@ -67,6 +69,24 @@ def build_document_links(document: Document, tickets: list[str]) -> list[Documen
         DocumentLink(document_id=document.id, link_type="ticket", ticket=t)
         for t in found
     ]
+
+
+async def index_document(db: AsyncSession, doc: Document) -> bool:
+    """문서를 시맨틱 인덱스(KB 데이터소스)에 적재하고 indexed_at 을 기록한다.
+
+    인덱싱이 미설정이거나 실패하면 False 를 돌려주고 indexed_at 은 그대로 둔다.
+    ingestion job 트리거는 호출하지 않는다 — 대량 적재 시 마지막에 한 번만 돌리기 위함.
+    """
+    ok = doc_index.index_document(
+        storage_key=doc.storage_key,
+        local_path=storage_path(doc),
+        document_id=doc.id,
+    )
+    if ok:
+        doc.indexed_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(doc)
+    return ok
 
 
 async def get_document(db: AsyncSession, document_id: int) -> Document | None:

@@ -5,6 +5,8 @@
 👤 담당: 개발자 C
 """
 
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -20,6 +22,9 @@ class DocumentMatch(BaseModel):
     page: int | None = None
     excerpt: str | None = None
     downloadUrl: str           # /api/documents/{id}/download
+    # 어느 경로로 찾았는지 + 신뢰도. ticket=확정(confidence=None), backfill/semantic=추정.
+    matchType: Literal["ticket", "backfill", "semantic"] = "ticket"
+    confidence: float | None = None
 
 
 class TraceResponse(BaseModel):

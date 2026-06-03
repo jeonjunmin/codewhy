@@ -27,6 +27,7 @@ class Passage:
     score: float | None = None
     section: str | None = None  # 예: "4.2" (조항 번호)
     page: int | None = None     # 예: 12 (PDF 페이지)
+    document_id: int | None = None  # 사이드카 메타데이터로 심은 Document.id (역추적 다운로드용)
 
     def source_ref(self) -> str:
         """'출처' 칸 표시용 — '파일명.pdf §4.2'."""
@@ -77,9 +78,22 @@ def retrieve_passages(query: str) -> list[Passage]:
                 score=item.get("score"),
                 section=_extract_section(text),
                 page=_extract_page(metadata),
+                document_id=_extract_document_id(metadata),
             )
         )
     return passages
+
+
+def _extract_document_id(metadata: dict) -> int | None:
+    """사이드카(doc_index)로 심은 documentId 를 metadata 에서 되찾는다. 없으면 None."""
+    # TODO(검증): retrieve 응답에서 커스텀 메타데이터가 실제로 어떤 키로 오는지 확인.
+    #   "documentId" 평키로 평탄화돼 오는지, 혹은 다른 네임스페이스가 붙는지 실응답으로 확인하고
+    #   필요하면 키 후보를 늘린다(_extract_page 가 page 키를 방어적으로 다루는 방식 참고).
+    raw = metadata.get("documentId")
+    try:
+        return int(raw) if raw is not None else None
+    except (ValueError, TypeError):
+        return None
 
 
 def _extract_section(text: str) -> str | None:

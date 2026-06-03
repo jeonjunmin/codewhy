@@ -18,6 +18,7 @@ from sqlalchemy import (
     BigInteger,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -25,6 +26,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -167,6 +169,7 @@ class Document(Base):
     page_count: Mapped[int | None] = mapped_column(Integer)
     uploaded_by: Mapped[str | None] = mapped_column(Text)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # 시맨틱 인덱스(KB) 적재 완료 시각
 
     links: Mapped[list["DocumentLink"]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
@@ -184,6 +187,13 @@ class DocumentLink(Base):
         Index("ix_document_links_ticket", "ticket"),
         Index("ix_document_links_commit", "commit_id"),
         Index("ix_document_links_file", "file_id"),
+        # 커밋 백필 dedup — commit_id 가 있는 행에만 (document_id, commit_id, link_type) 유니크.
+        Index(
+            "uq_doclinks_doc_commit_type",
+            "document_id", "commit_id", "link_type",
+            unique=True,
+            postgresql_where=text("commit_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -195,6 +205,7 @@ class DocumentLink(Base):
     page: Mapped[int | None] = mapped_column(Integer)
     section: Mapped[str | None] = mapped_column(Text)
     excerpt: Mapped[str | None] = mapped_column(Text)
+    confidence: Mapped[float | None] = mapped_column(Float)  # 백필/시맨틱 매칭 점수(0~1). 티켓 정확매칭은 NULL.
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     document: Mapped["Document"] = relationship(back_populates="links")

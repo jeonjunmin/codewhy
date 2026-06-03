@@ -15,6 +15,9 @@ import { showRequirementTraceView } from './view';
 export async function runRequirementTrace(context: vscode.ExtensionContext) {
     const config = vscode.workspace.getConfiguration('codewhy');
     const documentPaths = config.get<string[]>('documentPaths', []);
+    // TODO(결정): 브라운필드 모델에서는 문서가 서버에 업로드되므로 로컬 documentPaths 가 불필요하다.
+    //   이 게이트가 비어 있으면 추적이 시작도 안 되어 백필/시맨틱 경로를 막는다.
+    //   게이트를 제거하거나 "서버 문서 사용" 모드로 전환할지 결정 필요.
     if (documentPaths.length === 0) {
         vscode.window.showWarningMessage(
             'CodeWhy: 기획서 폴더가 설정되지 않았습니다. 설정에서 codewhy.documentPaths를 추가하세요.'
