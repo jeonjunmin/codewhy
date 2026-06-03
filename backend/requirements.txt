@@ -3,10 +3,16 @@ uvicorn[standard]>=0.30.6
 pydantic>=2.11.0
 pydantic-settings>=2.0.0
 python-dotenv>=1.0.1
+python-multipart>=0.0.9    # 문서 업로드(multipart/form-data) 처리
 
-# AWS — DynamoDB(커밋 저장 + 캐시) + Bedrock(LLM)
+# PostgreSQL (RDS) — 통합 스키마
+sqlalchemy[asyncio]>=2.0.0
+asyncpg>=0.29.0            # 런타임 비동기 드라이버 (FastAPI)
+psycopg2-binary>=2.9.9    # Alembic 마이그레이션 동기 드라이버
+alembic>=1.13.0
+
+# AWS Bedrock(LLM)
 boto3>=1.35.0
-aioboto3>=12.0.0          # DynamoDB 비동기 접근 (FastAPI async 호환)
 langchain-aws>=0.2.0      # ChatBedrock
 
 # Anthropic SDK — blame/traceability 기능용
@@ -16,3 +22,6 @@ langchain-anthropic>=0.3.0
 # LangGraph / LangChain
 langgraph>=0.2.0
 langchain-core>=0.3.0
+
+# 문서 파싱 — PDF 페이지 수 추출
+pypdf>=4.0.0

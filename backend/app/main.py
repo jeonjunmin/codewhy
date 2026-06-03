@@ -3,13 +3,13 @@
 import logging
 from contextlib import asynccontextmanager
 
-import boto3
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
-from app.db.dynamo_session import get_client_kwargs
+from app.db.postgres import engine
 from app.features.blame.router import router as blame_router
+from app.features.documents.router import router as documents_router
 from app.features.timeline.router import router as timeline_router
 from app.features.traceability.router import router as traceability_router
 
@@ -18,14 +18,17 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ── DynamoDB 연결 확인 (startup) ──────────────────────────────────────────
+    # ── PostgreSQL(RDS) 연결 확인 (startup) ───────────────────────────────────
     try:
-        boto3.client("dynamodb", **get_client_kwargs()).describe_limits()
-        logger.info("DynamoDB 연결 성공")
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        logger.info("PostgreSQL 연결 성공")
     except Exception as e:
-        logger.warning("DynamoDB 연결 실패 — 로컬 Docker가 실행 중인지 확인하세요: %s", e)
+        logger.warning("PostgreSQL 연결 실패 — DATABASE_URL / DB 기동 여부를 확인하세요: %s", e)
 
     yield  # ── 서버 실행 중 ───────────────────────────────────────────────────
+
+    await engine.dispose()
 
 
 app = FastAPI(
@@ -42,9 +45,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(blame_router,        prefix="/api/blame",    tags=["Context Blame"])
-app.include_router(timeline_router,     prefix="/api/timeline", tags=["Timeline Summary"])
-app.include_router(traceability_router, prefix="/api/trace",    tags=["Requirement Trace"])
+app.include_router(blame_router,        prefix="/api/blame",     tags=["Context Blame"])
+app.include_router(timeline_router,     prefix="/api/timeline",  tags=["Timeline Summary"])
+app.include_router(traceability_router, prefix="/api/trace",     tags=["Requirement Trace"])
+app.include_router(documents_router,    prefix="/api/documents", tags=["Documents"])
 
 
 @app.get("/health")

@@ -1,108 +1,111 @@
-"""Timeline — DynamoDB CRUD.
+"""Timeline — PostgreSQL CRUD.
 
-② 흐름: EC2가 DynamoDB에서 커밋 이력을 읽어오는 레이어.
+공유 백본(commits/files/commit_files)에 커밋 이력을 upsert 하고, 파일별 이력을 join 으로 읽는다.
+타임라인 AI 요약 결과는 timeline_summaries 에 캐시한다(commit_set_hash 키).
 
-테이블: codewhy_commit_logs (스키마 상세 → app/db/dynamo_schema.py)
-  PK: project_id  = "{repo_path}#{file_path}"
-  SK: commit_sk   = "{YYYY-MM-DD}#{commit_hash[:8]}"
-
-주요 연산:
-  upsert_commits — 신규 커밋을 batch_writer 로 put_item (중복은 덮어씀)
-  get_commits    — project_id 로 Query, 최신순 반환
+👤 담당: 개발자 B
 """
 
-from datetime import datetime, timezone
+from datetime import date, datetime
 
-from boto3.dynamodb.conditions import Key
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
-from app.db.dynamo_session import get_resource_kwargs, get_session
-
-
-def _make_project_id(repo_path: str, file_path: str) -> str:
-    return f"{repo_path}#{file_path}"
+from app.core.tickets import extract_ticket
+from app.db import crud_common
+from app.db.models import Commit, CommitFile, File, TimelineSummary
 
 
-def _make_commit_sk(date: str, commit_hash: str) -> str:
-    """SK = "{YYYY-MM-DD}#{hash[:8]}" — 날짜 오름차순 정렬 보장."""
-    return f"{date}#{commit_hash[:8]}"
+def _parse_date(value: str) -> date | None:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
 
 
 async def upsert_commits(
-    repo_path: str, file_path: str, commits: list[dict]
-) -> None:
-    """커밋 목록을 DynamoDB 에 저장한다. 같은 SK 는 덮어쓴다 (upsert 효과)."""
-    if not commits:
-        return
+    db: AsyncSession, repo_path: str, file_path: str, commits: list[dict]
+) -> File:
+    """커밋 목록을 공유 백본에 저장하고, 해당 File 행을 돌려준다.
 
-    project_id = _make_project_id(repo_path, file_path)
-    now = datetime.now(timezone.utc).isoformat()
-    table_name = get_settings().DYNAMODB_COMMIT_TABLE
+    commits 형식: [{"hash","author","date","subject"}, ...] (확장이 로컬 git log 로 수집)
+    """
+    repo = await crud_common.get_or_create_repository(db, repo_path)
+    file = await crud_common.get_or_create_file(db, repo.id, file_path)
 
-    async with get_session().resource("dynamodb", **get_resource_kwargs()) as dynamo:
-        table = await dynamo.Table(table_name)
-        async with table.batch_writer() as batch:
-            for c in commits:
-                await batch.put_item(Item={
-                    "project_id":  project_id,
-                    "commit_sk":   _make_commit_sk(c["date"], c["hash"]),
-                    "commit_hash": c["hash"],
-                    "author":      c["author"],
-                    "message":     c["subject"],
-                    "created_at":  now,
-                })
+    for c in commits:
+        commit = await crud_common.upsert_commit(
+            db,
+            repo.id,
+            c["hash"],
+            author=c.get("author"),
+            committed_date=_parse_date(c.get("date", "")),
+            message=c.get("subject"),
+            ticket=extract_ticket(c.get("subject", "")),
+        )
+        await crud_common.link_commit_file(db, commit.id, file.id)
+
+    await db.commit()
+    return file
 
 
-async def get_commits(
-    repo_path: str, file_path: str, limit: int = 200
-) -> list[dict]:
+async def get_commits(db: AsyncSession, file_id: int, limit: int = 200) -> list[dict]:
     """파일의 커밋 이력을 최신순으로 반환한다.
 
-    graph.py 가 기대하는 형식:
-      [{"hash": str, "author": str, "date": str, "subject": str}, ...]
+    graph.py 가 기대하는 형식: [{"hash","author","date","subject"}, ...]
     """
-    project_id = _make_project_id(repo_path, file_path)
-    table_name = get_settings().DYNAMODB_COMMIT_TABLE
-
-    async with get_session().resource("dynamodb", **get_resource_kwargs()) as dynamo:
-        table = await dynamo.Table(table_name)
-        resp = await table.query(
-            KeyConditionExpression=Key("project_id").eq(project_id),
-            ScanIndexForward=False,   # SK 내림차순 → 최신 커밋 먼저
-            Limit=limit,
-        )
-
+    stmt = (
+        select(Commit)
+        .join(CommitFile, CommitFile.commit_id == Commit.id)
+        .where(CommitFile.file_id == file_id)
+        .order_by(Commit.committed_date.desc(), Commit.id.desc())
+        .limit(limit)
+    )
+    rows = (await db.execute(stmt)).scalars().all()
     return [
         {
-            "hash":    item["commit_hash"],
-            "author":  item["author"],
-            "date":    item["commit_sk"].split("#")[0],   # SK 에서 날짜 복원
-            "subject": item["message"],
+            "hash": c.commit_hash,
+            "author": c.author or "",
+            "date": c.committed_date.isoformat() if c.committed_date else "",
+            "subject": c.message or "",
         }
-        for item in resp.get("Items", [])
+        for c in rows
     ]
 
 
-async def get_commits_by_author(author: str, limit: int = 100) -> list[dict]:
-    """유저별 전체 커밋 조회 — GSI(author-date-index) 사용."""
-    table_name = get_settings().DYNAMODB_COMMIT_TABLE
+# ── 타임라인 요약 캐시 ──────────────────────────────────────────────────────────
 
-    async with get_session().resource("dynamodb", **get_resource_kwargs()) as dynamo:
-        table = await dynamo.Table(table_name)
-        resp = await table.query(
-            IndexName="author-date-index",
-            KeyConditionExpression=Key("author").eq(author),
-            ScanIndexForward=False,
-            Limit=limit,
+async def get_cached_summary(
+    db: AsyncSession, file_id: int, commit_set_hash: str
+) -> TimelineSummary | None:
+    stmt = select(TimelineSummary).where(
+        TimelineSummary.file_id == file_id,
+        TimelineSummary.commit_set_hash == commit_set_hash,
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def save_summary(
+    db: AsyncSession, file_id: int, commit_set_hash: str, result: dict
+) -> None:
+    """요약 결과를 upsert 한다. 같은 (file_id, commit_set_hash) 면 갱신."""
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    stmt = (
+        pg_insert(TimelineSummary)
+        .values(
+            file_id=file_id,
+            commit_set_hash=commit_set_hash,
+            summary=result.get("summary", ""),
+            milestones=result.get("milestones", []),
         )
-
-    return [
-        {
-            "hash":       item["commit_hash"],
-            "author":     item["author"],
-            "date":       item["commit_sk"].split("#")[0],
-            "subject":    item["message"],
-            "project_id": item["project_id"],
-        }
-        for item in resp.get("Items", [])
-    ]
+        .on_conflict_do_update(
+            index_elements=["file_id", "commit_set_hash"],
+            set_={
+                "summary": result.get("summary", ""),
+                "milestones": result.get("milestones", []),
+            },
+        )
+    )
+    await db.execute(stmt)
+    await db.commit()

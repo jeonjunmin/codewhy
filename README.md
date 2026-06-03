@@ -135,7 +135,7 @@ codewhy/
         └── traceability/       # 요구사항 역추적 API
 ```
 
-팀 개발 가이드는 [TEAM_GUIDE.md](TEAM_GUIDE.md) 를 참고하세요.
+패키징 및 배포 가이드는 PACKAGING_GUIDE.md 파일을 참고하세요.
 
 ---
 

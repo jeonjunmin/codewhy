@@ -22,15 +22,13 @@ from app.core import git, knowledge_base, vcs
 from app.core.ai_client import call_bedrock
 from app.core.config import get_team_map
 from app.core.knowledge_base import Passage
+from app.core.tickets import extract_ticket
 
 _SYSTEM_PROMPT = (
     "당신은 코드 변경의 '기획 의도'를 설명하는 도우미입니다. "
     "git 커밋 메시지의 기술적 표현 뒤에 숨은, 기획서상의 진짜 이유를 추론해 "
     "비개발자도 이해할 수 있는 한국어로 설명하세요."
 )
-
-# 이슈 트래커 키 패턴 — 예: PAY-2041, KYC-12
-_TICKET_RE = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
 
 # 후속 변경을 'security' 로 분류할 도메인 신호어
 _SECURITY_TERMS = ("KYC", "감사", "audit", "보안", "security", "권한", "auth")
@@ -139,18 +137,6 @@ def extract_keywords(commit_message: str) -> list[str]:
         (domain if tok in _DOMAIN_TERMS else rest).append(tok)
 
     return domain + rest
-
-
-def extract_ticket(commit_message: str, branch: str = "") -> str | None:
-    """커밋 메시지 또는 브랜치명에서 이슈 키(예: PAY-2041)를 추출한다.
-
-    커밋 메시지를 우선 보고, 없으면 브랜치명(feat/PAY-2041-... 등)에서 찾는다.
-    """
-    for text in (commit_message, branch):
-        m = _TICKET_RE.search(text or "")
-        if m:
-            return m.group(1)
-    return None
 
 
 def _safe_find_pr(repo_path: str, commit_hash: str):
