@@ -88,9 +88,11 @@ export interface TraceRequest {
 }
 
 export interface DocumentMatch {
-    path: string;
-    page: number;
-    excerpt: string;
+    documentId: number;
+    name: string;            // 업로드 원본 파일명
+    page?: number;
+    excerpt?: string;
+    downloadUrl: string;     // /api/documents/{id}/download
 }
 
 export interface TraceResult {

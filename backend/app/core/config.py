@@ -33,18 +33,16 @@ class Settings(BaseSettings):
     # ── AWS Bedrock ───────────────────────────────────────────────────────────
     BEDROCK_MODEL_ID: str = "anthropic.claude-3-5-sonnet-20240620-v1:0"
 
-    # ── AWS DynamoDB ──────────────────────────────────────────────────────────
-    DYNAMODB_COMMIT_TABLE: str = "codewhy_commit_logs"
-    DYNAMODB_URL: str = ""               # 로컬 Docker 엔드포인트 (운영 시 빈 값)
-
-    DYNAMO_BLAME_TABLE: str = "codewhy_blame_cache"
-    DYNAMO_TIMELINE_TABLE: str = "codewhy_timeline_cache"
+    # ── PostgreSQL (RDS) ──────────────────────────────────────────────────────
+    # 런타임(asyncpg): postgresql+asyncpg://user:pass@host:5432/codewhy
+    DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/codewhy"
 
     # ── Anthropic ─────────────────────────────────────────────────────────────
     ANTHROPIC_API_KEY: str = ""
 
     # ── 기타 ──────────────────────────────────────────────────────────────────
-    DOCUMENT_PATHS: str = ""
+    # 업로드된 기획 문서 바이너리를 보관할 서버 디렉터리 (역추적 다운로드용)
+    DOCUMENTS_DIR: str = "./uploaded_documents"
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -98,9 +96,33 @@ def get_bedrock_kb_max_results() -> int:
         return 4
 
 
-def get_document_paths() -> list[str]:
-    raw = get_settings().DOCUMENT_PATHS
-    return [p.strip() for p in raw.split(",") if p.strip()]
+def get_documents_dir() -> str:
+    """업로드된 기획 문서 바이너리를 저장/조회할 서버 디렉터리."""
+    return get_settings().DOCUMENTS_DIR
+
+
+def _with_driver(url: str, driver: str) -> str:
+    """DATABASE_URL 의 드라이버를 강제로 교체한다.
+
+    .env 에 `postgresql://`, `postgresql+psycopg2://`, `postgresql+asyncpg://` 중 무엇이 와도
+    런타임(asyncpg)과 alembic(psycopg2)이 각자 필요한 드라이버로 안전하게 접속하도록 정규화한다.
+    """
+    scheme, _, rest = url.partition("://")
+    base = scheme.split("+", 1)[0]
+    return f"{base}+{driver}://{rest}"
+
+
+def get_rds_url_async() -> str:
+    """런타임(FastAPI)용 비동기(asyncpg) 접속 URL."""
+    return _with_driver(get_settings().DATABASE_URL, "asyncpg")
+
+
+def get_rds_url_sync() -> str:
+    """Alembic 마이그레이션용 동기(psycopg2) 접속 URL.
+
+    접속 정보를 한 곳(.env DATABASE_URL)에서만 관리하기 위해 드라이버만 psycopg2 로 바꾼다.
+    """
+    return _with_driver(get_settings().DATABASE_URL, "psycopg2")
 
 
 # ─── Context Blame: 팀 매핑 / VCS 연동 ──────────────────────────────
@@ -130,12 +152,6 @@ def get_gitlab_token() -> str:
     """GitLab MR 조회용 토큰. 미설정 시 MR 연동 생략."""
     return os.getenv("GITLAB_TOKEN", "")
 
-
-def get_dynamo_blame_table() -> str:
-    return get_settings().DYNAMO_BLAME_TABLE
-
-def get_dynamo_timeline_table() -> str:
-    return get_settings().DYNAMO_TIMELINE_TABLE
 
 def get_bedrock_model_id() -> str:
     return get_settings().BEDROCK_MODEL_ID

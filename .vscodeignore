@@ -9,3 +9,15 @@ vsc-extension-quickstart.md
 **/*.map
 **/*.ts
 **/.vscode-test.*
+
+# 보안: 개인 키/인증서는 절대 패키지에 포함하지 않는다
+**/*.pem
+**/*.key
+
+# 서버 코드 — 확장(클라이언트)에는 불필요
+backend/**
+
+# 내부/개발용 문서 및 설정
+.claude/**
+TEAM_GUIDE.md
+PACKAGING_GUIDE.md

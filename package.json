@@ -3,7 +3,7 @@
   "displayName": "CodeWhy",
   "description": "AI 기반 코드 컨텍스트 분석 - 컨텍스트 블레임, 타임라인 요약, 요구사항 역추적",
   "version": "0.0.1",
-  "icon": "images/codewhy.svg",
+  "icon": "images/icon-128.png",
   "engines": {
     "vscode": "^1.118.0"
   },

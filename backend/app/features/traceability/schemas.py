@@ -15,9 +15,11 @@ class TraceRequest(BaseModel):
 
 
 class DocumentMatch(BaseModel):
-    path: str
-    page: int
-    excerpt: str
+    documentId: int
+    name: str                  # 업로드 원본 파일명
+    page: int | None = None
+    excerpt: str | None = None
+    downloadUrl: str           # /api/documents/{id}/download
 
 
 class TraceResponse(BaseModel):
