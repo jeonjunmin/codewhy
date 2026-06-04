@@ -7,17 +7,21 @@ GET  /api/documents/{id}/download — 원본 파일 스트리밍 다운로드
 """
 
 import logging
-import os
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import doc_index
 from app.db import crud_common
 from app.db.postgres import get_db
 from app.features.documents import service
-from app.features.documents.schemas import BulkUploadResponse, DocumentUploadResponse
+from app.features.documents.schemas import (
+    BulkUploadResponse,
+    DocumentSearchItem,
+    DocumentSearchRequest,
+    DocumentUploadResponse,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -120,18 +124,31 @@ async def bulk_upload_documents(
     )
 
 
+@router.post("/search", response_model=list[DocumentSearchItem])
+async def search_documents(body: DocumentSearchRequest, db: AsyncSession = Depends(get_db)):
+    """커밋 메시지 키워드로 연관 문서 검색. 없으면 최신 문서 1건 반환."""
+    docs = await service.search_by_keywords(db, body.keywords)
+    return [
+        DocumentSearchItem(
+            id=doc.id,
+            name=doc.original_name,
+            downloadUrl=f"/api/documents/{doc.id}/download",
+            pageCount=doc.page_count,
+        )
+        for doc in docs
+    ]
+
+
 @router.get("/{document_id}/download")
 async def download_document(document_id: int, db: AsyncSession = Depends(get_db)):
     doc = await service.get_document(db, document_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다.")
+    if not doc.file_data:
+        raise HTTPException(status_code=404, detail="문서 파일 데이터가 없습니다.")
 
-    path = service.storage_path(doc)
-    if not os.path.isfile(path):
-        raise HTTPException(status_code=404, detail="문서 파일이 서버에 없습니다.")
-
-    return FileResponse(
-        path,
-        filename=doc.original_name,
+    return Response(
+        content=doc.file_data,
         media_type=doc.content_type or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{doc.original_name}"'},
     )
