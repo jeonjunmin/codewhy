@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     AWS_DEFAULT_REGION: str = "ap-northeast-2"
 
     # ── AWS Bedrock ───────────────────────────────────────────────────────────
-    BEDROCK_MODEL_ID: str = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+    BEDROCK_MODEL_ID: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
 
     # ── PostgreSQL (RDS) ──────────────────────────────────────────────────────
     # asyncpg 드라이버 (FastAPI async) — .env 의 DATABASE_URL 로 주입

@@ -10,5 +10,5 @@ import axios, { AxiosInstance } from 'axios';
 export function createHttpClient(): AxiosInstance {
     const config = vscode.workspace.getConfiguration('codewhy');
     const baseURL = config.get<string>('backendUrl', 'http://localhost:8000');
-    return axios.create({ baseURL, timeout: 30000 });
+    return axios.create({ baseURL, timeout: 120_000 });
 }

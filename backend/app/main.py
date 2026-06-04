@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.features.blame.router import router as blame_router
+from app.features.project.router import router as project_router
 from app.features.timeline.router import router as timeline_router
 from app.features.traceability.router import router as traceability_router
 
@@ -55,9 +56,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(blame_router,        prefix="/api/blame",    tags=["Context Blame"])
-app.include_router(timeline_router,     prefix="/api/timeline", tags=["Timeline Summary"])
-app.include_router(traceability_router, prefix="/api/trace",    tags=["Requirement Trace"])
+app.include_router(blame_router,        prefix="/api/blame",      tags=["Context Blame"])
+app.include_router(timeline_router,     prefix="/api/timeline",   tags=["Timeline Summary"])
+app.include_router(traceability_router, prefix="/api/trace",      tags=["Requirement Trace"])
+app.include_router(project_router,      prefix="/api/v1/project", tags=["Project Initialize"])
 
 
 @app.get("/health")

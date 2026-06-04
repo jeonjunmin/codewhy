@@ -109,11 +109,7 @@ def classify_and_split(state: TimelineState) -> TimelineState:
 
 
 def map_summarize(state: TimelineState) -> TimelineState:
-    """노드 2 — 청크별 중간 요약 (Map 단계).
-
-    ③ 각 청크에 대해 Bedrock(Claude) 호출 → 자연어 요약 생성.
-    청크 수만큼 Bedrock 을 순차 호출한다. (추후 Send() API로 병렬화 가능)
-    """
+    """노드 2 — 청크별 중간 요약 (Map 단계)."""
     llm = get_bedrock_llm(max_tokens=400)
     summaries: list[str] = []
 
@@ -242,17 +238,26 @@ def _build_graph() -> StateGraph:
 _GRAPH = _build_graph()
 
 
+def _fallback_summary(commits: list[dict]) -> dict:
+    """AWS 자격증명 없음 / Bedrock 미연동 시 커밋 목록으로 기본 요약을 구성한다."""
+    return {
+        "summary": f"[Bedrock 미연동] 총 {len(commits)}개의 커밋이 있습니다. AWS 자격증명을 설정하면 AI 요약이 활성화됩니다.",
+        "milestones": [
+            {"date": c["date"], "description": c["subject"]}
+            for c in commits[:10]
+        ],
+    }
+
+
 def run_timeline_graph(repo_path: str, file_path: str, commits: list[dict]) -> dict:
-    """② RDS 커밋 목록을 받아 ④ 최종 요약 dict 를 반환한다.
+    """② RDS 커밋 목록을 받아 ④ 최종 요약 dict 를 반환한다."""
+    # AWS 자격증명이 없으면 커밋 목록 기반 기본 요약 반환
+    import boto3
+    try:
+        boto3.client("sts").get_caller_identity()
+    except Exception:
+        return _fallback_summary(commits)
 
-    Args:
-        repo_path: 레포 식별자 (로깅/캐시 키용)
-        file_path: 파일 경로
-        commits:   RDS 에서 조회한 커밋 목록 [{"hash","author","date","subject"}, ...]
-
-    Returns:
-        {"summary": str, "milestones": [{"date": str, "description": str}, ...]}
-    """
     final_state: TimelineState = _GRAPH.invoke({
         "repo_path":       repo_path,
         "file_path":       file_path,

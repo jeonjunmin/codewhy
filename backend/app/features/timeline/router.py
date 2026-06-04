@@ -11,14 +11,46 @@ POST /api/timeline/summary
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
+from pydantic import BaseModel
 
 from app.db import dynamodb
 from app.features.timeline import service
 from app.features.timeline.schemas import TimelineRequest, TimelineResponse
+from app.features.timeline.tasks import analyze_all_project_files
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+# ── 프로젝트 전체 파일 분석 ───────────────────────────────────────────────────
+
+class ProjectAnalyzeRequest(BaseModel):
+    repo_path: str   # git 루트 절대 경로 (예: "C:/dev/codewhy")
+
+
+class ProjectAnalyzeResponse(BaseModel):
+    status: str
+    message: str
+
+
+@router.post("/files/analyze", response_model=ProjectAnalyzeResponse)
+async def analyze_project_files(
+    req: ProjectAnalyzeRequest,
+    background_tasks: BackgroundTasks,
+):
+    """프로젝트의 모든 소스 파일을 백그라운드에서 순회 분석한다.
+
+    - 사용자 대기 없이 즉시 STARTED 반환
+    - BackgroundTasks 가 각 파일별 Skip / INSERT / UPDATE 를 수행
+    - 터미널 로그에서 진행 상황 확인 가능
+    """
+    background_tasks.add_task(analyze_all_project_files, req.repo_path)
+    logger.info("analyze_project_files: 배경 분석 시작 — %s", req.repo_path)
+    return ProjectAnalyzeResponse(
+        status="STARTED",
+        message=f"{req.repo_path} 의 파일 분석을 시작했습니다.",
+    )
 
 
 @router.post("/summary", response_model=TimelineResponse)
