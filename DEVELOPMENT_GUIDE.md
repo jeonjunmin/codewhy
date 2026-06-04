@@ -126,8 +126,52 @@ codewhy/
 - 코드 + 커밋 + 기획서 단락을 Bedrock Converse로 종합 → **변경 사유 한국어 설명**
 - 부가: 티켓/팀 매핑, PR 단위 변경(`vcs.py`), 같은 티켓 후속 커밋 → "함께 일어난 일" 조립
 - "AI에게 더 묻기"(`/ask`) 후속 질문 지원
-- **캐시**: `blame_explanations` UNIQUE(file_id, line_no, commit_id) — 라인이 밀려 커밋이 바뀌면 자동 캐시 미스
+- **캐시**: `blame_explanations` UNIQUE(**file_id, commit_id**) — **커밋×파일 단위** 캐시
 - Bedrock 미설정 시 커밋 메시지로 폴백 → 로컬에서도 깨지지 않음
+
+#### 구현 흐름 상세 (신예진 담당 개발자 외 참고용)
+
+**핵심 설계 원칙: "왜 바뀌었나"는 줄(line)이 아니라 커밋이 그 파일에 가한 변경의 속성이다.**
+줄 번호는 `git blame`으로 커밋을 찾기 위한 포인터일 뿐이므로, 분석·저장 단위를 **커밋×파일**로 잡는다.
+같은 커밋이 바꾼 여러 줄은 변경 이유가 같으므로 설명 1개를 공유한다(Bedrock 호출 1회, DB 행 1개).
+
+```
+사용자가 라인 클릭
+    │
+    ▼
+[1] git blame  →  이 줄을 마지막으로 바꾼 commit_hash 해석
+                  (저렴·빠름, Bedrock 아님)
+    │
+    ▼
+[2] 공유 백본 upsert  →  repo/file/commit/commit_files 행 확보
+                          (get_or_create 패턴, 멱등)
+    │
+    ▼
+[3] 캐시 조회  →  blame_explanations WHERE (file_id, commit_id)
+    │
+    ├─ 적중 ──▶  저장된 설명 즉시 반환  (Bedrock 0회, 재클릭도 동일)
+    │
+    └─ 미스 ──▶
+            [4] service.analyze_blame(info 재사용)
+                  ① extract_keywords(커밋 메시지)
+                  ② KB retrieve(기획서 단락)
+                  ③ _build_context(작성자/날짜/메시지/diff/기획서) 공유 블록 생성
+                  ④ call_bedrock(설명, context=..., cache=True)   ← Bedrock 1회
+                  ⑤ call_bedrock(AI제안, context=..., cache=True) ← 프리픽스 캐시 적중
+                  ⑥ PR·후속커밋 조립(relatedChanges)
+            [5] blame_explanations upsert(file_id, commit_id, ...)
+            [6] 응답 반환
+```
+
+**캐시 무효화 전략 (자동)**
+- 누군가 그 줄을 새 커밋으로 수정 → `git blame`이 다른 commit_hash 반환 → 캐시 키 불일치 → 자동 미스 → 재분석
+- TTL 없음, 영구 재사용 — 커밋이 안 바뀌면 평생 1회만 분석
+
+**비용 최적화 2가지**
+1. **diff 길이 제한** (`_MAX_DIFF_CHARS = 2000`) — 거대 커밋의 토큰 폭발 방지. `_truncate_diff()` 참조.
+2. **프롬프트 캐싱** — `analyze_blame` 1회 실행에 Bedrock을 2번 호출(설명+AI제안)하는데, 같은 `context` 블록을 공유해 두 번째 호출의 입력 프리픽스가 Bedrock 측에서 캐시 적중. `call_bedrock(context=..., cache=True)` 참조.
+
+**중복 git blame 방지**: 라우터가 [1]에서 이미 구한 `BlameInfo`를 `service.analyze_blame(info=info)`로 전달해 service 내부의 재조회를 생략한다.
 
 ### ⚠️ 타임라인 요약 (Timeline Summary) — 캐시 키 미구현(블로커)
 `POST /api/timeline/...`
@@ -180,7 +224,7 @@ repositories ─┬─ commits ─┬─ commit_files ─ files
 | `commits` | git 커밋(블레임·타임라인 공유) | UNIQUE(repo_id, commit_hash), ticket/author_email 인덱스 |
 | `files` | 레포 내 파일 경로 | UNIQUE(repo_id, file_path) |
 | `commit_files` | 커밋↔파일 N:M + 변경량 | (commit_id, file_id) PK |
-| `blame_explanations` | 블레임 AI 결과 캐시 | UNIQUE(file_id, line_no, commit_id) |
+| `blame_explanations` | 블레임 AI 결과 캐시 | UNIQUE(file_id, commit_id) — 커밋×파일 단위 dedup |
 | `timeline_summaries` | 타임라인 요약 캐시 | UNIQUE(file_id, commit_set_hash) |
 | `documents` | 업로드 문서 메타데이터 | storage_key, indexed_at |
 | `document_links` | 문서↔git 연결(ticket/commit/file) | 부분 UNIQUE(document_id, commit_id, link_type) |
@@ -266,7 +310,7 @@ alembic revision --autogenerate -m "..."  # 스키마 변경 시
 - [ ] **시맨틱 폴백 노출 정책** (`traceability._by_semantic`) — 약한 매칭(낮은 score)을 "추정"으로 보여줄지 최소 점수로 거를지 결정.
 
 ### 🟢 선택 — 비용/성능 최적화
-- [ ] 역추적 시맨틱 폴백 결과 캐시 (blame처럼 file_id/line_no/commit_id 키) — 매 조회 KB 호출 부담 완화.
+- [ ] 역추적 시맨틱 폴백 결과 캐시 (blame처럼 file_id/commit_id 키) — 매 조회 KB 호출 부담 완화.
 - [ ] 타임라인 map 단계 Bedrock 호출 **병렬화** (LangGraph `Send()` API).
 - [ ] 백필 임계 구간(threshold 근처)만 LLM으로 excerpt 보강 (비용 통제).
 
