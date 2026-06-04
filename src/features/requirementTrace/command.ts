@@ -1,53 +1,114 @@
+import { execSync } from 'child_process';
 import * as vscode from 'vscode';
 import { getEditorContext } from '../../shared/editor';
-import { fetchRequirementTrace } from './api';
-import { showRequirementTraceView } from './view';
 
 /**
  * `codewhy.requirementTrace` 명령 핸들러.
  *
- * 1. `codewhy.documentPaths` 설정이 있는지 확인하고
- * 2. 현재 파일/라인/레포 경로를 얻어 백엔드에 검색을 요청하고
- * 3. 결과를 view 모듈에 전달한다.
- *
  * 👤 담당: 개발자 C
  */
-export async function runRequirementTrace(context: vscode.ExtensionContext) {
-    const config = vscode.workspace.getConfiguration('codewhy');
-    const documentPaths = config.get<string[]>('documentPaths', []);
-    // TODO(결정): 브라운필드 모델에서는 문서가 서버에 업로드되므로 로컬 documentPaths 가 불필요하다.
-    //   이 게이트가 비어 있으면 추적이 시작도 안 되어 백필/시맨틱 경로를 막는다.
-    //   게이트를 제거하거나 "서버 문서 사용" 모드로 전환할지 결정 필요.
-    if (documentPaths.length === 0) {
-        vscode.window.showWarningMessage(
-            'CodeWhy: 기획서 폴더가 설정되지 않았습니다. 설정에서 codewhy.documentPaths를 추가하세요.'
-        );
-        return;
-    }
-
+export async function runRequirementTrace(_context: vscode.ExtensionContext) {
     const ctx = getEditorContext();
-    if (!ctx) {
-        return;
-    }
+    if (!ctx) { return; }
 
-    await vscode.window.withProgress(
-        {
-            location: vscode.ProgressLocation.Notification,
-            title: 'CodeWhy: 연관 기획서 검색 중...',
-        },
-        async () => {
-            try {
-                const result = await fetchRequirementTrace(ctx);
-                if (result.documents.length === 0) {
-                    vscode.window.showInformationMessage('연관된 기획 문서를 찾지 못했습니다.');
-                    return;
-                }
-                showRequirementTraceView(context, ctx, result);
-            } catch (err) {
-                vscode.window.showErrorMessage(
-                    `Requirement Trace 실패: ${(err as Error).message}`
-                );
-            }
-        }
+    const commits = getRecentCommits(ctx.repoPath, ctx.filePath);
+
+    const panel = vscode.window.createWebviewPanel(
+        'requirementTrace',
+        'CodeWhy: 원본 기획서 찾기',
+        vscode.ViewColumn.Beside,
+        { enableScripts: true }
     );
+    panel.webview.html = buildHtml(ctx, commits);
+
+    panel.webview.onDidReceiveMessage((msg) => {
+        if (msg.command === 'findSpec') {
+            vscode.window.showInformationMessage('CodeWhy: 원본 기획서 검색 기능은 준비 중입니다.');
+        }
+    });
+}
+
+interface CommitEntry {
+    hash: string;
+    date: string;
+    author: string;
+    message: string;
+}
+
+function getRecentCommits(repoPath: string, filePath: string): CommitEntry[] {
+    try {
+        const out = execSync(
+            `git log --max-count=10 --pretty=format:"%h|%ad|%an|%s" --date=short -- "${filePath}"`,
+            { cwd: repoPath, encoding: 'utf8' }
+        );
+        return out.trim().split('\n').filter(Boolean).map((line: string) => {
+            const [hash, date, author, ...rest] = line.split('|');
+            return { hash, date, author, message: rest.join('|') };
+        });
+    } catch {
+        return [];
+    }
+}
+
+function escape(s: string): string {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function buildHtml(ctx: { filePath: string; line: number }, commits: CommitEntry[]): string {
+    const fileName = ctx.filePath.split(/[\\/]/).pop() ?? ctx.filePath;
+
+    const rows = commits.length === 0
+        ? '<tr><td colspan="5" style="text-align:center;color:#888;padding:20px">커밋 이력이 없습니다.</td></tr>'
+        : commits.map((c, i) => `
+            <tr>
+                <td>${i + 1}</td>
+                <td><code>${escape(c.hash)}</code></td>
+                <td style="color:#888">${escape(c.date)}</td>
+                <td>${escape(c.author)}</td>
+                <td>${escape(c.message)}</td>
+            </tr>`).join('');
+
+    return `<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<style>
+  body { font-family: var(--vscode-font-family); font-size:13px; padding:20px; color:var(--vscode-foreground); background:var(--vscode-editor-background); }
+  h2 { font-size:15px; margin-bottom:4px; }
+  .subtitle { color:#888; font-size:12px; margin-bottom:20px; }
+  table { width:100%; border-collapse:collapse; }
+  th { text-align:left; padding:8px 10px; border-bottom:1px solid var(--vscode-panel-border); color:#888; font-weight:600; font-size:11px; text-transform:uppercase; }
+  td { padding:8px 10px; border-bottom:1px solid var(--vscode-panel-border); vertical-align:top; }
+  tr:hover td { background:var(--vscode-list-hoverBackground); }
+  code { font-family:monospace; font-size:11px; color:#a78bfa; }
+  .btn-wrap { margin-top:28px; text-align:center; }
+  button { background:#2563eb; color:#fff; border:none; border-radius:6px; padding:10px 32px; font-size:14px; font-weight:600; cursor:pointer; letter-spacing:0.3px; }
+  button:hover { background:#1d4ed8; }
+</style>
+</head>
+<body>
+<h2>📄 ${escape(fileName)} — 커밋 이력</h2>
+<div class="subtitle">L${ctx.line} 기준 최근 커밋 최대 10건</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>#</th><th>Hash</th><th>날짜</th><th>작성자</th><th>메시지</th>
+    </tr>
+  </thead>
+  <tbody>${rows}</tbody>
+</table>
+
+<div class="btn-wrap">
+  <button id="findBtn">🔍 원본 기획서 찾기</button>
+</div>
+
+<script>
+  const vscode = acquireVsCodeApi();
+  document.getElementById('findBtn').addEventListener('click', () => {
+    vscode.postMessage({ command: 'findSpec' });
+  });
+</script>
+</body>
+</html>`;
 }
