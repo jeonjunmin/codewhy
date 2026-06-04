@@ -7,10 +7,9 @@ GET  /api/documents/{id}/download — 원본 파일 스트리밍 다운로드
 """
 
 import logging
-import os
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import doc_index
@@ -125,13 +124,11 @@ async def download_document(document_id: int, db: AsyncSession = Depends(get_db)
     doc = await service.get_document(db, document_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다.")
+    if not doc.file_data:
+        raise HTTPException(status_code=404, detail="문서 파일 데이터가 없습니다.")
 
-    path = service.storage_path(doc)
-    if not os.path.isfile(path):
-        raise HTTPException(status_code=404, detail="문서 파일이 서버에 없습니다.")
-
-    return FileResponse(
-        path,
-        filename=doc.original_name,
+    return Response(
+        content=doc.file_data,
         media_type=doc.content_type or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{doc.original_name}"'},
     )

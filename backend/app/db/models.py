@@ -22,6 +22,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -169,6 +170,7 @@ class Document(Base):
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     page_count: Mapped[int | None] = mapped_column(Integer)
     uploaded_by: Mapped[str | None] = mapped_column(Text)
+    file_data: Mapped[bytes | None] = mapped_column(LargeBinary)            # 파일 바이너리 (DB 저장 방식)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # 시맨틱 인덱스(KB) 적재 완료 시각
 

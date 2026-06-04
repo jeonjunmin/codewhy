@@ -1,19 +1,17 @@
 """문서 저장/조회 + git 히스토리 연결 비즈니스 로직.
 
-업로드된 기획 문서의 바이너리는 서버 디렉터리(DOCUMENTS_DIR)에 UUID 파일명으로 저장하고,
-DB(documents)에는 메타데이터만 둔다. document_links 가 문서를 git 히스토리(티켓)에 연결한다.
+업로드된 기획 문서의 바이너리를 DB(documents.file_data)에 직접 저장한다.
+document_links 가 문서를 git 히스토리(티켓)에 연결한다.
 
 👤 담당: 개발자 C
 """
 
-import os
-import uuid
+import io
 from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import doc_index
-from app.core.config import get_documents_dir
 from app.core.tickets import extract_tickets
 from app.db.models import Document, DocumentLink
 
@@ -28,22 +26,15 @@ async def save_upload(
     uploaded_by: str | None = None,
     tickets: list[str] | None = None,
 ) -> Document:
-    """업로드 바이너리를 서버에 저장하고 documents + document_links 행을 만든다."""
-    base_dir = get_documents_dir()
-    os.makedirs(base_dir, exist_ok=True)
-
-    ext = os.path.splitext(original_name)[1]
-    storage_key = f"{uuid.uuid4().hex}{ext}"
-    with open(os.path.join(base_dir, storage_key), "wb") as f:
-        f.write(data)
-
+    """업로드 바이너리를 DB에 저장하고 documents + document_links 행을 만든다."""
     doc = Document(
         repo_id=repo_id,
         original_name=original_name,
-        storage_key=storage_key,
+        storage_key="",
+        file_data=data,
         content_type=content_type,
         size_bytes=len(data),
-        page_count=_pdf_page_count(os.path.join(base_dir, storage_key), content_type),
+        page_count=_pdf_page_count(data, content_type),
         uploaded_by=uploaded_by,
     )
     db.add(doc)
@@ -93,17 +84,12 @@ async def get_document(db: AsyncSession, document_id: int) -> Document | None:
     return await db.get(Document, document_id)
 
 
-def storage_path(document: Document) -> str:
-    return os.path.join(get_documents_dir(), document.storage_key)
-
-
-def _pdf_page_count(path: str, content_type: str | None) -> int | None:
-    """PDF 면 페이지 수를 추출한다(그 외/실패 시 None)."""
-    if content_type != "application/pdf" and not path.lower().endswith(".pdf"):
+def _pdf_page_count(data: bytes, content_type: str | None) -> int | None:
+    """PDF 바이너리에서 페이지 수를 추출한다(그 외/실패 시 None)."""
+    if content_type != "application/pdf":
         return None
     try:
         from pypdf import PdfReader
-
-        return len(PdfReader(path).pages)
+        return len(PdfReader(io.BytesIO(data)).pages)
     except Exception:
         return None
