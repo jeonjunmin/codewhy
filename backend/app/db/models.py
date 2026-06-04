@@ -109,18 +109,19 @@ class CommitFile(Base):
 class BlameExplanation(Base):
     """컨텍스트 블레임 AI 결과 캐시.
 
-    UNIQUE(file_id, line_no, commit_id) — 캐시 키에 commit 을 포함한다. 라인이 밀려
-    blamed 커밋이 달라지면 매칭 row 가 없어 자동 캐시 미스 → 재계산되어 stale 응답을 막는다.
+    UNIQUE(file_id, commit_id) — "왜 바뀌었나"는 줄(line)이 아니라 커밋이 그 파일에 가한
+    변경의 속성이다. 줄은 그 커밋을 찾기 위한 포인터(git blame)일 뿐이므로, 같은 커밋이 바꾼
+    여러 줄은 설명 1개를 공유한다(커밋×파일 단위 dedup). 라인이 밀려 blamed 커밋이 달라지면
+    (file_id, commit_id) 가 달라져 자동 캐시 미스 → 재계산되어 stale 응답을 막는다.
     """
 
     __tablename__ = "blame_explanations"
     __table_args__ = (
-        UniqueConstraint("file_id", "line_no", "commit_id", name="uq_blame_file_line_commit"),
+        UniqueConstraint("file_id", "commit_id", name="uq_blame_file_commit"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     file_id: Mapped[int] = mapped_column(ForeignKey("files.id", ondelete="CASCADE"), nullable=False)
-    line_no: Mapped[int] = mapped_column(Integer, nullable=False)
     commit_id: Mapped[int] = mapped_column(ForeignKey("commits.id", ondelete="CASCADE"), nullable=False)
     explanation: Mapped[str] = mapped_column(Text, nullable=False)
     ai_suggestion: Mapped[str | None] = mapped_column(Text)

@@ -1,7 +1,8 @@
 # CodeWhy 개발 가이드
 
-> 현재 소스 코드(`master` 기준) 기반으로 정리한 개발 현황·구조·할 일 문서입니다.
-> 마지막 정리: 2026-06-03
+> 현재 소스 코드(`master` 기준) 기반으로 정리한 **단일 개발 레퍼런스**입니다.
+> 개발 현황·구조·담당 분장·커밋 규칙·TODO를 한 곳에서 관리합니다.
+> 마지막 정리: 2026-06-04
 
 ---
 
@@ -22,7 +23,20 @@ CodeWhy는 **"코드의 왜(why)를 설명하는"** VSCode 확장 + Python 백�
 
 ---
 
-## 2. 아키텍처
+## 2. 담당 분장
+
+세 명이 동시에 작업해도 충돌이 나지 않도록 **기능별 폴더 단위로 코드 소유권을 분리**했습니다.
+각 개발자는 원칙적으로 **자기 기능 폴더 안에서만** 파일을 만들고 고칩니다.
+
+| 담당 | 기능 | 프론트엔드 | 백엔드 |
+| ---- | ---- | ---------- | ------ |
+| 신예진 | Context Blame | `src/features/contextBlame/` | `backend/app/features/blame/` |
+| 박성태 | Timeline Summary | `src/features/timelineSummary/` | `backend/app/features/timeline/` |
+| 전준민 | Requirement Trace | `src/features/requirementTrace/` | `backend/app/features/traceability/` |
+
+---
+
+## 3. 아키텍처
 
 ```
 ┌──────────────────────┐      HTTP(axios)      ┌──────────────────────────┐
@@ -50,7 +64,7 @@ CodeWhy는 **"코드의 왜(why)를 설명하는"** VSCode 확장 + Python 백�
 
 ---
 
-## 3. 기술 스택
+## 4. 기술 스택
 
 | 영역 | 기술 |
 | --- | --- |
@@ -61,11 +75,10 @@ CodeWhy는 **"코드의 왜(why)를 설명하는"** VSCode 확장 + Python 백�
 | 문서 파싱 | pypdf (PDF 페이지 수) |
 | Git | Git CLI subprocess (`app/core/git.py`) |
 
-> ⚠️ README에는 캐시로 "AWS DynamoDB"라고 적혀 있으나, **실제 코드는 PostgreSQL(RDS)로 전환 완료**되었습니다(커밋 `0493e72`). README 갱신 필요.
 
 ---
 
-## 4. 디렉터리 구조
+## 5. 디렉터리 구조
 
 ```
 codewhy/
@@ -73,9 +86,9 @@ codewhy/
 │   ├── extension.ts                  # 진입점 — 기능 register 호출만
 │   ├── shared/                       # http 클라이언트, editor 유틸, 공용 타입
 │   └── features/
-│       ├── contextBlame/             # command / view(webview) / api / sidebar
-│       ├── timelineSummary/          # command / view / api
-│       └── requirementTrace/         # command / view / api
+│       ├── contextBlame/             # 👤 신예진 — command / view(webview) / api / sidebar
+│       ├── timelineSummary/          # 👤 박성태 — command / view / api
+│       └── requirementTrace/         # 👤 전준민 — command / view / api
 │
 └── backend/app/                      # FastAPI 백엔드
     ├── main.py                       # 앱 생성 + 라우터 5개 등록 + DB 연결 확인
@@ -83,7 +96,7 @@ codewhy/
     │   ├── git.py                    # blame/log/diff/branch 추출
     │   ├── ai_client.py / bedrock.py # Bedrock Converse / LangChain ChatBedrock
     │   ├── knowledge_base.py         # KB retrieve (RAG)
-    │   ├── doc_index.py   ⬅︎미커밋    # 문서 → S3(KB 데이터소스) 인덱싱
+    │   ├── doc_index.py              # 문서 → S3(KB 데이터소스) 인덱싱
     │   ├── config.py                 # pydantic-settings 환경설정
     │   ├── tickets.py                # 커밋/파일명에서 티켓(PAY-2041) 추출
     │   └── vcs.py                    # GitHub/GitLab PR·MR 조회
@@ -94,16 +107,16 @@ codewhy/
     ├── ai/graph.py                   # LangGraph 타임라인 Map-Reduce 파이프라인
     ├── alembic/versions/             # 0001_init_schema, 0002_backfill_trace
     └── features/
-        ├── blame/                    # router/service/crud/schemas
-        ├── timeline/                 # router/service/crud/graph/schemas
-        ├── traceability/             # router/service/schemas (다단계 추적)
+        ├── blame/                    # 👤 신예진 — router/service/crud/schemas
+        ├── timeline/                 # 👤 박성태 — router/service/crud/graph/schemas
+        ├── traceability/             # 👤 전준민 — router/service/schemas (다단계 추적)
         ├── documents/                # router/service/schemas (업로드/다운로드)
-        └── onboarding/   ⬅︎미커밋     # router/backfill/schemas (브라운필드 백필)
+        └── onboarding/               # router/backfill/schemas (브라운필드 백필)
 ```
 
 ---
 
-## 5. 개발 완료 기능 현황
+## 6. 개발 완료 기능 현황
 
 ### ✅ 컨텍스트 블레임 (Context Blame) — 동작 가능
 `POST /api/blame/context`, `POST /api/blame/ask`
@@ -113,8 +126,52 @@ codewhy/
 - 코드 + 커밋 + 기획서 단락을 Bedrock Converse로 종합 → **변경 사유 한국어 설명**
 - 부가: 티켓/팀 매핑, PR 단위 변경(`vcs.py`), 같은 티켓 후속 커밋 → "함께 일어난 일" 조립
 - "AI에게 더 묻기"(`/ask`) 후속 질문 지원
-- **캐시**: `blame_explanations` UNIQUE(file_id, line_no, commit_id) — 라인이 밀려 커밋이 바뀌면 자동 캐시 미스
+- **캐시**: `blame_explanations` UNIQUE(**file_id, commit_id**) — **커밋×파일 단위** 캐시
 - Bedrock 미설정 시 커밋 메시지로 폴백 → 로컬에서도 깨지지 않음
+
+#### 구현 흐름 상세 (신예진 담당 개발자 외 참고용)
+
+**핵심 설계 원칙: "왜 바뀌었나"는 줄(line)이 아니라 커밋이 그 파일에 가한 변경의 속성이다.**
+줄 번호는 `git blame`으로 커밋을 찾기 위한 포인터일 뿐이므로, 분석·저장 단위를 **커밋×파일**로 잡는다.
+같은 커밋이 바꾼 여러 줄은 변경 이유가 같으므로 설명 1개를 공유한다(Bedrock 호출 1회, DB 행 1개).
+
+```
+사용자가 라인 클릭
+    │
+    ▼
+[1] git blame  →  이 줄을 마지막으로 바꾼 commit_hash 해석
+                  (저렴·빠름, Bedrock 아님)
+    │
+    ▼
+[2] 공유 백본 upsert  →  repo/file/commit/commit_files 행 확보
+                          (get_or_create 패턴, 멱등)
+    │
+    ▼
+[3] 캐시 조회  →  blame_explanations WHERE (file_id, commit_id)
+    │
+    ├─ 적중 ──▶  저장된 설명 즉시 반환  (Bedrock 0회, 재클릭도 동일)
+    │
+    └─ 미스 ──▶
+            [4] service.analyze_blame(info 재사용)
+                  ① extract_keywords(커밋 메시지)
+                  ② KB retrieve(기획서 단락)
+                  ③ _build_context(작성자/날짜/메시지/diff/기획서) 공유 블록 생성
+                  ④ call_bedrock(설명, context=..., cache=True)   ← Bedrock 1회
+                  ⑤ call_bedrock(AI제안, context=..., cache=True) ← 프리픽스 캐시 적중
+                  ⑥ PR·후속커밋 조립(relatedChanges)
+            [5] blame_explanations upsert(file_id, commit_id, ...)
+            [6] 응답 반환
+```
+
+**캐시 무효화 전략 (자동)**
+- 누군가 그 줄을 새 커밋으로 수정 → `git blame`이 다른 commit_hash 반환 → 캐시 키 불일치 → 자동 미스 → 재분석
+- TTL 없음, 영구 재사용 — 커밋이 안 바뀌면 평생 1회만 분석
+
+**비용 최적화 2가지**
+1. **diff 길이 제한** (`_MAX_DIFF_CHARS = 2000`) — 거대 커밋의 토큰 폭발 방지. `_truncate_diff()` 참조.
+2. **프롬프트 캐싱** — `analyze_blame` 1회 실행에 Bedrock을 2번 호출(설명+AI제안)하는데, 같은 `context` 블록을 공유해 두 번째 호출의 입력 프리픽스가 Bedrock 측에서 캐시 적중. `call_bedrock(context=..., cache=True)` 참조.
+
+**중복 git blame 방지**: 라우터가 [1]에서 이미 구한 `BlameInfo`를 `service.analyze_blame(info=info)`로 전달해 service 내부의 재조회를 생략한다.
 
 ### ⚠️ 타임라인 요약 (Timeline Summary) — 캐시 키 미구현(블로커)
 `POST /api/timeline/...`
@@ -122,7 +179,7 @@ codewhy/
 - LangGraph **Map-Reduce 파이프라인** 완성(`ai/graph.py`): classify/split → map 요약 → reduce JSON → parse → 재시도/폴백
 - 노이즈 커밋(test/chore/docs) 제거, 청크 20개 단위, JSON 파싱 실패 시 최대 2회 재시도 후 폴백
 - **캐시**: `timeline_summaries` UNIQUE(file_id, commit_set_hash)
-- 🚫 **`compute_commit_set_hash()`가 `NotImplementedError`** — 캐시 키 해시 함수가 비어 있어 현재 타임라인 호출은 실패함 (→ §7 TODO)
+- 🚫 **`compute_commit_set_hash()`가 `NotImplementedError`** — 캐시 키 해시 함수가 비어 있어 현재 타임라인 호출은 실패함 (→ §9 TODO)
 
 ### ✅ 요구사항 역추적 (Requirement Trace) — 다단계 추적 동작
 `POST /api/trace/requirement`
@@ -142,17 +199,17 @@ codewhy/
 - PDF면 페이지 수 추출(pypdf)
 - bulk: 일괄 저장 + 시맨틱 인덱싱 + KB ingestion job 1회 트리거
 
-### 🧪 브라운필드 온보딩 (Onboarding) — 개발 중 / 미커밋
+### 🧪 브라운필드 온보딩 (Onboarding) — 개발 중 / 테스트 필요
 `POST /api/onboarding/backfill` + `core/doc_index.py`
 
 - 레거시 레포 전체 git 히스토리를 훑어 커밋↔문서 역링크를 **사전 생성**(조회 시점 비용 절감)
 - 문서를 S3(Bedrock KB 데이터소스)에 올리고 `<key>.metadata.json` 사이드카에 `documentId` 심음
 - 부분 유니크 인덱스로 재실행 중복 방지(idempotent)
-- ⬅︎ `backend/app/features/onboarding/`, `backend/app/core/doc_index.py`, `alembic/versions/0002_backfill_trace.py`는 **아직 git 미추적(untracked)** 상태
+- `onboarding/`, `doc_index.py`, `0002_backfill_trace.py` 커밋 완료 (커밋 `69652a6`)
 
 ---
 
-## 6. 데이터 모델 (통합 스키마 8테이블)
+## 7. 데이터 모델 (통합 스키마 8테이블)
 
 ```
 repositories ─┬─ commits ─┬─ commit_files ─ files
@@ -167,7 +224,7 @@ repositories ─┬─ commits ─┬─ commit_files ─ files
 | `commits` | git 커밋(블레임·타임라인 공유) | UNIQUE(repo_id, commit_hash), ticket/author_email 인덱스 |
 | `files` | 레포 내 파일 경로 | UNIQUE(repo_id, file_path) |
 | `commit_files` | 커밋↔파일 N:M + 변경량 | (commit_id, file_id) PK |
-| `blame_explanations` | 블레임 AI 결과 캐시 | UNIQUE(file_id, line_no, commit_id) |
+| `blame_explanations` | 블레임 AI 결과 캐시 | UNIQUE(file_id, commit_id) — 커밋×파일 단위 dedup |
 | `timeline_summaries` | 타임라인 요약 캐시 | UNIQUE(file_id, commit_set_hash) |
 | `documents` | 업로드 문서 메타데이터 | storage_key, indexed_at |
 | `document_links` | 문서↔git 연결(ticket/commit/file) | 부분 UNIQUE(document_id, commit_id, link_type) |
@@ -176,23 +233,26 @@ repositories ─┬─ commits ─┬─ commit_files ─ files
 
 ---
 
-## 7. API 엔드포인트 요약
+## 8. API 엔드포인트 요약
 
-| Method | Path | 설명 |
-| --- | --- | --- |
-| GET | `/health` | 헬스체크 |
-| POST | `/api/blame/context` | 라인 변경 사유 분석 |
-| POST | `/api/blame/ask` | 블레임 맥락 위 후속 질문 |
-| POST | `/api/timeline/...` | 파일 커밋 흐름 요약 (캐시 키 미구현 주의) |
-| POST | `/api/trace/requirement` | 코드 → 기획 문서 다단계 역추적 |
-| POST | `/api/documents` | 단일 문서 업로드(+티켓 연결) |
-| POST | `/api/documents/bulk` | 문서 일괄 적재 + 시맨틱 인덱싱 |
-| GET | `/api/documents/{id}/download` | 원본 문서 스트리밍 다운로드 |
-| POST | `/api/onboarding/backfill` | 레포 전체 커밋↔문서 백필 (미커밋) |
+프론트엔드 `src/shared/types.ts`와 백엔드 `features/<name>/schemas.py`의 키 이름이 **일치**해야 합니다.
+응답 스키마를 바꾸려면 양쪽을 동시에 수정하세요.
+
+| Method | Path | 담당 | 요청 | 응답 |
+| --- | --- | --- | --- | --- |
+| GET | `/health` | — | — | 헬스체크 |
+| POST | `/api/blame/context` | 신예진 | `{filePath, line, repoPath}` | `{explanation, commitHash, author, date}` |
+| POST | `/api/blame/ask` | 신예진 | — | 블레임 맥락 위 후속 질문 |
+| POST | `/api/timeline/summary` | 박성태 | `{filePath, repoPath}` | `{summary, milestones:[{date, description}]}` |
+| POST | `/api/trace/requirement` | 전준민 | `{filePath, line, repoPath}` | `{documents:[{path, page, excerpt}]}` |
+| POST | `/api/documents` | — | — | 단일 문서 업로드(+티켓 연결) |
+| POST | `/api/documents/bulk` | — | — | 문서 일괄 적재 + 시맨틱 인덱싱 |
+| GET | `/api/documents/{id}/download` | — | — | 원본 문서 스트리밍 다운로드 |
+| POST | `/api/onboarding/backfill` | — | — | 레포 전체 커밋↔문서 백필 (미커밋) |
 
 ---
 
-## 8. 로컬 개발 환경
+## 9. 로컬 개발 환경
 
 ### 사전 요구사항
 - VSCode 1.118.0+, Node.js 18+, Python 3.11+, Git 2.25+
@@ -209,6 +269,8 @@ npm run backend:dev                        # http://localhost:8000
 npm run watch                              # 다른 터미널: TS 감시 빌드
 # VSCode F5 → Extension Development Host
 ```
+
+`/health` 가 200 을 반환하면 백엔드는 준비된 상태입니다.
 
 ### 주요 환경변수 (`backend/.env`)
 | 키 | 용도 | 미설정 시 동작 |
@@ -234,7 +296,7 @@ alembic revision --autogenerate -m "..."  # 스키마 변경 시
 
 ---
 
-## 9. TODO 리스트 (코드에 박힌 미완성/검증 항목)
+## 10. TODO 리스트 (코드에 박힌 미완성/검증 항목)
 
 ### 🔴 블로커 — 기능 동작에 필수
 - [ ] **`timeline/service.py::compute_commit_set_hash()` 구현** — 현재 `NotImplementedError`. 타임라인 캐시 키(SHA-256). 커밋 해시 목록 정렬 → join → sha256 권장.
@@ -248,24 +310,75 @@ alembic revision --autogenerate -m "..."  # 스키마 변경 시
 - [ ] **시맨틱 폴백 노출 정책** (`traceability._by_semantic`) — 약한 매칭(낮은 score)을 "추정"으로 보여줄지 최소 점수로 거를지 결정.
 
 ### 🟢 선택 — 비용/성능 최적화
-- [ ] 역추적 시맨틱 폴백 결과 캐시 (blame처럼 file_id/line_no/commit_id 키) — 매 조회 KB 호출 부담 완화.
+- [ ] 역추적 시맨틱 폴백 결과 캐시 (blame처럼 file_id/commit_id 키) — 매 조회 KB 호출 부담 완화.
 - [ ] 타임라인 map 단계 Bedrock 호출 **병렬화** (LangGraph `Send()` API).
 - [ ] 백필 임계 구간(threshold 근처)만 LLM으로 excerpt 보강 (비용 통제).
 
+### 각자 첫 작업 체크리스트
+
+#### 공통
+- [ ] `view.ts` 의 TODO 를 디자인 시안에 맞게 구현
+- [ ] `service.py` 의 프롬프트/로직 다듬기
+
+#### 신예진 (Context Blame)
+- [ ] 인라인 표시(데코레이션) vs Webview 결정 후 `view.ts` 구현
+- [ ] `service.py` 의 프롬프트 톤 조정
+
+#### 박성태 (Timeline Summary)
+- [ ] 마일스톤 타임라인 시각화 (Webview 추천)
+- [ ] `service.py` 의 JSON 파싱 실패 시 폴백 처리
+
+#### 전준민 (Requirement Trace)
+- [ ] PDF / DOCX / XLSX 파서 추가 (`pypdf`, `python-docx`, `openpyxl` 등)
+- [ ] QuickPick → Webview 미리보기 흐름 구현
+
 ---
 
-## 10. 앞으로 고려해야 할 것
+## 11. 커밋 메시지 규칙
+
+```
+<Type>[Domain]: <Description>
+
+- 상세 내역 1 (선택)
+- 상세 내역 2 (선택)
+```
+
+### Type 정의
+
+AI 타임라인 요약이 커밋의 성격을 파악하는 기준입니다.
+
+| Type | 설명 | AI 인식 |
+| ---- | ---- | ------- |
+| `feat` | 새로운 기능 추가 | "기능 추가의 역사" |
+| `fix` | 버그 수정 | "디버깅 및 안정화의 역사" |
+| `refactor` | 기능 변화 없는 코드 구조 개선 | "구조 개선의 역사" |
+| `perf` | 성능 개선 | "성능 최적화의 역사" |
+| `docs` | 문서 수정 (README 등) | "설명서 업데이트" |
+| `test` | 테스트 추가 / 수정 | (타임라인 집계 제외 가능) |
+| `chore` | 자잘한 설정 변경 (패키지 설치 등) | (타임라인 집계 제외 가능) |
+
+### Domain 예시
+
+```
+feat[auth]: 로그인 기능 추가
+fix[payment]: 결제 금액 계산 오류 수정
+refactor[timeline]: 서비스 레이어 분리
+perf[blame]: git log 호출 횟수 최적화
+docs[readme]: 환경 변수 설명 보완
+```
+
+---
+
+## 12. 앞으로 고려해야 할 것
 
 ### 보안 🔐
-- [ ] **README에 노출된 운영 정보 제거** — RDS 호스트 IP(`3.37.125.200`), DB 계정/비번(`postgres/postgres`), AWS 접속 절차가 평문으로 커밋돼 있음. 비밀번호 교체 + README에서 분리(팀 내부 채널/시크릿 매니저로).
 - [ ] CORS가 `allow_origins=["*"]` — 배포 시 확장 origin으로 제한 검토.
 - [ ] 문서 업로드 검증 부재 — 파일 크기/확장자/MIME 화이트리스트, 경로 traversal 방지.
 
 ### 안정성/완성도
-- [ ] **미커밋 작업 정리** — `onboarding/`, `doc_index.py`, `0002_backfill_trace.py`를 리뷰 후 커밋. `.env.example`/`config.py`/`models.py` 등 수정분도 함께 정합성 확인.
 - [ ] **테스트** — 현재 `src/test/extension.test.ts` 스켈레톤만 존재. 백엔드 단위 테스트(특히 `extract_keywords`, `extract_ticket`, 타임라인 파이프라인, 3단계 trace) 부재.
 - [ ] **에러 응답 표준화** — 현재 기능별로 `HTTPException(500, f"...: {e}")` 패턴. 공통 에러 스키마/로깅 정비.
-- [ ] **README ↔ 코드 정합** — 캐시(DynamoDB→PostgreSQL), 환경변수 목록, 온보딩 기능 반영.
+- [ ] **README ↔ 코드 정합** — 캐시(PostgreSQL), 환경변수 목록, 온보딩 기능 반영.
 
 ### 배포/운영
 - [ ] `backend/Dockerfile` 존재 — 배포 파이프라인(CI), 마이그레이션 자동 실행 전략 정리.
@@ -280,11 +393,25 @@ alembic revision --autogenerate -m "..."  # 스키마 변경 시
 
 ---
 
-## 11. 기여 시 참고
+## 13. 기여 시 참고
 
+### 기능 추가
 - **확장에 기능 추가**: `src/features/<기능>/` 폴더에 캡슐화하고 `src/extension.ts`에 register 호출만 추가.
 - **백엔드에 기능 추가**: `features/<기능>/{router,service,schemas}.py` 구성 → `main.py`에 `include_router`.
 - **공유 데이터**(commit/file/repo)는 `db/crud_common.py`의 upsert 헬퍼 재사용.
 - **스키마 변경**은 ORM 수정 후 Alembic autogenerate.
 - **외부 연동 추가** 시 미설정 환경에서 no-op/폴백하도록 작성(로컬 개발 보호).
-```
+
+### 공용 코드 수정 규칙
+
+다음 영역은 세 명이 함께 쓰므로 **PR/팀 합의 후** 수정합니다.
+
+- `src/extension.ts`, `src/shared/**`
+- `backend/app/main.py`, `backend/app/core/**`, `backend/app/db/**`
+- `package.json` 의 `contributes.commands` 와 `menus`
+
+새 명령을 추가하거나 응답 스키마를 바꿀 때 외에는 이 영역을 건드릴 일이 거의 없습니다.
+
+---
+
+질문이나 응답 스키마 변경이 필요하면 팀 채널에서 공유해주세요.

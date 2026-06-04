@@ -78,11 +78,6 @@ def get_aws_credentials() -> dict:
 
 
 # ─── AWS Bedrock (Context Blame RAG) ────────────────────────────────
-def get_bedrock_model_id() -> str:
-    """Converse API 로 호출할 Bedrock 모델 ID (inference profile ID 권장)."""
-    return os.getenv("BEDROCK_MODEL_ID", "apac.anthropic.claude-3-5-sonnet-20241022-v2:0")
-
-
 def get_bedrock_kb_id() -> str:
     """기획서 단락을 조회할 Bedrock Knowledge Base ID. 미설정 시 RAG 생략."""
     return os.getenv("BEDROCK_KNOWLEDGE_BASE_ID", "")
@@ -178,4 +173,5 @@ def get_gitlab_token() -> str:
 
 
 def get_bedrock_model_id() -> str:
+    """Converse API 로 호출할 Bedrock 모델 ID (inference profile ID 권장)."""
     return get_settings().BEDROCK_MODEL_ID

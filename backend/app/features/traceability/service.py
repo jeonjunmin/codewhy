@@ -45,7 +45,7 @@ async def trace(db: AsyncSession, repo_path: str, file_path: str, line: int) -> 
 
     # 3. 온디맨드 시맨틱 폴백 (추정)
     # TODO(검증): 시맨틱 폴백은 매 조회마다 KB 를 호출한다. 호출 빈도/지연이 부담되면
-    #   blame_explanations 처럼 (file_id, line_no, commit_id) 키로 결과를 캐시하는 방안 검토.
+    #   blame_explanations 처럼 (file_id, commit_id) 키로 결과를 캐시하는 방안 검토.
     return await _by_semantic(db, info.message)
 
 
