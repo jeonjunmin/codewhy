@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "PowerShell(py --version 2>&1)",
+      "PowerShell(py -3.12 --version 2>&1)"
     ]
   }
 }
