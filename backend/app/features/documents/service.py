@@ -9,6 +9,7 @@ document_links 가 문서를 git 히스토리(티켓)에 연결한다.
 import io
 from datetime import datetime, timezone
 
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import doc_index
@@ -82,6 +83,21 @@ async def index_document(db: AsyncSession, doc: Document) -> bool:
 
 async def get_document(db: AsyncSession, document_id: int) -> Document | None:
     return await db.get(Document, document_id)
+
+
+async def search_by_keywords(db: AsyncSession, keywords: list[str]) -> list[Document]:
+    """커밋 메시지 키워드로 original_name 부분 일치 검색. 없으면 최신 문서 1건 반환."""
+    if keywords:
+        conditions = [Document.original_name.ilike(f"%{kw}%") for kw in keywords]
+        stmt = select(Document).where(or_(*conditions)).order_by(Document.uploaded_at.desc())
+        rows = (await db.execute(stmt)).scalars().all()
+        if rows:
+            return list(rows)
+
+    # 매칭 없으면 최신 문서 1건
+    stmt = select(Document).order_by(Document.uploaded_at.desc()).limit(1)
+    doc = (await db.execute(stmt)).scalar_one_or_none()
+    return [doc] if doc else []
 
 
 def _pdf_page_count(data: bytes, content_type: str | None) -> int | None:

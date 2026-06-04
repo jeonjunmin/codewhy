@@ -14,6 +14,17 @@ class DocumentUploadResponse(BaseModel):
     linkedTickets: list[str] = []
 
 
+class DocumentSearchRequest(BaseModel):
+    keywords: list[str]   # 커밋 메시지에서 추출한 단어 목록
+
+
+class DocumentSearchItem(BaseModel):
+    id: int
+    name: str
+    downloadUrl: str
+    pageCount: int | None = None
+
+
 class BulkUploadResponse(BaseModel):
     uploaded: int                       # 저장에 성공한 문서 수
     indexed: int                        # 시맨틱 인덱스에 적재한 문서 수
