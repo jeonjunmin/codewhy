@@ -314,6 +314,46 @@ alembic revision --autogenerate -m "..."  # 스키마 변경 시
 - [ ] 타임라인 map 단계 Bedrock 호출 **병렬화** (LangGraph `Send()` API).
 - [ ] 백필 임계 구간(threshold 근처)만 LLM으로 excerpt 보강 (비용 통제).
 
+### 🔵 컨텍스트 블레임 추가 개발·개선 (코드 정밀 점검 결과, 2026-06-04)
+
+> 기능은 end-to-end 동작하나, 정독 결과 **정확성/성능 잠재 결함**·**품질 공백**·**미검증 가정**이 남아 있다.
+> 우선순위(P0 정확성/성능 → P1 품질 → P2 테스트) 순으로 정리. 착수 전 범위 합의용.
+
+#### 🔴 P0 — 정확성/성능 (먼저 확인·수정 권장)
+- [ ] **LLM이 실제 코드 변경(diff hunk)을 못 보고 추론할 가능성** ⚠️먼저 검증
+  — `git._get_commit_diff`(`core/git.py`)가 `git show --stat` 만 사용. `--stat`은 변경 *통계*(파일명·±라인)만 내고
+  실제 패치 hunk(`-p`)는 빠진다. 그런데 `_truncate_diff`의 `_MAX_DIFF_CHARS=2000` 잘라내기는 **진짜 diff**를 전제 →
+  의도와 실제 불일치. 영향: "왜 바뀌었나"를 추론하는 Bedrock이 정작 바뀐 코드 라인을 못 봄(설명 품질의 근본 한계).
+  → `git show -p --stat`(또는 `git diff`)로 hunk 포함하도록 수정. 검증: `_build_context`의 `[변경 내용]` 블록에 실제 `+/-` 코드가 들어가는지 로깅 확인.
+- [ ] **async 이벤트 루프 블로킹** — `blame/router.py::context_blame`은 `async def`인데 내부 `service.analyze_blame()`은
+  git subprocess + boto3 Bedrock/KB 호출이 전부 **동기 블로킹**. `await` 없이 직접 호출해 캐시 미스 1건(5~10초)이
+  단일 이벤트 루프를 점유 → 동시 요청 직렬화. (참고: `ask_blame`은 `def`라 스레드풀에서 돌아 안전 — 비일관)
+  → `await asyncio.to_thread(service.analyze_blame, ...)`로 분석만 스레드 위임(권장), 또는 엔드포인트를 `def`로.
+- [ ] **프론트/백엔드 캐시 단위 불일치 + stale 캐시** — 백엔드는 커밋×파일로 격상됐으나 프론트 `blameCache` 키는
+  `filePath:line`(`contextBlame/view.ts`). ① 같은 커밋의 다른 줄도 매번 새로 요청, ② 파일 편집으로 줄이 밀리면
+  엔트리가 무효화되지 않아 호버/핀이 **엉뚱한 줄에 옛 설명** 표시.
+  → 문서 변경(`onDidChangeTextDocument`) 시 파일 캐시 무효화 또는 키에 `document.version` 반영, 핀/호버 위치 재검증.
+
+#### 🟡 P1 — 품질·기능 공백
+- [ ] **`ask_followup`가 매 질문마다 전부 재계산** — `blame/service.py::ask_followup`이 질문마다 git blame + KB retrieve +
+  `_build_context`를 처음부터 다시 함. 직전 `analyze_blame`의 동일 context를 재사용하지 않아 Bedrock 프롬프트 캐시(5분 TTL)도
+  식어 있고 KB 호출 중복. + Q&A 응답은 어디에도 저장 안 됨(세션 종료 시 소멸).
+  → 분석 시 만든 context/`blame_explanations` 행을 ask 경로가 재사용. 필요 시 Q&A를 DB에 누적.
+- [ ] **중복 git 호출** — 캐시 미스 1건에서 router가 구한 branch/ticket을 `analyze_blame`이 `get_current_branch`/`extract_ticket`으로
+  **재계산**(`blame/service.py:66-67`). 또 `_get_commit_numstat`은 한 커밋 라인 수를 얻으려 `git log --follow --numstat`로 파일 전체 이력을 훑음.
+  → router가 이미 구한 branch/ticket을 service에 함께 전달(현재 `info`만 전달).
+- [ ] **KB documentId 추출 미검증** — `knowledge_base._extract_document_id`의 `TODO(검증)`. 역추적 다운로드 링크가 안 채워질 수 있음.
+  (§10 🟡 "documentId 역추출 키 검증"과 동일 항목 — 블레임 단락→원본 기획서 이동에도 영향)
+- [ ] **diff 잘라내기 전략** — `_truncate_diff`가 head-only(앞 N자)라 큰 커밋 뒷부분 변경 손실. P0-#1 수정 후 head+tail/hunk 헤더 우선 보존 전략 검토.
+- [ ] **관련 변경/PR 범위 한계** — PR 파일 `per_page=100` 컷(`core/vcs.py`), `relatedChanges` 5~6개 캡. 대형 PR에서 핵심 변경 누락 가능 → 페이지네이션 또는 "외 N건" 표기.
+- [ ] **사이드바 내러티브 다듬기** (`contextBlame/sidebar.ts`의 `TODO(개발자 A)`) — "3월 15일에"와 설명 사이 연결 톤, 인용문 없을 때 자연스러운 흐름.
+
+#### 🟢 P2 — 테스트·견고성
+- [ ] **블레임 단위 테스트 부재** (최근 캐시 리팩터 고려 시 가치 높음) — 우선 대상:
+  `extract_keywords`(불용어·도메인 우선·중복 제거·순서 보존), `crud.save_blame`/`get_cached_blame`(커밋×파일 dedup 히트/미스),
+  `_build_related_changes`(분류·캡), `_truncate_diff`, KB `_extract_section`/`_extract_page` 정규식, 라우터 graceful fallback.
+- [ ] **엣지케이스 견고성** — merge 커밋(first-parent만 blame), detached HEAD(branch="" → ticket 약화), 빈 커밋 메시지, 바이너리 파일. 테스트로 고정.
+
 ### 각자 첫 작업 체크리스트
 
 #### 공통
@@ -321,7 +361,7 @@ alembic revision --autogenerate -m "..."  # 스키마 변경 시
 - [ ] `service.py` 의 프롬프트/로직 다듬기
 
 #### 신예진 (Context Blame)
-- [ ] 인라인 표시(데코레이션) vs Webview 결정 후 `view.ts` 구현
+- [ ] 위 "🔵 컨텍스트 블레임 추가 개발·개선" P0부터 착수
 - [ ] `service.py` 의 프롬프트 톤 조정
 
 #### 박성태 (Timeline Summary)
