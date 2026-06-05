@@ -8,15 +8,13 @@ import { showTimelineSummaryView } from './view';
 /**
  * `codewhy.timelineSummary` 명령 핸들러.
  *
- * ① 로컬 git log 수집 → ② EC2 서버로 전송 → ⑤ Webview 출력
+ * ① 로컬 git log 수집 → ② 서버 전송 → ③ 별도 패널에 타임라인 출력
  *
  * 👤 담당: 개발자 B
  */
 export async function runTimelineSummary(context: vscode.ExtensionContext) {
     const ctx = getEditorContext();
-    if (!ctx) {
-        return;
-    }
+    if (!ctx) { return; }
 
     const commits = collectGitLog(ctx.repoPath, ctx.filePath);
     if (commits.length === 0) {
@@ -43,10 +41,6 @@ export async function runTimelineSummary(context: vscode.ExtensionContext) {
     );
 }
 
-/**
- * 로컬 git log 에서 파일별 커밋 이력을 수집한다.
- * EC2 서버는 로컬 파일시스템에 접근할 수 없으므로 확장이 직접 수집해 전송한다.
- */
 function collectGitLog(repoPath: string, filePath: string): CommitInput[] {
     try {
         const out = execSync(

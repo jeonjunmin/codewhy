@@ -7,9 +7,10 @@ import { runTimelineSummary } from './command';
  * 👤 담당: 개발자 B
  */
 export function registerTimelineSummary(context: vscode.ExtensionContext) {
-    const disposable = vscode.commands.registerCommand(
-        'codewhy.timelineSummary',
-        () => runTimelineSummary(context)
+    context.subscriptions.push(
+        vscode.commands.registerCommand(
+            'codewhy.timelineSummary',
+            () => runTimelineSummary(context),
+        ),
     );
-    context.subscriptions.push(disposable);
 }
