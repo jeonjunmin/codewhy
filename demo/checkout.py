@@ -51,5 +51,7 @@ def vat(amount: int) -> int:
 def settlement_total(order: Order, coupon_rate: float = 0.0) -> int:
     """수수료·쿠폰·부가세를 반영한 최종 정산액."""
     charged = final_charge(order)
+    # VAT는 쿠폰 할인 전 공급가 기준으로 부과해야 한다 (#62)
+    tax = vat(charged)
     discounted = apply_coupon(charged, coupon_rate)
-    return discounted + vat(discounted)
+    return discounted + tax
