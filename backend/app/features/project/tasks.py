@@ -15,6 +15,7 @@
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -28,7 +29,8 @@ from sqlalchemy import select
 
 from app.ai.timeline_file_graph import run_file_timeline_graph
 from app.core import git
-from app.db.models import File, Repository, TimelineSummary, TimelineSummaryCache
+from app.db import crud_common
+from app.db.models import File, TimelineSummary, TimelineSummaryCache
 from app.db.postgres import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
@@ -49,13 +51,20 @@ _COMMIT_RE = re.compile(r"^(?P<type>\w+)(?:\[(?P<domain>[^\]]+)\])?:")
 
 # ── 분석 결과 데이터 클래스 ────────────────────────────────────────────────────
 
+def _compute_commit_set_hash(commits: list[dict]) -> str:
+    """service.py 의 compute_commit_set_hash 와 동일한 로직 — 캐시 키 통일."""
+    serialized = "\n".join(sorted(c["hash"] for c in commits))
+    return hashlib.sha256(serialized.encode()).hexdigest()
+
+
 @dataclass
 class _FileAnalysis:
     """파일 하나의 분석 결과. DB 쓰기는 포함하지 않는다."""
-    file_path:     str
-    status:        str                    # "skip_*" | "failed" | "ready"
-    latest_hash:   str       = ""
-    commit_type:   str       = ""
+    file_path:        str
+    status:           str                    # "skip_*" | "failed" | "ready"
+    latest_hash:      str       = ""         # 로깅용 (최신 커밋 해시)
+    commit_set_hash:  str       = ""         # service.py 와 공유하는 캐시 키
+    commit_type:      str       = ""
     commit_domain: str       = ""
     summary:       str       = ""
     milestones:    list[Any] = field(default_factory=list)   # AI 추출 마일스톤 리스트
@@ -64,17 +73,30 @@ class _FileAnalysis:
     file_id:       int | None = None
 
 
+# ── 경로 유틸 ─────────────────────────────────────────────────────────────────
+
+def _to_relpath(file_path: str, repo_path: str) -> str:
+    """절대 경로를 레포 루트 기준 상대 경로(포워드 슬래시)로 정규화한다."""
+    try:
+        rel = os.path.relpath(file_path, repo_path)
+    except ValueError:
+        rel = file_path
+    return rel.replace('\\', '/')
+
+
 # ── git 헬퍼 ──────────────────────────────────────────────────────────────────
 
 def _get_tracked_files(repo_path: str) -> list[str]:
+    """git ls-files 결과를 레포 루트 기준 상대 경로(포워드 슬래시)로 반환한다."""
     try:
         out = subprocess.check_output(
             ["git", "ls-files"],
             cwd=repo_path, text=True, encoding="utf-8", timeout=15,
         )
         return [
-            f.strip() for f in out.splitlines()
-            if Path(f.strip()).suffix in _SOURCE_EXTENSIONS
+            f.strip().replace('\\', '/')
+            for f in out.splitlines()
+            if f.strip() and Path(f.strip()).suffix in _SOURCE_EXTENSIONS
         ]
     except Exception as exc:
         logger.warning("[task] git ls-files 실패 — %s : %s", repo_path, exc)
@@ -122,29 +144,15 @@ def _format_commits(commits: list[dict]) -> str:
 # ── repositories: 진짜 repo_id 동적 확보 ─────────────────────────────────────
 
 async def _get_or_create_repo_id(project_path: str) -> int:
-    """repositories.identifier 로 repo_id 를 가져오거나 INSERT 한다 (1회 호출)."""
-    folder_name = os.path.basename(os.path.normpath(project_path))
+    """repositories 에서 repo_id 를 가져오거나 INSERT 한다.
 
+    identifier 를 전체 경로(project_path)로 통일 — service.py / crud_common 과 동일하게.
+    """
     async with AsyncSessionLocal() as db:
-        repo: Repository | None = await db.scalar(
-            select(Repository).where(Repository.identifier == folder_name)
-        )
-
-        if repo is not None:
-            logger.info("[task] repo 기존 — repo_id=%d  identifier=%s", repo.id, folder_name)
-            return repo.id
-
-        new_repo = Repository(
-            identifier = folder_name,
-            name       = folder_name,
-            created_at = datetime.utcnow(),
-        )
-        db.add(new_repo)
-        await db.flush()
-        await db.refresh(new_repo)
+        repo = await crud_common.get_or_create_repository(db, project_path)
         await db.commit()
-        logger.info("[task] repo INSERT — repo_id=%d  identifier=%s", new_repo.id, folder_name)
-        return new_repo.id
+        logger.info("[task] repo 확보 — repo_id=%d  identifier=%s", repo.id, project_path)
+        return repo.id
 
 
 # ── 파일 단위 분석 (DB 쓰기 없음, 병렬 실행 단위) ────────────────────────────
@@ -172,8 +180,9 @@ async def _analyze_file(
         if not commits:
             return _FileAnalysis(file_path=file_path, status="skip_no_commits")
 
-        latest_hash    = commits[0]["hash"]
-        latest_subject = commits[0].get("subject", "")
+        latest_hash      = commits[0]["hash"]
+        latest_subject   = commits[0].get("subject", "")
+        commit_set_hash  = _compute_commit_set_hash(commits)   # service.py 와 동일한 캐시 키
 
         # ── Step 2. 커밋 메시지 파싱 (루프 최상단 — DB 읽기보다 먼저) ─────────
         parsed        = _parse_commit(latest_subject)
@@ -212,7 +221,7 @@ async def _analyze_file(
 
         # ── Step 5. 해시 비교 → skip ─────────────────────────────────────────
         if cache_row is not None:
-            if (cache_row.data or {}).get("commit_hash") == latest_hash:
+            if (cache_row.data or {}).get("commit_set_hash") == commit_set_hash:
                 logger.info("[task]   ⏭  skip_hash — %s", file_path)
                 return _FileAnalysis(file_path=file_path, status="skip_hash")
 
@@ -248,17 +257,18 @@ async def _analyze_file(
             milestones = [{"date": "", "description": f"{commit_type} [{commit_domain}]"}]
 
         return _FileAnalysis(
-            file_path     = file_path,
-            status        = "ready",
-            latest_hash   = latest_hash,
-            commit_type   = commit_type,
-            commit_domain = commit_domain,
-            summary       = summary,
-            milestones    = milestones,
-            cache_data    = {
-                "commit_hash": latest_hash,
-                "type":        commit_type,
-                "domain":      commit_domain,
+            file_path       = file_path,
+            status          = "ready",
+            latest_hash     = latest_hash,
+            commit_set_hash = commit_set_hash,
+            commit_type     = commit_type,
+            commit_domain   = commit_domain,
+            summary         = summary,
+            milestones      = milestones,
+            cache_data      = {
+                "commit_set_hash": commit_set_hash,   # service.py 와 동일한 키
+                "type":            commit_type,
+                "domain":          commit_domain,
             },
             cache_exists  = (cache_row is not None),
             file_id       = file_id,
@@ -322,7 +332,7 @@ async def _bulk_save(
                             a.milestones, a.file_path)
                 db.add(TimelineSummary(
                     file_id         = file_id,
-                    commit_set_hash = a.latest_hash,
+                    commit_set_hash = a.commit_set_hash,
                     summary         = a.summary,
                     milestones      = a.milestones,
                     created_at      = datetime.utcnow(),
@@ -331,7 +341,7 @@ async def _bulk_save(
             else:
                 logger.info("[task]   업데이트 마일스톤 확인: %s  file=%s",
                             a.milestones, a.file_path)
-                existing.commit_set_hash = a.latest_hash
+                existing.commit_set_hash = a.commit_set_hash
                 existing.summary         = a.summary
                 existing.milestones      = a.milestones
                 counters["updated"] += 1

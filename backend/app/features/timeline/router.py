@@ -9,6 +9,7 @@ POST /api/timeline/summary
 """
 
 import logging
+import os
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
@@ -21,6 +22,15 @@ from app.features.timeline.tasks import analyze_all_project_files
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _to_relpath(file_path: str, repo_path: str) -> str:
+    """절대 경로를 레포 루트 기준 상대 경로(포워드 슬래시)로 정규화한다."""
+    try:
+        rel = os.path.relpath(file_path, repo_path)
+    except ValueError:
+        rel = file_path
+    return rel.replace('\\', '/')
 
 
 # ── 프로젝트 전체 파일 분석 ───────────────────────────────────────────────────
@@ -55,9 +65,10 @@ async def analyze_project_files(
 
 @router.post("/summary", response_model=TimelineResponse)
 async def timeline_summary(req: TimelineRequest, db: AsyncSession = Depends(get_db)):
+    file_path = _to_relpath(req.filePath, req.repoPath)
     commits_data = [c.model_dump() for c in req.commits]
     try:
-        result = await service.summarize(db, req.repoPath, req.filePath, commits_data)
+        result = await service.summarize(db, req.repoPath, file_path, commits_data)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:

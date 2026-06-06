@@ -6,6 +6,7 @@
 👤 담당: 개발자 B
 """
 
+import logging
 from datetime import date, datetime
 
 from sqlalchemy import select
@@ -14,6 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.tickets import extract_ticket
 from app.db import crud_common
 from app.db.models import Commit, CommitFile, File, TimelineSummary
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_date(value: str) -> date | None:
@@ -31,7 +34,10 @@ async def upsert_commits(
     commits 형식: [{"hash","author","date","subject"}, ...] (확장이 로컬 git log 로 수집)
     """
     repo = await crud_common.get_or_create_repository(db, repo_path)
+    logger.info("[crud] repo — id=%d  identifier=%r", repo.id, repo.identifier)
+
     file = await crud_common.get_or_create_file(db, repo.id, file_path)
+    logger.info("[crud] file — id=%d  repo_id=%d  path=%s", file.id, file.repo_id, file_path)
 
     for c in commits:
         commit = await crud_common.upsert_commit(
@@ -82,7 +88,19 @@ async def get_cached_summary(
         TimelineSummary.file_id == file_id,
         TimelineSummary.commit_set_hash == commit_set_hash,
     )
-    return (await db.execute(stmt)).scalar_one_or_none()
+    row = (await db.execute(stmt)).scalar_one_or_none()
+    logger.info("[crud] get_cached_summary — file_id=%d  hash=%s…  hit=%s",
+                file_id, commit_set_hash[:16], row is not None)
+
+    # 동일 file_id 의 모든 기존 요약 해시 출력 (불일치 디버그용)
+    if row is None:
+        all_rows = (await db.execute(
+            select(TimelineSummary.commit_set_hash).where(TimelineSummary.file_id == file_id)
+        )).scalars().all()
+        logger.info("[crud] DB 내 file_id=%d 요약 해시 목록: %s",
+                    file_id, [h[:16] + "…" for h in all_rows] if all_rows else "없음")
+
+    return row
 
 
 async def save_summary(

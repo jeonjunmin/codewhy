@@ -24,6 +24,11 @@ from app.core.config import get_team_map
 from app.core.tickets import extract_ticket
 from app.core.vcs import Issue, PullRequest
 
+# ask_followup 에서 재사용할 맥락 캐시 — (repo_path, file_path, commit_hash) → context str
+# analyze_blame 이 채우고 ask_followup 이 읽는다.  LRU 없이 최대 100건만 보관.
+_CONTEXT_CACHE: dict[tuple[str, str, str], str] = {}
+_CONTEXT_CACHE_MAX = 100
+
 _SYSTEM_PROMPT = (
     "당신은 코드 변경의 '기획 의도'를 설명하는 도우미입니다. "
     "git 커밋 메시지의 기술적 표현 뒤에 숨은, 연관 이슈와 첨부된 요구사항 문서가 알려주는 "
@@ -41,21 +46,34 @@ _SECURITY_TERMS = ("KYC", "감사", "audit", "보안", "security", "권한", "au
 
 
 def analyze_blame(
-    repo_path: str, file_path: str, line: int, info: git.BlameInfo | None = None
+    repo_path: str,
+    file_path: str,
+    line: int,
+    info: git.BlameInfo | None = None,
+    branch: str | None = None,
+    ticket: str | None = None,
 ) -> dict:
-    # 라우터가 캐시 키 해석용으로 이미 구한 info 를 넘기면 재사용(중복 git blame 방지).
+    # 라우터가 캐시 키 해석용으로 이미 구한 info/branch/ticket 을 넘기면 재사용
     if info is None:
         info = git.get_blame_info(repo_path, file_path, line)
-
-    branch = git.get_current_branch(repo_path)
-    ticket = extract_ticket(info.message, branch)
+    if branch is None:
+        branch = git.get_current_branch(repo_path)
+    if ticket is None:
+        ticket = extract_ticket(info.message, branch)
     team = get_team_map().get(info.author)
 
     pr = _safe_find_pr(repo_path, info.commit_hash)
     issues = _safe_find_issues(repo_path, pr)
     followups = git.find_followup_commits(repo_path, ticket, exclude_hash=info.commit_hash)
 
-    explanation = _explain_blame(info, issues)
+    context = _build_context(info, issues)
+    # ask_followup 이 재사용할 수 있도록 맥락을 캐시
+    _cache_key = (repo_path, file_path, info.commit_hash)
+    if len(_CONTEXT_CACHE) >= _CONTEXT_CACHE_MAX:
+        _CONTEXT_CACHE.pop(next(iter(_CONTEXT_CACHE)))
+    _CONTEXT_CACHE[_cache_key] = context
+
+    explanation = _explain_blame(info, issues, context=context)
     source_ref = _format_source_ref(issues)
     primary_issue = issues[0] if issues else None
     attachments = [
@@ -80,19 +98,22 @@ def analyze_blame(
         "changeStats": {"added": info.added, "removed": info.removed},
         "prInfo": ({"url": pr.url, "lines": pr.added + pr.removed} if pr else None),
         "relatedChanges": related,
-        "aiSuggestion": _suggest_improvement(info, issues),
+        "aiSuggestion": _suggest_improvement(info, issues, context=context),
     }
 
 
 def ask_followup(repo_path: str, file_path: str, line: int, question: str) -> str:
     """현재 라인 블레임 맥락 위에서 들어온 후속 질문에 답한다.
 
-    같은 코드/커밋/이슈 맥락을 다시 모아, 사용자의 질문에 한국어로 답한다.
+    analyze_blame 이 캐시해 둔 맥락을 재사용해 git/PR/Issue 재조회를 막는다.
+    캐시가 없는 경우(첫 질문이 analyze_blame 없이 들어온 경우)에만 재빌드한다.
     """
     info = git.get_blame_info(repo_path, file_path, line)
-    pr = _safe_find_pr(repo_path, info.commit_hash)
-    issues = _safe_find_issues(repo_path, pr)
-    context = _build_context(info, issues)
+    context = _CONTEXT_CACHE.get((repo_path, file_path, info.commit_hash))
+    if context is None:
+        pr = _safe_find_pr(repo_path, info.commit_hash)
+        issues = _safe_find_issues(repo_path, pr)
+        context = _build_context(info, issues)
 
     instruction = f"""위 변경 맥락에 근거해 사용자의 질문에 한국어로 1~2문장으로 답하세요.
 근거가 연관 이슈 본문/첨부에 있으면 핵심 표현을 큰따옴표("…")로 인용하고, 맥락에 없으면 모른다고 솔직히 답하세요.
@@ -189,12 +210,14 @@ def _build_related_changes(
     return related
 
 
-def _explain_blame(info: git.BlameInfo, issues: list[Issue]) -> str:
+def _explain_blame(info: git.BlameInfo, issues: list[Issue], *, context: str | None = None) -> str:
     """코드 + 커밋 메시지 + 연관 이슈를 Bedrock 에 넣어 변경 사유를 추론한다.
 
+    context 를 미리 받으면 _build_context 재호출을 생략한다(프롬프트 캐시 공유).
     Bedrock 호출이 불가한 환경(자격증명 없음 등)에서는 커밋 메시지를 그대로 반환한다.
     """
-    context = _build_context(info, issues)
+    if context is None:
+        context = _build_context(info, issues)
 
     instruction = """위 변경 맥락을 종합해, 개발자가 이 코드를 왜 변경했는지 한국어로 1~2문장으로 설명하세요.
 기술적 커밋 메시지가 아니라, 연관 이슈와 첨부된 요구사항 문서가 알려주는 '비즈니스상의 진짜 이유'를 우선해 설명하세요.
@@ -209,17 +232,14 @@ def _explain_blame(info: git.BlameInfo, issues: list[Issue]) -> str:
         return f"[Bedrock 미연동] 커밋 메시지: {info.message or '(메시지 없음)'}"
 
 
-def _suggest_improvement(info: git.BlameInfo, issues: list[Issue]) -> str | None:
+def _suggest_improvement(info: git.BlameInfo, issues: list[Issue], *, context: str | None = None) -> str | None:
     """이 변경 맥락에서 '앞으로 고려하면 좋을 점' 한 문장을 Bedrock 으로 추론한다.
 
-    사이드바 'AI 추론' 섹션용. 단순 코드 리뷰 지적이 아니라, 이슈/커밋 맥락 위에서
-    "이 부분은 이후 ~를 함께 보면 좋겠다" 류의 한 문장을 한국어로 뽑는다.
-
-    설명문(_explain_blame)과 달리, Bedrock 호출이 불가하거나 마땅한 제안이 없으면
-    None 을 반환한다 — 사이드바는 값이 없으면 'AI 추론' 섹션을 숨기므로,
-    유령 텍스트("[Bedrock 미연동]…")를 넣지 않는다.
+    context 를 미리 받으면 _build_context 재호출을 생략한다(프롬프트 캐시 공유).
+    설명문(_explain_blame)과 달리, Bedrock 호출이 불가하거나 마땅한 제안이 없으면 None.
     """
-    context = _build_context(info, issues)
+    if context is None:
+        context = _build_context(info, issues)
 
     instruction = """위 변경 맥락을 바탕으로,
 앞으로 이 코드를 다룰 때 함께 고려하면 좋을 점을 한국어로 딱 한 문장 제안하세요.
@@ -260,10 +280,15 @@ def _build_context(info: git.BlameInfo, issues: list[Issue]) -> str:
 
 
 def _truncate_diff(diff: str) -> str:
-    """Bedrock 에 보낼 diff 를 _MAX_DIFF_CHARS 상한으로 자른다(거대 커밋의 토큰 폭발 방지)."""
+    """Bedrock 에 보낼 diff 를 _MAX_DIFF_CHARS 상한으로 자른다(거대 커밋의 토큰 폭발 방지).
+
+    head-only 대신 head + tail 전략 — 앞쪽(헝크 헤더·초기 변경)과
+    뒤쪽(마지막 변경)을 모두 포함해 큰 커밋의 핵심을 놓치지 않는다.
+    """
     if len(diff) <= _MAX_DIFF_CHARS:
         return diff
-    return diff[:_MAX_DIFF_CHARS] + "\n…(이하 생략)"
+    half = _MAX_DIFF_CHARS // 2
+    return diff[:half] + "\n…(중략)…\n" + diff[-half:]
 
 
 def _format_issues(issues: list[Issue]) -> str:

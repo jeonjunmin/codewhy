@@ -2,6 +2,12 @@
 
 프론트엔드 src/shared/types.ts 의 TraceRequest / TraceResult 와 키 이름이 일치해야 한다.
 
+요구사항 문서 원천: GitHub Issue 첨부 파일 (별도 업로드 없이 Issue 워크플로우 활용)
+matchType:
+  - issue    : PR → Issue 직접 연결, 첨부 파일 있음 (확정)
+  - ticket   : 커밋 메시지 티켓 번호로 Issue 매칭 (높음)
+  - semantic : 커밋 메시지 키워드로 관련 Issue 검색 (추정)
+
 👤 담당: 개발자 C
 """
 
@@ -17,14 +23,11 @@ class TraceRequest(BaseModel):
 
 
 class DocumentMatch(BaseModel):
-    documentId: int
-    name: str                  # 업로드 원본 파일명
-    page: int | None = None
-    excerpt: str | None = None
-    downloadUrl: str           # /api/documents/{id}/download
-    # 어느 경로로 찾았는지 + 신뢰도. ticket=확정(confidence=None), backfill/semantic=추정.
-    matchType: Literal["ticket", "backfill", "semantic"] = "ticket"
-    confidence: float | None = None
+    title: str                  # Issue 제목 또는 첨부 파일명
+    url: str                    # Issue URL 또는 첨부 파일 URL
+    matchType: Literal["issue", "ticket", "semantic"] = "issue"
+    confidence: float | None = None   # ticket=확정(None), semantic=0~1
+    excerpt: str | None = None        # Issue 본문 일부 발췌
 
 
 class TraceResponse(BaseModel):

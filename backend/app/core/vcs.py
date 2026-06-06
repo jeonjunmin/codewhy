@@ -362,3 +362,92 @@ def _looks_like_attachment(url: str) -> bool:
 def _filename_from_url(url: str) -> str:
     tail = url.rsplit("/", 1)[-1]
     return urllib.parse.unquote(tail) or url
+
+
+# ─── GitHub Issues 검색 (역추적 ticket/semantic 폴백) ──────────────────────────
+
+def search_github_issues(remote: Remote, query: str, per_page: int = 5) -> list[Issue]:
+    """GitHub Issues를 키워드/티켓 번호로 검색해 반환한다.
+
+    - ticket 매칭: query가 "PAY-2041" 같은 티켓이면 issue 제목·본문에서 정확 검색
+    - semantic 매칭: 커밋 키워드로 관련 Issue를 근사 검색
+
+    GitHub 미연동(토큰 없음·API 실패)이면 빈 리스트 — 호출 측이 그대로 진행한다.
+    """
+    if remote.host != "github" or not query.strip():
+        return []
+
+    try:
+        headers = _github_headers()
+        encoded = urllib.parse.quote(f"repo:{remote.owner}/{remote.repo} {query} is:issue")
+        items = _get_json(
+            f"https://api.github.com/search/issues?q={encoded}&per_page={per_page}",
+            headers,
+        )
+        if not isinstance(items, dict):
+            return []
+        results: list[Issue] = []
+        for item in items.get("items", []):
+            body = item.get("body") or ""
+            results.append(
+                Issue(
+                    number=item["number"],
+                    title=item.get("title", ""),
+                    url=item.get("html_url", ""),
+                    body=body,
+                    attachments=_extract_attachments(body),
+                )
+            )
+        return results
+    except (urllib.error.URLError, KeyError, ValueError, TimeoutError):
+        return []
+
+
+def find_issues_for_commit(repo_path: str, commit_hash: str, commit_message: str) -> tuple[list[Issue], str]:
+    """커밋에서 연관 Issue를 최선으로 찾아 반환한다.
+
+    반환: (issues, matchType)
+      - ("issue", issues): PR 본문 → Issue 직접 연결
+      - ("ticket", issues): 커밋 메시지 티켓 번호 → Issue 검색
+      - ("semantic", issues): 키워드로 관련 Issue 검색
+      - ("", []): 아무것도 없음
+
+    traceability/service.py 에서만 사용한다.
+    """
+    remote = detect_remote(repo_path)
+    if not remote:
+        return [], ""
+
+    # 1. PR → Issue 직접 연결
+    try:
+        pr = find_pr_for_commit(repo_path, commit_hash)
+        if pr and pr.body:
+            issues = find_issues_from_pr_body(remote, pr.body)
+            if issues:
+                return issues, "issue"
+    except Exception:
+        pass
+
+    # 2. 커밋 메시지 티켓 번호로 Issue 검색
+    from app.core.tickets import extract_ticket
+    from app.core import git as _git
+    try:
+        branch = _git.get_current_branch(repo_path)
+    except Exception:
+        branch = ""
+    ticket = extract_ticket(commit_message, branch)
+    if ticket:
+        issues = search_github_issues(remote, ticket)
+        if issues:
+            return issues, "ticket"
+
+    # 3. 키워드로 관련 Issue 시맨틱 검색
+    from app.features.blame.service import extract_keywords
+    keywords = extract_keywords(commit_message)
+    if keywords:
+        query = " ".join(keywords[:5])  # 상위 5개 키워드
+        issues = search_github_issues(remote, query, per_page=3)
+        if issues:
+            return issues, "semantic"
+
+    return [], ""

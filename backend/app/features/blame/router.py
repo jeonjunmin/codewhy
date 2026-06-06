@@ -69,9 +69,12 @@ async def context_blame(req: BlameRequest, db: AsyncSession = Depends(get_db)):
     # 3. 미스 → 분석 후 캐시 저장
     #    service.analyze_blame 은 git subprocess + Bedrock(boto3) 가 전부 동기 블로킹이므로
     #    asyncio.to_thread 로 스레드에 위임해 이벤트 루프를 점유하지 않는다.
+    #    router 가 이미 구한 info/branch/ticket 을 넘겨 중복 git 호출을 막는다.
     try:
         result = await asyncio.to_thread(
-            service.analyze_blame, req.repoPath, req.filePath, req.line, info=info
+            service.analyze_blame,
+            req.repoPath, req.filePath, req.line,
+            info=info, branch=branch, ticket=extract_ticket(info.message, branch) if info else None,
         )
     except Exception as e:
         logger.exception("context blame 분석 실패 — repo=%s file=%s line=%s", req.repoPath, req.filePath, req.line)

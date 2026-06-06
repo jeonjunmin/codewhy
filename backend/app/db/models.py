@@ -18,17 +18,14 @@ from sqlalchemy import (
     BigInteger,
     Date,
     DateTime,
-    Float,
     ForeignKey,
     Index,
     Integer,
     JSON,
-    LargeBinary,
     String,
     Text,
     UniqueConstraint,
     func,
-    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -172,57 +169,3 @@ class TimelineSummaryCache(Base):
     data: Mapped[dict] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-
-# ── 역추적: 서버 문서 저장 + git 연결 ──────────────────────────────────────────
-
-class Document(Base):
-    """서버에 업로드된 기획 문서 메타데이터. 바이너리는 storage_key 위치(디스크/S3)에 저장."""
-
-    __tablename__ = "documents"
-
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    repo_id: Mapped[int | None] = mapped_column(ForeignKey("repositories.id", ondelete="SET NULL"))
-    original_name: Mapped[str] = mapped_column(Text, nullable=False)
-    storage_key: Mapped[str] = mapped_column(Text, nullable=False)
-    content_type: Mapped[str | None] = mapped_column(Text)
-    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
-    page_count: Mapped[int | None] = mapped_column(Integer)
-    uploaded_by: Mapped[str | None] = mapped_column(Text)
-    file_data: Mapped[bytes | None] = mapped_column(LargeBinary)
-    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-    links: Mapped[list["DocumentLink"]] = relationship(
-        back_populates="document", cascade="all, delete-orphan"
-    )
-
-
-class DocumentLink(Base):
-    """문서(특정 페이지/구절)와 git 히스토리를 잇는 다리."""
-
-    __tablename__ = "document_links"
-    __table_args__ = (
-        Index("ix_document_links_ticket", "ticket"),
-        Index("ix_document_links_commit", "commit_id"),
-        Index("ix_document_links_file", "file_id"),
-        Index(
-            "uq_doclinks_doc_commit_type",
-            "document_id", "commit_id", "link_type",
-            unique=True,
-            postgresql_where=text("commit_id IS NOT NULL"),
-        ),
-    )
-
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
-    link_type: Mapped[str] = mapped_column(String(16), nullable=False)
-    ticket: Mapped[str | None] = mapped_column(Text)
-    commit_id: Mapped[int | None] = mapped_column(ForeignKey("commits.id", ondelete="CASCADE"))
-    file_id: Mapped[int | None] = mapped_column(ForeignKey("files.id", ondelete="CASCADE"))
-    page: Mapped[int | None] = mapped_column(Integer)
-    section: Mapped[str | None] = mapped_column(Text)
-    excerpt: Mapped[str | None] = mapped_column(Text)
-    confidence: Mapped[float | None] = mapped_column(Float)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-    document: Mapped["Document"] = relationship(back_populates="links")

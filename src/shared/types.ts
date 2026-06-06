@@ -97,17 +97,20 @@ export interface TraceRequest {
     repoPath: string;
 }
 
-/** 문서를 찾아낸 경로 — 신뢰도 표시에 쓴다. ticket=확정, backfill/semantic=추정. */
-export type TraceMatchType = 'ticket' | 'backfill' | 'semantic';
+/**
+ * 문서를 찾아낸 경로 — 신뢰도 표시에 쓴다.
+ *   issue    : PR → Issue 직접 연결 (확정)
+ *   ticket   : 커밋 메시지 티켓 번호로 Issue 매칭 (높음)
+ *   semantic : 커밋 키워드로 관련 Issue 검색 (추정)
+ */
+export type TraceMatchType = 'issue' | 'ticket' | 'semantic';
 
 export interface DocumentMatch {
-    documentId: number;
-    name: string;            // 업로드 원본 파일명
-    page?: number;
-    excerpt?: string;
-    downloadUrl: string;     // /api/documents/{id}/download
+    title: string;           // Issue 제목 또는 첨부 파일명
+    url: string;             // Issue URL 또는 첨부 파일 직접 링크
     matchType?: TraceMatchType;
-    confidence?: number;     // 0~1 (ticket 매칭은 없음)
+    confidence?: number;     // 0~1 (issue 확정 매칭은 없음)
+    excerpt?: string;        // Issue 본문 일부 발췌
 }
 
 export interface TraceResult {
