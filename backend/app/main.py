@@ -12,7 +12,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
+from app.db.postgres import engine
 from app.features.blame.router import router as blame_router
+from app.features.documents.router import router as documents_router
+from app.features.onboarding.router import router as onboarding_router
 from app.features.project.router import router as project_router
 from app.features.timeline.router import router as timeline_router
 from app.features.traceability.router import router as traceability_router
@@ -22,24 +25,17 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ── PostgreSQL 연결 확인 + 테이블 자동 생성 ───────────────────────────────
-    from app.db.postgres import async_engine, Base
-    import app.db.models  # noqa: F401 — Base.metadata 에 모델 등록
-
+    # ── PostgreSQL(RDS) 연결 확인 (startup) ───────────────────────────────────
     try:
-        async with async_engine.connect() as conn:
+        async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
         logger.info("PostgreSQL 연결 성공")
-
-        # 테이블이 없으면 자동 생성 (운영에서는 alembic 사용 권장)
-        async with async_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("테이블 준비 완료")
-
     except Exception as e:
-        logger.warning("PostgreSQL 연결 실패: %s", e)
+        logger.warning("PostgreSQL 연결 실패 — DATABASE_URL / DB 기동 여부를 확인하세요: %s", e)
 
     yield
+
+    await engine.dispose()
 
 
 app = FastAPI(
@@ -59,6 +55,8 @@ app.add_middleware(
 app.include_router(blame_router,        prefix="/api/blame",      tags=["Context Blame"])
 app.include_router(timeline_router,     prefix="/api/timeline",   tags=["Timeline Summary"])
 app.include_router(traceability_router, prefix="/api/trace",      tags=["Requirement Trace"])
+app.include_router(documents_router,    prefix="/api/documents",  tags=["Documents"])
+app.include_router(onboarding_router,   prefix="/api/onboarding", tags=["Onboarding"])
 app.include_router(project_router,      prefix="/api/v1/project", tags=["Project Initialize"])
 
 

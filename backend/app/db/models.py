@@ -1,168 +1,210 @@
-"""PostgreSQL ORM 모델.
+"""CodeWhy 통합 스키마 — SQLAlchemy ORM 모델.
 
-테이블 6개:
-  files                  — 소스 파일 레지스트리 (timeline_summaries.file_id FK 원본)
-  commit_logs            — Timeline 커밋 이력 저장
-  blame_cache            — Context Blame AI 결과 캐시
-  timeline_summary_cache — Timeline AI 요약 캐시
-  project_summaries      — 프로젝트 초기 분석 결과 (배경 캐싱)
-  timeline_summaries     — 파일별 LangGraph 분석 결과 (기존 테이블 매핑)
+세 기능이 공유하는 commit/file 백본을 중심으로 정규화했다. 작성자·날짜·커밋 메시지·티켓 같은
+"세 기능 모두에서 보여줘야 하는" 데이터는 commits/files 에 한 번만 저장하고, 기능별 산출물
+(블레임 설명/타임라인 요약/문서 매칭)은 백본을 FK 로 참조한다.
+
+    repositories ─┬─ commits ─┬─ commit_files ─ files
+                  │           │
+      blame_explanations ─────┘           timeline_summaries
+      documents ─ document_links ── (ticket | commit_id | file_id)
+
+스키마 변경은 반드시 Alembic 마이그레이션(autogenerate)으로 반영한다.
 """
 
-import enum
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import BigInteger, DateTime, JSON, String, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.postgres import Base
 
 
-# ── 레포지토리 레지스트리 ─────────────────────────────────────────────────────
+# ── 공유 백본 ──────────────────────────────────────────────────────────────────
 
 class Repository(Base):
-    """프로젝트 레포지토리 — 실제 DB 컬럼 구조에 맞게 매핑.
+    """레포 식별자 — repo_path/remote URL 문자열을 반복 저장하지 않기 위한 루트."""
 
-    identifier 로 조회/생성하며, 존재하지 않으면 자동 INSERT 한다.
-    """
     __tablename__ = "repositories"
-    __table_args__ = {"extend_existing": True}
 
-    id:         Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     identifier: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
-    name:       Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    name: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    commits: Mapped[list["Commit"]] = relationship(back_populates="repository")
+    files: Mapped[list["File"]] = relationship(back_populates="repository")
 
 
-# ── 파일 레지스트리 ───────────────────────────────────────────────────────────
+class Commit(Base):
+    """git 커밋 — 블레임·타임라인이 공통으로 참조하는 핵심 엔티티."""
+
+    __tablename__ = "commits"
+    __table_args__ = (
+        UniqueConstraint("repo_id", "commit_hash", name="uq_commits_repo_hash"),
+        Index("ix_commits_ticket", "ticket"),
+        Index("ix_commits_author_email", "author_email"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    repo_id: Mapped[int] = mapped_column(ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False)
+    commit_hash: Mapped[str] = mapped_column(String(40), nullable=False)
+    author: Mapped[str | None] = mapped_column(Text)
+    author_email: Mapped[str | None] = mapped_column(Text)
+    committed_date: Mapped[date | None] = mapped_column(Date)
+    message: Mapped[str | None] = mapped_column(Text)
+    ticket: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    repository: Mapped["Repository"] = relationship(back_populates="commits")
+    file_changes: Mapped[list["CommitFile"]] = relationship(back_populates="commit")
+
 
 class File(Base):
-    """소스 파일 레지스트리 — 실제 DB 컬럼 구조에 맞게 매핑.
+    """레포 내 파일 경로."""
 
-    timeline_summaries.file_id 의 FK 원본.
-    읽기 전용으로만 사용한다 (INSERT 는 외부 시스템에서 관리).
-    """
     __tablename__ = "files"
-    __table_args__ = {"extend_existing": True}
-
-    id:        Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    repo_id:   Mapped[int] = mapped_column(BigInteger, nullable=False)          # 속한 레포 ID
-    file_path: Mapped[str] = mapped_column(String(1024), nullable=False, index=True)
-
-
-class CommitLog(Base):
-    """파일별 커밋 이력. (repo_path, file_path, commit_hash) 복합 UNIQUE."""
-    __tablename__ = "commit_logs"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    repo_path: Mapped[str] = mapped_column(String(512), nullable=False)
-    file_path: Mapped[str] = mapped_column(String(512), nullable=False)
-    commit_hash: Mapped[str] = mapped_column(String(40), nullable=False)
-    author: Mapped[str] = mapped_column(String(255), nullable=False)
-    date: Mapped[str] = mapped_column(String(10), nullable=False)
-    message: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-
     __table_args__ = (
-        UniqueConstraint("repo_path", "file_path", "commit_hash", name="uq_commit_log"),
+        UniqueConstraint("repo_id", "file_path", name="uq_files_repo_path"),
     )
 
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    repo_id: Mapped[int] = mapped_column(ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False)
+    file_path: Mapped[str] = mapped_column(Text, nullable=False)
 
-class BlameCache(Base):
-    """Context Blame 결과 캐시. (repo_path, file_line) 복합 UNIQUE."""
-    __tablename__ = "blame_cache"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    repo_path: Mapped[str] = mapped_column(String(512), nullable=False)
-    file_line: Mapped[str] = mapped_column(String(512), nullable=False)
-    data: Mapped[dict] = mapped_column(JSON, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-
-    __table_args__ = (
-        UniqueConstraint("repo_path", "file_line", name="uq_blame_cache"),
-    )
+    repository: Mapped["Repository"] = relationship(back_populates="files")
+    changes: Mapped[list["CommitFile"]] = relationship(back_populates="file")
 
 
-class TimelineSummaryCache(Base):
-    """Timeline AI 요약 캐시. (repo_path, file_path) 복합 UNIQUE."""
-    __tablename__ = "timeline_summary_cache"
+class CommitFile(Base):
+    """커밋↔파일 N:M + 변경량. "이 파일의 모든 커밋"을 join 으로 조회한다."""
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    repo_path: Mapped[str] = mapped_column(String(512), nullable=False)
-    file_path: Mapped[str] = mapped_column(String(512), nullable=False)
-    data: Mapped[dict] = mapped_column(JSON, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    __tablename__ = "commit_files"
 
-    __table_args__ = (
-        UniqueConstraint("repo_path", "file_path", name="uq_timeline_summary_cache"),
-    )
+    commit_id: Mapped[int] = mapped_column(ForeignKey("commits.id", ondelete="CASCADE"), primary_key=True)
+    file_id: Mapped[int] = mapped_column(ForeignKey("files.id", ondelete="CASCADE"), primary_key=True)
+    lines_added: Mapped[int] = mapped_column(Integer, default=0)
+    lines_removed: Mapped[int] = mapped_column(Integer, default=0)
 
-
-# ── 프로젝트 초기 분석 ────────────────────────────────────────────────────────
-
-class ProjectStatus(str, enum.Enum):
-    PENDING    = "PENDING"
-    PROCESSING = "PROCESSING"
-    COMPLETED  = "COMPLETED"
-    FAILED     = "FAILED"
+    commit: Mapped["Commit"] = relationship(back_populates="file_changes")
+    file: Mapped["File"] = relationship(back_populates="changes")
 
 
-class ProjectSummary(Base):
-    """프로젝트 최초 로드 시 Bedrock이 생성한 전체 요약.
+# ── 기능별 테이블 ──────────────────────────────────────────────────────────────
 
-    SQLite / PostgreSQL 양쪽에서 동작한다.
-    project_path 는 UNIQUE + 단독 조회 INDEX 를 모두 가진다.
+class BlameExplanation(Base):
+    """컨텍스트 블레임 AI 결과 캐시.
+
+    UNIQUE(file_id, commit_id) — "왜 바뀌었나"는 줄(line)이 아니라 커밋이 그 파일에 가한
+    변경의 속성이다. 줄은 그 커밋을 찾기 위한 포인터(git blame)일 뿐이므로, 같은 커밋이 바꾼
+    여러 줄은 설명 1개를 공유한다(커밋×파일 단위 dedup). 라인이 밀려 blamed 커밋이 달라지면
+    (file_id, commit_id) 가 달라져 자동 캐시 미스 → 재계산되어 stale 응답을 막는다.
     """
-    __tablename__ = "project_summaries"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-
-    # 경로로 자주 단독 조회하므로 unique 외에 index 도 명시
-    project_path: Mapped[str] = mapped_column(
-        String(1024), unique=True, index=True, nullable=False
+    __tablename__ = "blame_explanations"
+    __table_args__ = (
+        UniqueConstraint("file_id", "commit_id", name="uq_blame_file_commit"),
     )
 
-    # 기본값 'PENDING' — PENDING / PROCESSING / COMPLETED / FAILED
-    status: Mapped[str] = mapped_column(
-        String(20), nullable=False, default=ProjectStatus.PENDING
-    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[int] = mapped_column(ForeignKey("files.id", ondelete="CASCADE"), nullable=False)
+    commit_id: Mapped[int] = mapped_column(ForeignKey("commits.id", ondelete="CASCADE"), nullable=False)
+    explanation: Mapped[str] = mapped_column(Text, nullable=False)
+    ai_suggestion: Mapped[str | None] = mapped_column(Text)
+    source_ref: Mapped[str | None] = mapped_column(Text)
+    change_stats: Mapped[dict | None] = mapped_column(JSONB)
+    pr_info: Mapped[dict | None] = mapped_column(JSONB)
+    related_changes: Mapped[list | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    commit: Mapped["Commit"] = relationship()
 
-    # 처음엔 없을 수 있음(None). 분석 성공 시 git HEAD 해시(40자) 저장
-    last_commit_hash: Mapped[str | None] = mapped_column(String(40), nullable=True)
-
-    # updated_at: ORM 레벨에서 자동 갱신 — SQLite·PostgreSQL 모두 호환
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
-    )
-
-
-# ── 파일별 타임라인 분석 ──────────────────────────────────────────────────────
 
 class TimelineSummary(Base):
-    """파일별 LangGraph 분석 결과.
+    """타임라인 AI 요약 캐시.
 
-    기존 DB 테이블 timeline_summaries 에 매핑 (이미 존재하는 테이블이므로 DDL 생성 안 함).
-    milestones 컬럼은 JSONB 타입으로 커밋 메타데이터를 저장한다.
+    UNIQUE(file_id, commit_set_hash) — commit_set_hash 는 파일의 정렬된 커밋 해시 목록의 SHA-256.
+    커밋 집합이 그대로면 적중, 새 커밋이 생기면 해시가 달라져 재요약(LangGraph/Bedrock 재실행).
     """
+
     __tablename__ = "timeline_summaries"
-    __table_args__ = {"extend_existing": True}  # 이미 존재하는 테이블 — create_all 무시
+    __table_args__ = (
+        UniqueConstraint("file_id", "commit_set_hash", name="uq_timeline_file_sethash"),
+    )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-
-    # 파일 식별자 — 호출 측에서 hash(file_path) 로 생성한 정수
-    file_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
-
-    # 분석 당시 최신 git 커밋 해시 (중복 분석 방지용)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[int] = mapped_column(ForeignKey("files.id", ondelete="CASCADE"), nullable=False)
     commit_set_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    milestones: Mapped[list | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    # Bedrock 이 생성한 파일 요약
-    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # 커밋 메타데이터 JSON {"type": "feat", "domain": "auth", ...}
-    milestones: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+# ── 역추적: 서버 문서 저장 + git 연결 ──────────────────────────────────────────
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+class Document(Base):
+    """서버에 업로드된 기획 문서 메타데이터. 바이너리는 storage_key 위치(디스크/S3)에 저장."""
 
+    __tablename__ = "documents"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    repo_id: Mapped[int | None] = mapped_column(ForeignKey("repositories.id", ondelete="SET NULL"))
+    original_name: Mapped[str] = mapped_column(Text, nullable=False)
+    storage_key: Mapped[str] = mapped_column(Text, nullable=False)
+    content_type: Mapped[str | None] = mapped_column(Text)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    page_count: Mapped[int | None] = mapped_column(Integer)
+    uploaded_by: Mapped[str | None] = mapped_column(Text)
+    file_data: Mapped[bytes | None] = mapped_column(LargeBinary)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    links: Mapped[list["DocumentLink"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan"
+    )
+
+
+class DocumentLink(Base):
+    """문서(특정 페이지/구절)와 git 히스토리를 잇는 다리."""
+
+    __tablename__ = "document_links"
+    __table_args__ = (
+        Index("ix_document_links_ticket", "ticket"),
+        Index("ix_document_links_commit", "commit_id"),
+        Index("ix_document_links_file", "file_id"),
+        Index(
+            "uq_doclinks_doc_commit_type",
+            "document_id", "commit_id", "link_type",
+            unique=True,
+            postgresql_where=text("commit_id IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
+    link_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    ticket: Mapped[str | None] = mapped_column(Text)
+    commit_id: Mapped[int | None] = mapped_column(ForeignKey("commits.id", ondelete="CASCADE"))
+    file_id: Mapped[int | None] = mapped_column(ForeignKey("files.id", ondelete="CASCADE"))
+    page: Mapped[int | None] = mapped_column(Integer)
+    section: Mapped[str | None] = mapped_column(Text)
+    excerpt: Mapped[str | None] = mapped_column(Text)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    document: Mapped["Document"] = relationship(back_populates="links")

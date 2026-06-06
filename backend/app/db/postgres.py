@@ -1,44 +1,44 @@
-"""SQLAlchemy 엔진 및 세션 팩토리.
+"""PostgreSQL(RDS) 연결 레이어 — SQLAlchemy 2.0 async.
 
-async 엔진 (asyncpg)  → FastAPI 라우터 / timeline CRUD
-sync  엔진 (psycopg2) → alembic 마이그레이션 / 캐시 헬퍼(dynamodb.py)
+세 기능(블레임/타임라인/역추적)이 공유하는 정규화 스키마의 DB 세션을 제공한다.
+
+- 런타임(FastAPI): asyncpg 드라이버로 비동기 접속 (`DATABASE_URL`)
+- Alembic 마이그레이션: psycopg2 동기 드라이버 (`get_rds_url_sync`) — env.py 전용
+
+자격증명은 환경변수(.env)의 DATABASE_URL 에서 읽는다 — 코드에 비밀번호 없음.
 """
 
-import os
-from pathlib import Path
+from collections.abc import AsyncGenerator
 
-from dotenv import load_dotenv
-from sqlalchemy import create_engine
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.orm import DeclarativeBase
 
-# backend/.env 를 파일 위치 기준 절대 경로로 로드 — CWD 에 무관하게 동작
-_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
-load_dotenv(_ENV_PATH, override=False)
-
-_DB_URL      = os.environ.get("DATABASE_URL", "")
-_DB_URL_SYNC = os.environ.get("DATABASE_URL_SYNC", "")
-
-if not _DB_URL:
-    raise RuntimeError(
-        f".env 파일({_ENV_PATH})에 DATABASE_URL 이 없습니다.\n"
-        "예시: DATABASE_URL=postgresql+asyncpg://postgres:postgres@<host>:5432/<db>"
-    )
-
-# ── 비동기 (FastAPI / timeline CRUD) ─────────────────────────────────────────
-async_engine      = create_async_engine(_DB_URL, echo=False, pool_pre_ping=True)
-AsyncSessionLocal = async_sessionmaker(async_engine, expire_on_commit=False, class_=AsyncSession)
-
-# ── 동기 (캐시 헬퍼 / alembic) ───────────────────────────────────────────────
-sync_engine      = create_engine(_DB_URL_SYNC or _DB_URL.replace("+asyncpg", "+psycopg2"), pool_pre_ping=True)
-SyncSessionLocal = sessionmaker(sync_engine, autocommit=False, autoflush=False)
+from app.core.config import get_rds_url_async
 
 
 class Base(DeclarativeBase):
-    pass
+    """모든 ORM 모델의 공통 베이스. Alembic 이 Base.metadata 로 스키마를 추적한다."""
 
 
-async def get_db():
-    """FastAPI Depends 주입용 비동기 세션."""
+# 앱 전역 싱글턴 엔진/세션 팩토리 (요청마다 재생성하지 않는다)
+engine = create_async_engine(
+    get_rds_url_async(),
+    pool_pre_ping=True,   # 유휴 커넥션 끊김(RDS idle timeout) 자동 복구
+    future=True,
+)
+
+AsyncSessionLocal = async_sessionmaker(
+    bind=engine,
+    expire_on_commit=False,   # 커밋 후에도 ORM 객체 속성 접근 가능
+    class_=AsyncSession,
+)
+
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """FastAPI 의존성 — 요청 단위 AsyncSession 을 열고 자동으로 닫는다."""
     async with AsyncSessionLocal() as session:
         yield session

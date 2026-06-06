@@ -22,6 +22,7 @@ from app.core import git, knowledge_base, vcs
 from app.core.ai_client import call_bedrock
 from app.core.config import get_team_map
 from app.core.knowledge_base import Passage
+from app.core.tickets import extract_ticket
 
 _SYSTEM_PROMPT = (
     "당신은 코드 변경의 '기획 의도'를 설명하는 도우미입니다. "
@@ -29,8 +30,8 @@ _SYSTEM_PROMPT = (
     "비개발자도 이해할 수 있는 한국어로 설명하세요."
 )
 
-# 이슈 트래커 키 패턴 — 예: PAY-2041, KYC-12
-_TICKET_RE = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
+# Bedrock 에 보낼 diff 의 문자 수 상한 — 거대 커밋의 토큰 폭발(비용·지연)을 막는다.
+_MAX_DIFF_CHARS = 2000
 
 # 후속 변경을 'security' 로 분류할 도메인 신호어
 _SECURITY_TERMS = ("KYC", "감사", "audit", "보안", "security", "권한", "auth")
@@ -50,8 +51,12 @@ _STOPWORDS = {
 }
 
 
-def analyze_blame(repo_path: str, file_path: str, line: int) -> dict:
-    info = git.get_blame_info(repo_path, file_path, line)
+def analyze_blame(
+    repo_path: str, file_path: str, line: int, info: git.BlameInfo | None = None
+) -> dict:
+    # 라우터가 캐시 키 해석용으로 이미 구한 info 를 넘기면 재사용(중복 git blame 방지).
+    if info is None:
+        info = git.get_blame_info(repo_path, file_path, line)
     keywords = extract_keywords(info.message)
     passages = knowledge_base.retrieve_passages(" ".join(keywords))
 
@@ -90,27 +95,18 @@ def ask_followup(repo_path: str, file_path: str, line: int, question: str) -> st
     """
     info = git.get_blame_info(repo_path, file_path, line)
     passages = knowledge_base.retrieve_passages(" ".join(extract_keywords(info.message)))
-    spec_block = _format_passages(passages)
+    context = _build_context(info, passages)
 
-    prompt = f"""아래는 어떤 코드 한 줄의 변경 맥락입니다. 이 맥락에 근거해 사용자의 질문에 한국어로 1~2문장으로 답하세요.
+    instruction = f"""위 변경 맥락에 근거해 사용자의 질문에 한국어로 1~2문장으로 답하세요.
 근거가 기획서 단락에 있으면 핵심 표현을 큰따옴표("…")로 인용하고, 맥락에 없으면 모른다고 솔직히 답하세요.
-
-[작성자] {info.author}
-[날짜] {info.date}
-[커밋 메시지]
-{info.message}
-
-[변경 내용]
-{info.diff}
-
-[연관 기획서 단락]
-{spec_block}
 
 [사용자 질문]
 {question}"""
 
     try:
-        return call_bedrock(prompt, system=_SYSTEM_PROMPT, max_tokens=300).strip()
+        return call_bedrock(
+            instruction, system=_SYSTEM_PROMPT, context=context, cache=True, max_tokens=300
+        ).strip()
     except Exception:
         return "[Bedrock 미연동] 후속 질문에 답하려면 AWS Bedrock 자격증명이 필요합니다."
 
@@ -139,18 +135,6 @@ def extract_keywords(commit_message: str) -> list[str]:
         (domain if tok in _DOMAIN_TERMS else rest).append(tok)
 
     return domain + rest
-
-
-def extract_ticket(commit_message: str, branch: str = "") -> str | None:
-    """커밋 메시지 또는 브랜치명에서 이슈 키(예: PAY-2041)를 추출한다.
-
-    커밋 메시지를 우선 보고, 없으면 브랜치명(feat/PAY-2041-... 등)에서 찾는다.
-    """
-    for text in (commit_message, branch):
-        m = _TICKET_RE.search(text or "")
-        if m:
-            return m.group(1)
-    return None
 
 
 def _safe_find_pr(repo_path: str, commit_hash: str):
@@ -214,25 +198,16 @@ def _explain_blame(info: git.BlameInfo, passages: list[Passage]) -> str:
 
     Bedrock 호출이 불가한 환경(자격증명 없음 등)에서는 커밋 메시지를 그대로 반환한다.
     """
-    spec_block = _format_passages(passages)
+    context = _build_context(info, passages)
 
-    prompt = f"""아래 정보를 종합해, 개발자가 이 코드를 왜 변경했는지 한국어로 1~2문장으로 설명하세요.
+    instruction = """위 변경 맥락을 종합해, 개발자가 이 코드를 왜 변경했는지 한국어로 1~2문장으로 설명하세요.
 기술적 커밋 메시지가 아니라, 기획서가 알려주는 '비즈니스상의 진짜 이유'를 우선해 설명하세요.
-기획서 단락에 근거가 있으면 핵심 표현을 큰따옴표("…")로 인용하세요.
-
-[작성자] {info.author}
-[날짜] {info.date}
-[커밋 메시지]
-{info.message}
-
-[변경 내용]
-{info.diff}
-
-[연관 기획서 단락]
-{spec_block}"""
+기획서 단락에 근거가 있으면 핵심 표현을 큰따옴표("…")로 인용하세요."""
 
     try:
-        return call_bedrock(prompt, system=_SYSTEM_PROMPT, max_tokens=300).strip()
+        return call_bedrock(
+            instruction, system=_SYSTEM_PROMPT, context=context, cache=True, max_tokens=300
+        ).strip()
     except Exception:
         # Bedrock 미설정/호출 실패 시 git 커밋 메시지로 폴백 (개발/테스트용)
         return f"[Bedrock 미연동] 커밋 메시지: {info.message or '(메시지 없음)'}"
@@ -248,32 +223,61 @@ def _suggest_improvement(info: git.BlameInfo, passages: list[Passage]) -> str | 
     None 을 반환한다 — 사이드바는 값이 없으면 'AI 추론' 섹션을 숨기므로,
     유령 텍스트("[Bedrock 미연동]…")를 넣지 않는다.
     """
-    spec_block = _format_passages(passages)
+    context = _build_context(info, passages)
 
-    prompt = f"""아래는 어떤 코드 한 줄의 변경 맥락입니다. 이 맥락을 바탕으로,
+    instruction = """위 변경 맥락을 바탕으로,
 앞으로 이 코드를 다룰 때 함께 고려하면 좋을 점을 한국어로 딱 한 문장 제안하세요.
 - 단순한 코드 스타일 지적이 아니라, 기획·도메인 맥락에서 의미 있는 한 가지를 짚으세요.
-- 맥락이 빈약해 의미 있는 제안이 어렵다면, 다른 말 없이 정확히 "NONE" 만 출력하세요.
-
-[작성자] {info.author}
-[날짜] {info.date}
-[커밋 메시지]
-{info.message}
-
-[변경 내용]
-{info.diff}
-
-[연관 기획서 단락]
-{spec_block}"""
+- 맥락이 빈약해 의미 있는 제안이 어렵다면, 다른 말 없이 정확히 "NONE" 만 출력하세요."""
 
     try:
-        suggestion = call_bedrock(prompt, system=_SYSTEM_PROMPT, max_tokens=200).strip()
+        suggestion = call_bedrock(
+            instruction, system=_SYSTEM_PROMPT, context=context, cache=True, max_tokens=200
+        ).strip()
     except Exception:
         return None  # Bedrock 미설정/호출 실패 — 섹션을 숨긴다
 
     if not suggestion or suggestion.upper().strip(' ."') == "NONE":
         return None
     return suggestion
+
+
+def _build_context(info: git.BlameInfo, passages: list[Passage]) -> str:
+    """설명/AI제안/후속질문 호출이 공유하는 '변경 맥락' 블록.
+
+    이 블록이 프롬프트 캐싱의 캐시 프리픽스가 된다(call_bedrock(context=..., cache=True)).
+    analyze_blame 한 번에 _explain_blame + _suggest_improvement 가 같은 context 로 연달아
+    호출하므로, 두 번째 호출부터 이 블록이 캐시 적중되어 입력 토큰 비용이 준다.
+    핵심: 호출마다 달라지는 '작업 지시문/질문'은 여기 넣지 말고, 변하지 않는 맥락 데이터만 둔다.
+
+    👤 사용자 기여 포인트: 어떤 필드를 맥락에 넣고(작성자/날짜/메시지/diff/기획서 단락) 무엇을
+       지시문으로 뺄지의 경계가 캐시 적중률과 설명 품질을 좌우한다. 아래는 동작하는 기본 구성.
+    """
+    spec_block = _format_passages(passages)
+    return f"""[작성자] {info.author}
+[날짜] {info.date}
+[커밋 메시지]
+{info.message}
+
+[변경 내용]
+{_truncate_diff(info.diff)}
+
+[연관 기획서 단락]
+{spec_block}"""
+
+
+def _truncate_diff(diff: str) -> str:
+    """Bedrock 에 보낼 diff 를 _MAX_DIFF_CHARS 상한으로 자른다(거대 커밋의 토큰 폭발 방지).
+
+    👤 사용자 기여 포인트: 자르는 전략은 설명 품질 vs 토큰 비용의 트레이드오프다.
+       - head cap(앞 N자): 가장 단순, 뒷부분 변경 손실  ← 현재 기본값
+       - head + tail(앞뒤 절반씩): 변경의 시작/끝 맥락 보존
+       - 파일 경로/`@@` hunk 헤더 우선 보존: 구조 신호 유지
+       본인 전략으로 아래 한 줄을 교체하세요.
+    """
+    if len(diff) <= _MAX_DIFF_CHARS:
+        return diff
+    return diff[:_MAX_DIFF_CHARS] + "\n…(이하 생략)"
 
 
 def _format_passages(passages: list[Passage]) -> str:

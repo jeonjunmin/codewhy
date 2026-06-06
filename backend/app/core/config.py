@@ -14,15 +14,18 @@ boto3 자격증명 탐색 순서: 환경변수 → ~/.aws/credentials → EC2 In
 import json
 import os
 from functools import lru_cache
-
 from pathlib import Path
 
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# backend/.env 를 파일 위치 기준 절대 경로로 로드 — CWD 에 무관하게 동작
-_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
-load_dotenv(_ENV_PATH, override=False)
+# config.py 기준 상위 3단계(app/core → app → backend)의 .env 를 절대경로로 참조.
+# cwd 에 무관하게 항상 backend/.env 를 읽는다.
+_ENV_FILE = Path(__file__).parent.parent.parent / ".env"
+
+# boto3 는 os.environ 을 직접 읽으므로, pydantic-settings 가 읽기 전에
+# load_dotenv() 로 .env → os.environ 에 먼저 주입해야 한다.
+load_dotenv(_ENV_FILE, override=False)
 
 
 class Settings(BaseSettings):
@@ -36,19 +39,18 @@ class Settings(BaseSettings):
     BEDROCK_MODEL_ID: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
 
     # ── PostgreSQL (RDS) ──────────────────────────────────────────────────────
-    # asyncpg 드라이버 (FastAPI async) — .env 의 DATABASE_URL 로 주입
-    DATABASE_URL: str = ""
-    # psycopg2 드라이버 (alembic / 캐시 헬퍼 sync) — .env 의 DATABASE_URL_SYNC 로 주입
-    DATABASE_URL_SYNC: str = ""
+    # 런타임(asyncpg): postgresql+asyncpg://user:pass@host:5432/codewhy
+    DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/codewhy"
 
     # ── Anthropic ─────────────────────────────────────────────────────────────
     ANTHROPIC_API_KEY: str = ""
 
     # ── 기타 ──────────────────────────────────────────────────────────────────
-    DOCUMENT_PATHS: str = ""
+    # 업로드된 기획 문서 바이너리를 보관할 서버 디렉터리 (역추적 다운로드용)
+    DOCUMENTS_DIR: str = "./uploaded_documents"
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(_ENV_FILE),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -62,13 +64,30 @@ def get_settings() -> Settings:
 
 # ── DB URL 헬퍼 ───────────────────────────────────────────────────────────────
 
+def _with_driver(url: str, driver: str) -> str:
+    """DATABASE_URL 의 드라이버를 강제로 교체한다.
+
+    .env 에 `postgresql://`, `postgresql+psycopg2://`, `postgresql+asyncpg://` 중 무엇이 와도
+    런타임(asyncpg)과 alembic(psycopg2)이 각자 필요한 드라이버로 안전하게 접속하도록 정규화한다.
+    """
+    scheme, _, rest = url.partition("://")
+    base = scheme.split("+", 1)[0]
+    return f"{base}+{driver}://{rest}"
+
+
+def get_rds_url_async() -> str:
+    """런타임(FastAPI)용 비동기(asyncpg) 접속 URL."""
+    return _with_driver(get_settings().DATABASE_URL, "asyncpg")
+
+
+def get_rds_url_sync() -> str:
+    """Alembic 마이그레이션용 동기(psycopg2) 접속 URL."""
+    return _with_driver(get_settings().DATABASE_URL, "psycopg2")
+
+
 def get_database_url() -> str:
     """asyncpg 비동기 URL (FastAPI 앱용)."""
-    return get_settings().DATABASE_URL
-
-def get_database_url_sync() -> str:
-    """psycopg2 동기 URL (alembic / 캐시 헬퍼용)."""
-    return get_settings().DATABASE_URL_SYNC
+    return get_rds_url_async()
 
 
 # ── 하위 호환 헬퍼 ────────────────────────────────────────────────────────────
@@ -91,7 +110,11 @@ def get_aws_credentials() -> dict:
         return creds
     return {}
 
+
+# ─── AWS Bedrock ────────────────────────────────────────────────────────────
+
 def get_bedrock_model_id() -> str:
+    """Converse API 로 호출할 Bedrock 모델 ID (inference profile ID 권장)."""
     return get_settings().BEDROCK_MODEL_ID
 
 def get_bedrock_kb_id() -> str:
@@ -104,9 +127,36 @@ def get_bedrock_kb_max_results() -> int:
     except ValueError:
         return 4
 
-def get_document_paths() -> list[str]:
-    raw = get_settings().DOCUMENT_PATHS
-    return [p.strip() for p in raw.split(",") if p.strip()]
+
+# ─── 브라운필드 온보딩: 문서 인덱싱 + 커밋 백필 ──────────────────────
+
+def get_doc_index_bucket() -> str:
+    """KB 데이터소스가 읽는 S3 버킷. 미설정 시 시맨틱 인덱싱 생략(=no-op)."""
+    return os.getenv("DOC_INDEX_S3_BUCKET", "")
+
+
+def get_doc_index_prefix() -> str:
+    """인덱싱 문서를 올릴 S3 key prefix."""
+    return os.getenv("DOC_INDEX_S3_PREFIX", "codewhy-docs/")
+
+
+def get_bedrock_kb_data_source_id() -> str:
+    """ingestion job 을 트리거할 KB 데이터소스 ID. 미설정 시 자동 ingestion 생략."""
+    return os.getenv("BEDROCK_KB_DATA_SOURCE_ID", "")
+
+
+def get_trace_backfill_min_confidence() -> float:
+    """커밋↔문서 백필 시 링크를 생성할 최소 시맨틱 점수(0~1)."""
+    try:
+        return float(os.getenv("TRACE_BACKFILL_MIN_CONFIDENCE", "0.4"))
+    except ValueError:
+        return 0.4
+
+
+def get_documents_dir() -> str:
+    """업로드된 기획 문서 바이너리를 저장/조회할 서버 디렉터리."""
+    return get_settings().DOCUMENTS_DIR
+
 
 def get_team_map() -> dict[str, str]:
     """작성자 → 팀명 매핑 JSON 파일. 미설정·오류 시 빈 dict."""

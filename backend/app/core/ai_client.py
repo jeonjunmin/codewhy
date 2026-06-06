@@ -51,6 +51,8 @@ def call_bedrock(
     prompt: str,
     *,
     system: str | None = None,
+    context: str | None = None,
+    cache: bool = False,
     max_tokens: int = 600,
     temperature: float = 0.2,
     model_id: str | None = None,
@@ -59,10 +61,23 @@ def call_bedrock(
 
     Converse API 는 모델별 JSON 바디 차이를 흡수하므로, 모델 교체 시
     BEDROCK_MODEL_ID 환경변수만 바꾸면 된다.
+
+    프롬프트 캐싱: `context`(여러 호출이 공유하는 긴 프리픽스)와 `cache=True` 를 주면
+    content 를 [context, cachePoint, prompt] 로 구성한다. 같은 context 로 연달아 호출하면
+    두 번째부터 프리픽스가 캐시 적중되어 입력 토큰 비용이 준다. 단, 모델별 최소 캐시 토큰
+    임계값을 넘는 context 일 때만 실제 절감이 생기며, 작으면 무동작(무해)이다.
     """
+    if context is not None:
+        content: list[dict] = [{"text": context}]
+        if cache:
+            content.append({"cachePoint": {"type": "default"}})
+        content.append({"text": prompt})
+    else:
+        content = [{"text": prompt}]
+
     kwargs: dict = {
         "modelId": model_id or get_bedrock_model_id(),
-        "messages": [{"role": "user", "content": [{"text": prompt}]}],
+        "messages": [{"role": "user", "content": content}],
         "inferenceConfig": {"maxTokens": max_tokens, "temperature": temperature},
     }
     if system:

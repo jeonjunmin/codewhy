@@ -87,10 +87,17 @@ export interface TraceRequest {
     repoPath: string;
 }
 
+/** 문서를 찾아낸 경로 — 신뢰도 표시에 쓴다. ticket=확정, backfill/semantic=추정. */
+export type TraceMatchType = 'ticket' | 'backfill' | 'semantic';
+
 export interface DocumentMatch {
-    path: string;
-    page: number;
-    excerpt: string;
+    documentId: number;
+    name: string;            // 업로드 원본 파일명
+    page?: number;
+    excerpt?: string;
+    downloadUrl: string;     // /api/documents/{id}/download
+    matchType?: TraceMatchType;
+    confidence?: number;     // 0~1 (ticket 매칭은 없음)
 }
 
 export interface TraceResult {

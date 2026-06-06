@@ -1,117 +1,111 @@
 """Timeline — PostgreSQL CRUD.
 
-② 흐름: 확장이 보낸 커밋을 RDS에 저장하고, 저장된 이력을 LangGraph에 넘긴다.
+공유 백본(commits/files/commit_files)에 커밋 이력을 upsert 하고, 파일별 이력을 join 으로 읽는다.
+타임라인 AI 요약 결과는 timeline_summaries 에 캐시한다(commit_set_hash 키).
 
-  upsert_commits — 신규 커밋만 INSERT (기존 hash는 건너뜀)
-  get_commits    — repo_path + file_path 기준 전체 이력 최신순 반환
+👤 담당: 개발자 B
 """
 
-import os
+from datetime import date, datetime
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import CommitLog, File, Repository, TimelineSummary
-from app.db.postgres import AsyncSessionLocal
+from app.core.tickets import extract_ticket
+from app.db import crud_common
+from app.db.models import Commit, CommitFile, File, TimelineSummary
 
 
-async def get_timeline_summary_by_path(
-    repo_path: str, file_path: str
-) -> dict | None:
-    """timeline_summaries 에 저장된 Bedrock 요약을 반환한다. 없으면 None.
-
-    repositories(identifier=폴더명) → files(repo_id, 상대경로) → timeline_summaries
-    """
-    folder_name = os.path.basename(os.path.normpath(repo_path))
-
-    # 절대경로 → 상대경로, 슬래시 정규화 (git 저장 형식)
+def _parse_date(value: str) -> date | None:
     try:
-        rel_path = os.path.relpath(file_path, repo_path).replace("\\", "/")
-    except ValueError:
-        return None  # Windows 드라이브가 다를 때
-
-    async with AsyncSessionLocal() as db:
-        repo_id = await db.scalar(
-            select(Repository.id).where(Repository.identifier == folder_name)
-        )
-        if not repo_id:
-            return None
-
-        file_id = await db.scalar(
-            select(File.id).where(
-                File.repo_id   == repo_id,
-                File.file_path == rel_path,
-            )
-        )
-        if not file_id:
-            return None
-
-        row = await db.scalar(
-            select(TimelineSummary).where(TimelineSummary.file_id == file_id)
-        )
-        if not row or not row.summary:
-            return None
-
-        # milestones: DB에 저장된 AI 추출 결과 (list). 없으면 빈 리스트.
-        milestones = row.milestones if isinstance(row.milestones, list) else []
-        return {"summary": row.summary, "milestones": milestones}
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
 
 
 async def upsert_commits(
-    repo_path: str, file_path: str, commits: list[dict]
-) -> None:
-    if not commits:
-        return
+    db: AsyncSession, repo_path: str, file_path: str, commits: list[dict]
+) -> File:
+    """커밋 목록을 공유 백본에 저장하고, 해당 File 행을 돌려준다.
 
-    async with AsyncSessionLocal() as db:
-        hashes = [c["hash"] for c in commits]
-
-        existing = set(
-            (await db.scalars(
-                select(CommitLog.commit_hash).where(
-                    CommitLog.repo_path == repo_path,
-                    CommitLog.file_path == file_path,
-                    CommitLog.commit_hash.in_(hashes),
-                )
-            )).all()
-        )
-
-        new_rows = [
-            CommitLog(
-                repo_path=repo_path,
-                file_path=file_path,
-                commit_hash=c["hash"],
-                author=c["author"],
-                date=c["date"],
-                message=c["subject"],
-            )
-            for c in commits
-            if c["hash"] not in existing
-        ]
-        if new_rows:
-            db.add_all(new_rows)
-            await db.commit()
-
-
-async def get_commits(
-    repo_path: str, file_path: str, limit: int = 200
-) -> list[dict]:
-    """저장된 커밋 이력을 최신순으로 반환한다.
-
-    graph.py 가 기대하는 형식:
-      [{"hash": str, "author": str, "date": str, "subject": str}, ...]
+    commits 형식: [{"hash","author","date","subject"}, ...] (확장이 로컬 git log 로 수집)
     """
-    async with AsyncSessionLocal() as db:
-        rows = (await db.scalars(
-            select(CommitLog)
-            .where(
-                CommitLog.repo_path == repo_path,
-                CommitLog.file_path == file_path,
-            )
-            .order_by(CommitLog.date.desc())
-            .limit(limit)
-        )).all()
+    repo = await crud_common.get_or_create_repository(db, repo_path)
+    file = await crud_common.get_or_create_file(db, repo.id, file_path)
 
+    for c in commits:
+        commit = await crud_common.upsert_commit(
+            db,
+            repo.id,
+            c["hash"],
+            author=c.get("author"),
+            committed_date=_parse_date(c.get("date", "")),
+            message=c.get("subject"),
+            ticket=extract_ticket(c.get("subject", "")),
+        )
+        await crud_common.link_commit_file(db, commit.id, file.id)
+
+    await db.commit()
+    return file
+
+
+async def get_commits(db: AsyncSession, file_id: int, limit: int = 200) -> list[dict]:
+    """파일의 커밋 이력을 최신순으로 반환한다.
+
+    graph.py 가 기대하는 형식: [{"hash","author","date","subject"}, ...]
+    """
+    stmt = (
+        select(Commit)
+        .join(CommitFile, CommitFile.commit_id == Commit.id)
+        .where(CommitFile.file_id == file_id)
+        .order_by(Commit.committed_date.desc(), Commit.id.desc())
+        .limit(limit)
+    )
+    rows = (await db.execute(stmt)).scalars().all()
     return [
-        {"hash": r.commit_hash, "author": r.author, "date": r.date, "subject": r.message}
-        for r in rows
+        {
+            "hash": c.commit_hash,
+            "author": c.author or "",
+            "date": c.committed_date.isoformat() if c.committed_date else "",
+            "subject": c.message or "",
+        }
+        for c in rows
     ]
+
+
+# ── 타임라인 요약 캐시 ──────────────────────────────────────────────────────────
+
+async def get_cached_summary(
+    db: AsyncSession, file_id: int, commit_set_hash: str
+) -> TimelineSummary | None:
+    stmt = select(TimelineSummary).where(
+        TimelineSummary.file_id == file_id,
+        TimelineSummary.commit_set_hash == commit_set_hash,
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def save_summary(
+    db: AsyncSession, file_id: int, commit_set_hash: str, result: dict
+) -> None:
+    """요약 결과를 upsert 한다. 같은 (file_id, commit_set_hash) 면 갱신."""
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    stmt = (
+        pg_insert(TimelineSummary)
+        .values(
+            file_id=file_id,
+            commit_set_hash=commit_set_hash,
+            summary=result.get("summary", ""),
+            milestones=result.get("milestones", []),
+        )
+        .on_conflict_do_update(
+            index_elements=["file_id", "commit_set_hash"],
+            set_={
+                "summary": result.get("summary", ""),
+                "milestones": result.get("milestones", []),
+            },
+        )
+    )
+    await db.execute(stmt)
+    await db.commit()

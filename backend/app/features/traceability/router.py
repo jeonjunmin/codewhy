@@ -1,14 +1,16 @@
 """Requirement Trace API 라우터.
 
-POST /api/trace/requirement — 코드에서 연관 기획 문서를 찾아 반환한다.
-DOCUMENT_PATHS 환경변수가 비어있으면 400 을 반환한다.
+POST /api/trace/requirement — 코드 라인에서 연관 기획 문서(다운로드 URL 포함)를 찾아 반환한다.
 
 👤 담당: 개발자 C
 """
 
-from fastapi import APIRouter, HTTPException
+import logging
 
-from app.core.config import get_document_paths
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.postgres import get_db
 from app.features.traceability import service
 from app.features.traceability.schemas import (
     DocumentMatch,
@@ -17,16 +19,14 @@ from app.features.traceability.schemas import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.post("/requirement", response_model=TraceResponse)
-def requirement_trace(req: TraceRequest):
-    document_paths = get_document_paths()
-    if not document_paths:
-        raise HTTPException(
-            status_code=400,
-            detail="DOCUMENT_PATHS 환경변수가 설정되지 않았습니다.",
-        )
-
-    matches = service.trace(req.repoPath, req.filePath, req.line, document_paths)
+async def requirement_trace(req: TraceRequest, db: AsyncSession = Depends(get_db)):
+    try:
+        matches = await service.trace(db, req.repoPath, req.filePath, req.line)
+    except Exception as e:
+        logger.exception("requirement trace 실패 — repo=%s file=%s line=%s", req.repoPath, req.filePath, req.line)
+        raise HTTPException(status_code=500, detail=f"requirement trace 실패: {e}")
     return TraceResponse(documents=[DocumentMatch(**m) for m in matches])

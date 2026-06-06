@@ -124,6 +124,50 @@ def get_file_log(repo_path: str, file_path: str) -> list[dict]:
     return commits
 
 
+def get_repo_log(repo_path: str, since: str = "", limit: int = 0) -> list[dict]:
+    """레포 전체 커밋 이력을 변경 파일 목록과 함께 반환한다(브라운필드 백필용).
+
+    파일 단위(get_file_log)와 달리 레포 전체를 한 번에 훑는다. 커밋마다 numstat 으로
+    바뀐 파일 경로/추가·삭제 라인을 함께 모아, 백필이 커밋↔문서 시맨틱 매칭에 쓸
+    조회 텍스트(메시지 + 파일명)를 구성할 수 있게 한다.
+
+    반환: [{"hash","author","author_email","date","subject",
+            "files":[{"path","added","removed"}, ...]}, ...]  (최신순)
+    """
+    cmd = ["git", "log", "--numstat", "--date=short", "--format=@@@%H|%an|%ae|%ad|%s"]
+    if since:
+        cmd.append(f"--since={since}")
+    if limit:
+        cmd.append(f"-n{limit}")
+
+    out = subprocess.check_output(cmd, cwd=repo_path, text=True, encoding="utf-8")
+
+    commits: list[dict] = []
+    current: dict | None = None
+    for line in out.splitlines():
+        if line.startswith("@@@"):
+            parts = line[3:].split("|", 4)
+            if len(parts) != 5:
+                current = None
+                continue
+            current = {
+                "hash": parts[0],
+                "author": parts[1],
+                "author_email": parts[2],
+                "date": parts[3],
+                "subject": parts[4],
+                "files": [],
+            }
+            commits.append(current)
+        elif current is not None and line.strip():
+            cols = line.split("\t")
+            if len(cols) >= 3:
+                added = int(cols[0]) if cols[0].isdigit() else 0
+                removed = int(cols[1]) if cols[1].isdigit() else 0
+                current["files"].append({"path": cols[2], "added": added, "removed": removed})
+    return commits
+
+
 def _get_commit_message(repo_path: str, commit_hash: str) -> str:
     return subprocess.check_output(
         ["git", "log", "-1", "--format=%B", commit_hash],
