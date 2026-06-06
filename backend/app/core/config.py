@@ -14,13 +14,18 @@ boto3 자격증명 탐색 순서: 환경변수 → ~/.aws/credentials → EC2 In
 import json
 import os
 from functools import lru_cache
+from pathlib import Path
 
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# config.py 기준 상위 3단계(app/core → app → backend)의 .env 를 절대경로로 참조.
+# cwd 에 무관하게 항상 backend/.env 를 읽는다.
+_ENV_FILE = Path(__file__).parent.parent.parent / ".env"
+
 # boto3 는 os.environ 을 직접 읽으므로, pydantic-settings 가 읽기 전에
 # load_dotenv() 로 .env → os.environ 에 먼저 주입해야 한다.
-load_dotenv(override=False)
+load_dotenv(_ENV_FILE, override=False)
 
 
 class Settings(BaseSettings):
@@ -45,7 +50,7 @@ class Settings(BaseSettings):
     DOCUMENTS_DIR: str = "./uploaded_documents"
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(_ENV_FILE),
         env_file_encoding="utf-8",
         extra="ignore",
     )
