@@ -32,6 +32,13 @@
           "name": "Context Blame",
           "icon": "images/codewhy-icon.svg",
           "contextualTitle": "CodeWhy"
+        },
+        {
+          "type": "webview",
+          "id": "codewhy.timelineSummary",
+          "name": "타임라인 요약",
+          "icon": "images/codewhy-icon.svg",
+          "contextualTitle": "CodeWhy"
         }
       ]
     },

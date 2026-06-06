@@ -2,355 +2,282 @@ import * as vscode from 'vscode';
 import { EditorContext } from '../../shared/editor';
 import { TimelineResult } from '../../shared/types';
 
-/**
- * Timeline Summary 사이드바.
- *
- * 구성 (위에서 아래):
- *   ┌ 헤더 (📅 TIMELINE SUMMARY + 새로고침 아이콘)
- *   ├ 파일 브레드크럼
- *   ├ AI 요약 카드
- *   ├ 주요 마일스톤 타임라인
- *   └ 푸터
- *
- * 라이프사이클:
- *   - WebviewView 는 활성화될 때 한 번 resolve 된다.
- *   - 분석 결과마다 setTimeline() → postMessage 로 DOM 만 갱신한다.
- *
- * 👤 담당: 개발자 B
- */
-
 export const VIEW_ID = 'codewhy.timelineSummary';
+
+const BADGE_COLORS = [
+    '#e05454', '#2cb8b8', '#8b5cf6', '#d97706', '#16a34a',
+    '#3b82f6', '#ec4899', '#f97316', '#14b8a6', '#a855f7',
+];
+const KO_MONTHS = ['1월','2월','3월','4월','5월','6월','7월','8월','9월','10월','11월','12월'];
+
+function esc(t: unknown): string {
+    return String(t ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+function renderBold(t: string): string {
+    return esc(t).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+}
+
+function getMonth(dateStr: string): string {
+    const m = parseInt((dateStr || '').split('-')[1], 10);
+    return KO_MONTHS[m - 1] || '';
+}
+
+function splitDesc(desc: string): { title: string; body: string } {
+    const s = (desc || '').trim();
+    const idx = s.search(/[.。,，\n]/);
+    if (idx > 0 && idx < 30) {
+        return { title: s.slice(0, idx).trim(), body: s.slice(idx + 1).trim() };
+    }
+    return { title: s, body: '' };
+}
+
+type State =
+    | { kind: 'empty' }
+    | { kind: 'loading'; fileName: string }
+    | { kind: 'result'; ctx: EditorContext; result: TimelineResult };
 
 export class TimelineSidebarProvider implements vscode.WebviewViewProvider {
     private view?: vscode.WebviewView;
-    private last?: { ctx: EditorContext; result: TimelineResult };
+    private state: State = { kind: 'empty' };
 
     constructor(private readonly extensionUri: vscode.Uri) {}
 
     resolveWebviewView(view: vscode.WebviewView) {
         this.view = view;
-        view.webview.options = { enableScripts: true, localResourceRoots: [this.extensionUri] };
-        view.webview.html = this._buildShell();
-
-        // 사이드바가 다시 열렸을 때 마지막 결과 복원
-        if (this.last) {
-            this._postRender(this.last.ctx, this.last.result);
-        } else {
-            this._postEmpty();
-        }
+        view.webview.options = {
+            enableScripts: false,
+            localResourceRoots: [this.extensionUri],
+        };
+        this._render();
     }
 
-    /** Timeline Summary 분석이 끝났을 때 command.ts 에서 호출. */
     setTimeline(ctx: EditorContext, result: TimelineResult) {
-        this.last = { ctx, result };
+        this.state = { kind: 'result', ctx, result };
         if (!this.view) {
             vscode.commands.executeCommand(`${VIEW_ID}.focus`);
             return;
         }
-        this._postRender(ctx, result);
-        this.view.show?.(true);
+        this._render();
     }
 
-    /** 분석 중 스피너 표시. */
     showLoading(ctx: EditorContext) {
+        const fileName = ctx.filePath.split(/[\\/]/).pop() ?? ctx.filePath;
+        this.state = { kind: 'loading', fileName };
         if (!this.view) {
             vscode.commands.executeCommand(`${VIEW_ID}.focus`);
             return;
         }
-        const fileName = ctx.filePath.split(/[\\/]/).pop() ?? ctx.filePath;
-        this.view.webview.postMessage({ type: 'loading', payload: { fileName } });
-        this.view.show?.(true);
+        this._render();
     }
 
-    // ── postMessage 헬퍼 ──────────────────────────────────────────────────
-
-    private _postEmpty() {
-        this.view?.webview.postMessage({ type: 'empty' });
+    showEmpty() {
+        this.state = { kind: 'empty' };
+        if (this.view) { this._render(); }
     }
 
-    private _postRender(ctx: EditorContext, result: TimelineResult) {
-        const fileName = ctx.filePath.split(/[\\/]/).pop() ?? ctx.filePath;
-        const sorted = [...result.milestones].sort((a, b) => a.date.localeCompare(b.date));
-        this.view?.webview.postMessage({
-            type: 'render',
-            payload: {
-                fileName,
-                filePath: ctx.filePath,
-                summary: result.summary,
-                milestones: sorted,
-            },
-        });
+    private _render() {
+        if (!this.view) { return; }
+        this.view.webview.html = this._buildHtml();
     }
 
-    // ── HTML 셸 (한 번만 렌더, 이후 JS 로 DOM 갱신) ──────────────────────
-
-    private _buildShell(): string {
+    private _buildHtml(): string {
+        const css = this._css();
+        const body = this._body();
         return `<!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
-<style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-  body {
-    font-family: var(--vscode-font-family);
-    font-size: var(--vscode-font-size);
-    color: var(--vscode-editor-foreground);
-    background: var(--vscode-sideBar-background, var(--vscode-editor-background));
-    padding: 0;
-    height: 100vh;
-    overflow: hidden;
-  }
-
-  /* ── 헤더 ── */
-  .header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 14px 8px;
-    border-bottom: 1px solid var(--vscode-widget-border);
-    background: var(--vscode-sideBarSectionHeader-background);
-    position: sticky;
-    top: 0;
-    z-index: 10;
-  }
-  .header-title {
-    font-size: 0.68em;
-    font-weight: 700;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--vscode-sideBarTitle-foreground, var(--vscode-foreground));
-  }
-
-  /* ── 스크롤 영역 ── */
-  .scroll {
-    height: calc(100vh - 40px);
-    overflow-y: auto;
-    padding: 14px;
-  }
-
-  /* ── 빈 상태 ── */
-  .empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 10px;
-    height: 200px;
-    color: var(--vscode-descriptionForeground);
-    font-size: 0.85em;
-    text-align: center;
-    padding: 0 16px;
-  }
-  .empty-icon { font-size: 2em; opacity: 0.4; }
-
-  /* ── 로딩 ── */
-  .loading {
-    display: flex; align-items: center; gap: 8px;
-    color: var(--vscode-descriptionForeground);
-    font-size: 0.82em;
-    padding: 16px 0;
-  }
-  .spinner {
-    width: 14px; height: 14px;
-    border: 2px solid var(--vscode-widget-border);
-    border-top-color: var(--vscode-progressBar-background);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-
-  /* ── 파일 경로 ── */
-  .file-path {
-    font-size: 0.78em;
-    color: var(--vscode-descriptionForeground);
-    word-break: break-all;
-    margin-bottom: 12px;
-    padding-bottom: 10px;
-    border-bottom: 1px solid var(--vscode-widget-border);
-  }
-  .file-name { font-weight: 600; color: var(--vscode-editor-foreground); }
-
-  /* ── 섹션 레이블 ── */
-  .section-label {
-    font-size: 0.65em;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--vscode-descriptionForeground);
-    margin-bottom: 8px;
-  }
-
-  /* ── 요약 카드 ── */
-  .summary-card {
-    background: var(--vscode-textBlockQuote-background);
-    border-left: 3px solid var(--vscode-textLink-activeForeground);
-    border-radius: 0 5px 5px 0;
-    padding: 10px 13px;
-    font-size: 0.88em;
-    line-height: 1.7;
-    margin-bottom: 18px;
-    word-break: break-word;
-  }
-
-  /* ── 마일스톤 타임라인 ── */
-  .timeline {
-    position: relative;
-    padding-left: 28px;
-    margin-bottom: 16px;
-  }
-  .timeline::before {
-    content: '';
-    position: absolute;
-    left: 7px; top: 8px; bottom: 8px;
-    width: 2px;
-    background: var(--vscode-widget-border);
-    border-radius: 1px;
-  }
-  .milestone {
-    position: relative;
-    margin-bottom: 18px;
-  }
-  .milestone:last-child { margin-bottom: 0; }
-  .dot {
-    position: absolute;
-    left: -23px; top: 5px;
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    background: var(--vscode-textLink-activeForeground);
-    border: 2px solid var(--vscode-sideBar-background, var(--vscode-editor-background));
-    outline: 2px solid var(--vscode-textLink-activeForeground);
-  }
-  .milestone:first-child .dot,
-  .milestone:last-child .dot { width: 10px; height: 10px; left: -24px; top: 4px; }
-  .date-chip {
-    display: inline-block;
-    font-size: 0.68em;
-    padding: 1px 7px;
-    border-radius: 8px;
-    background: var(--vscode-badge-background);
-    color: var(--vscode-badge-foreground);
-    margin-bottom: 4px;
-    font-variant-numeric: tabular-nums;
-  }
-  .milestone-desc {
-    font-size: 0.84em;
-    line-height: 1.55;
-    color: var(--vscode-editor-foreground);
-    word-break: break-word;
-  }
-
-  /* ── 푸터 ── */
-  .footer {
-    margin-top: 14px;
-    padding-top: 10px;
-    border-top: 1px solid var(--vscode-widget-border);
-    font-size: 0.68em;
-    color: var(--vscode-descriptionForeground);
-    text-align: center;
-  }
-
-  .hidden { display: none !important; }
-</style>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
+<style>${css}</style>
 </head>
-<body>
+<body>${body}</body>
+</html>`;
+    }
 
-<div class="header">
-  <span class="header-title">📅 Timeline Summary</span>
-</div>
+    private _body(): string {
+        const s = this.state;
 
-<div class="scroll">
-
-  <!-- 빈 상태 -->
-  <div id="empty" class="empty">
-    <div class="empty-icon">📅</div>
-    <div>파일을 우클릭하고<br><strong>이 파일의 역사 요약</strong>을 선택하세요.</div>
-  </div>
-
-  <!-- 로딩 -->
-  <div id="loading" class="loading hidden">
-    <div class="spinner"></div>
-    <span id="loading-file">분석 중...</span>
-  </div>
-
-  <!-- 결과 -->
-  <div id="result" class="hidden">
-    <div class="file-path">
-      <span class="file-name" id="file-name"></span><br>
-      <span id="file-path-full"></span>
-    </div>
-
-    <div class="section-label">AI 요약</div>
-    <div class="summary-card" id="summary-text"></div>
-
-    <div class="section-label" id="milestone-label">주요 마일스톤</div>
-    <div class="timeline" id="timeline"></div>
-
-    <div class="footer">Generated by CodeWhy AI</div>
-  </div>
-
-</div>
-
-<script>
-  const vscode = acquireVsCodeApi();
-
-  function e(text) {
-    return String(text ?? '')
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  }
-
-  function show(id) {
-    ['empty','loading','result'].forEach(i => {
-      document.getElementById(i).classList.toggle('hidden', i !== id);
-    });
-  }
-
-  window.addEventListener('message', ({ data: msg }) => {
-    switch (msg.type) {
-
-      case 'empty':
-        show('empty');
-        break;
-
-      case 'loading':
-        document.getElementById('loading-file').textContent =
-          (msg.payload?.fileName ?? '') + ' 분석 중...';
-        show('loading');
-        break;
-
-      case 'render': {
-        const { fileName, filePath, summary, milestones } = msg.payload;
-
-        document.getElementById('file-name').textContent = fileName;
-        document.getElementById('file-path-full').textContent = filePath;
-        document.getElementById('summary-text').textContent = summary;
-
-        const tl = document.getElementById('timeline');
-        const lbl = document.getElementById('milestone-label');
-
-        if (!milestones || milestones.length === 0) {
-          lbl.classList.add('hidden');
-          tl.classList.add('hidden');
-        } else {
-          lbl.classList.remove('hidden');
-          tl.classList.remove('hidden');
-          tl.innerHTML = milestones.map(m => \`
-            <div class="milestone">
-              <div class="dot"></div>
-              <div class="date-chip">\${e(m.date)}</div>
-              <div class="milestone-desc">\${e(m.description)}</div>
-            </div>
-          \`).join('');
+        if (s.kind === 'empty') {
+            return `<div class="empty"><div class="empty-icon">⏱</div><div>파일을 우클릭 후<br><strong>이 파일의 역사 요약</strong>을 선택하세요.</div></div>`;
         }
 
-        show('result');
-        break;
-      }
+        if (s.kind === 'loading') {
+            return `<div class="scroll"><div class="loading"><div class="spinner"></div><span>${esc(s.fileName)} 분석 중...</span></div></div>`;
+        }
+
+        // result
+        const { ctx, result } = s;
+        const fileName = ctx.filePath.split(/[\\/]/).pop() ?? ctx.filePath;
+        const sorted = [...(result.milestones ?? [])].sort((a, b) => a.date.localeCompare(b.date));
+
+        const milestoneHtml = sorted.length === 0 ? '' : `
+<div class="section-hd">
+  <span class="section-hd-label">주요 마일스톤</span>
+  <span class="section-hd-count">${sorted.length}건</span>
+  <div class="section-hd-line"></div>
+</div>
+<div class="timeline">
+${sorted.map((m, i) => {
+    const color = BADGE_COLORS[i % BADGE_COLORS.length];
+    const month = getMonth(m.date);
+    const { title, body } = splitDesc(m.description);
+    const monthHtml = month
+        ? `<span class="tl-month">${esc(month)}</span><span class="tl-dot-sep">·</span>`
+        : '';
+    return `<div class="tl-item">
+  <div class="tl-left">
+    <div class="tl-badge" style="background:${color}">${i + 1}</div>
+    <div class="tl-line"></div>
+  </div>
+  <div class="tl-right">
+    <div class="tl-date">${monthHtml}<span>${esc(m.date)}</span></div>
+    <div class="tl-title">${esc(title)}</div>
+    ${body ? `<div class="tl-desc">${esc(body)}</div>` : ''}
+  </div>
+</div>`;
+}).join('\n')}
+</div>`;
+
+        return `<div class="scroll">
+<div class="file-chip"><span>📄</span><span class="file-chip-name">${esc(fileName)}</span></div>
+<div class="ai-card">
+  <div class="ai-label"><span class="ai-label-icon">✳</span> AI 요약</div>
+  <div class="ai-text">${renderBold(result.summary ?? '')}</div>
+</div>
+${milestoneHtml}
+</div>`;
     }
-  });
-</script>
-</body>
-</html>`;
+
+    private _css(): string {
+        return `
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: var(--vscode-font-family);
+  font-size: 13px;
+  color: var(--vscode-editor-foreground);
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  height: 100vh;
+  overflow: hidden;
+}
+.scroll {
+  height: 100vh;
+  overflow-y: auto;
+  padding: 12px 14px 24px;
+}
+.scroll::-webkit-scrollbar { width: 4px; }
+.scroll::-webkit-scrollbar-thumb {
+  background: var(--vscode-scrollbarSlider-background);
+  border-radius: 2px;
+}
+.empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; height: 220px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px; text-align: center; padding: 0 20px;
+}
+.empty-icon { font-size: 28px; opacity: 0.35; }
+.loading {
+  display: flex; align-items: center; gap: 9px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px; padding: 20px 0;
+}
+.spinner {
+  flex-shrink: 0; width: 15px; height: 15px;
+  border: 2px solid var(--vscode-widget-border);
+  border-top-color: var(--vscode-progressBar-background);
+  border-radius: 50%;
+  animation: spin .75s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.file-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  background: var(--vscode-badge-background);
+  border-radius: 4px;
+  padding: 3px 8px;
+  margin-bottom: 14px;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.file-chip-name { font-weight: 600; color: var(--vscode-editor-foreground); }
+.ai-card {
+  background: color-mix(in srgb, var(--vscode-editor-background) 60%, #6c5ce7 40%);
+  border: 1px solid rgba(108, 92, 231, 0.35);
+  border-radius: 10px;
+  padding: 13px 15px 15px;
+  margin-bottom: 18px;
+}
+.ai-label {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 700; letter-spacing: .06em;
+  color: #a29bfe;
+  margin-bottom: 9px;
+}
+.ai-label-icon { font-size: 13px; }
+.ai-text {
+  font-size: 12.5px; line-height: 1.75;
+  color: var(--vscode-editor-foreground);
+  word-break: keep-all;
+}
+.ai-text strong { color: #fff; font-weight: 700; }
+.section-hd {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 14px;
+}
+.section-hd-label {
+  font-size: 10.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--vscode-descriptionForeground);
+  white-space: nowrap;
+}
+.section-hd-count {
+  font-size: 10.5px; padding: 1px 7px; border-radius: 8px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+}
+.section-hd-line { flex: 1; height: 1px; background: var(--vscode-widget-border); }
+.timeline { position: relative; }
+.tl-item { display: flex; gap: 12px; position: relative; margin-bottom: 0; }
+.tl-left {
+  display: flex; flex-direction: column; align-items: center;
+  flex-shrink: 0; width: 26px;
+}
+.tl-badge {
+  width: 26px; height: 26px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; color: #fff;
+  flex-shrink: 0;
+}
+.tl-line {
+  width: 2px; flex: 1; min-height: 12px;
+  background: var(--vscode-widget-border);
+  margin: 4px 0;
+}
+.tl-item:last-child .tl-line { display: none; }
+.tl-right { padding-bottom: 20px; flex: 1; min-width: 0; }
+.tl-item:last-child .tl-right { padding-bottom: 0; }
+.tl-date {
+  font-size: 11px; color: var(--vscode-descriptionForeground);
+  margin-bottom: 5px; margin-top: 3px;
+  display: flex; align-items: center; gap: 5px;
+}
+.tl-month { font-weight: 700; color: var(--vscode-editor-foreground); }
+.tl-dot-sep { opacity: .4; }
+.tl-title {
+  font-size: 12.5px; font-weight: 700;
+  line-height: 1.4;
+  color: var(--vscode-editor-foreground);
+  margin-bottom: 4px;
+  word-break: keep-all;
+}
+.tl-desc {
+  font-size: 11.5px; line-height: 1.6;
+  color: var(--vscode-descriptionForeground);
+  word-break: keep-all;
+}`;
     }
 }

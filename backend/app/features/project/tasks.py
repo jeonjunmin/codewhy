@@ -22,6 +22,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 
@@ -51,16 +52,16 @@ _COMMIT_RE = re.compile(r"^(?P<type>\w+)(?:\[(?P<domain>[^\]]+)\])?:")
 @dataclass
 class _FileAnalysis:
     """파일 하나의 분석 결과. DB 쓰기는 포함하지 않는다."""
-    file_path:    str
-    status:       str          # "skip_*" | "failed" | "ready"
-    latest_hash:  str  = ""
-    commit_type:  str  = ""
-    commit_domain: str = ""
-    summary:      str  = ""
-    milestones:   dict = field(default_factory=dict)
-    cache_data:   dict = field(default_factory=dict)
-    cache_exists: bool = False  # True → UPDATE, False → INSERT
-    file_id:      int | None = None  # None → files 테이블 INSERT 필요
+    file_path:     str
+    status:        str                    # "skip_*" | "failed" | "ready"
+    latest_hash:   str       = ""
+    commit_type:   str       = ""
+    commit_domain: str       = ""
+    summary:       str       = ""
+    milestones:    list[Any] = field(default_factory=list)   # AI 추출 마일스톤 리스트
+    cache_data:    dict      = field(default_factory=dict)
+    cache_exists:  bool      = False
+    file_id:       int | None = None
 
 
 # ── git 헬퍼 ──────────────────────────────────────────────────────────────────
@@ -91,11 +92,7 @@ def _get_repo_head(repo_path: str) -> str:
 
 
 def _get_file_diff(repo_path: str, file_path: str) -> str:
-    """git show HEAD -- file_path 로 최신 커밋의 diff 를 반환한다.
-
-    전체 소스 대신 변경점만 Bedrock 에 전달 → 토큰 절감 + 속도 향상.
-    diff 가 없으면 빈 문자열 반환.
-    """
+    """git show HEAD -- file_path 로 최신 커밋의 diff 를 반환한다."""
     try:
         return subprocess.check_output(
             ["git", "show", "HEAD", "--", file_path],
@@ -163,7 +160,7 @@ async def _analyze_file(
     """
     async with _BEDROCK_SEM:   # Bedrock 동시 호출 10개 제한
 
-        # ── git log (최신 커밋 메타) ──────────────────────────────────────────
+        # ── Step 1. git log (최신 커밋 메타) ─────────────────────────────────
         try:
             commits: list[dict] = await asyncio.to_thread(
                 git.get_file_log, repo_path, file_path
@@ -178,7 +175,20 @@ async def _analyze_file(
         latest_hash    = commits[0]["hash"]
         latest_subject = commits[0].get("subject", "")
 
-        # ── 캐시 조회 + file_id 조회 (동시 읽기) ────────────────────────────
+        # ── Step 2. 커밋 메시지 파싱 (루프 최상단 — DB 읽기보다 먼저) ─────────
+        parsed        = _parse_commit(latest_subject)
+        commit_type   = parsed["type"]
+        commit_domain = parsed["domain"]
+
+        logger.info("[task]   파싱 — %s  type=%s  domain=%s",
+                    file_path, commit_type, commit_domain)
+
+        # ── Step 3. type 기반 Skip (test / chore) ────────────────────────────
+        if commit_type in SKIP_TYPES:
+            logger.info("[task]   ⏭  skip_type='%s' — %s", commit_type, file_path)
+            return _FileAnalysis(file_path=file_path, status="skip_type")
+
+        # ── Step 4. 캐시 조회 + file_id 조회 (동시 읽기) ────────────────────
         async def _read_cache() -> TimelineSummaryCache | None:
             async with AsyncSessionLocal() as db:
                 return await db.scalar(
@@ -200,55 +210,58 @@ async def _analyze_file(
 
         cache_row, file_id = await asyncio.gather(_read_cache(), _read_file_id())
 
-        # ── 해시 비교 → skip ──────────────────────────────────────────────────
+        # ── Step 5. 해시 비교 → skip ─────────────────────────────────────────
         if cache_row is not None:
             if (cache_row.data or {}).get("commit_hash") == latest_hash:
                 logger.info("[task]   ⏭  skip_hash — %s", file_path)
                 return _FileAnalysis(file_path=file_path, status="skip_hash")
 
-        # ── 커밋 파싱 + type skip ─────────────────────────────────────────────
-        parsed        = _parse_commit(latest_subject)
-        commit_type   = parsed["type"]
-        commit_domain = parsed["domain"]
-
-        if commit_type in SKIP_TYPES:
-            logger.info("[task]   ⏭  skip_type='%s' — %s", commit_type, file_path)
-            return _FileAnalysis(file_path=file_path, status="skip_type")
-
-        # ── git diff (전체 소스 대신 변경점만) ───────────────────────────────
+        # ── Step 6. git diff (전체 소스 대신 변경점만) ───────────────────────
         diff_text = await asyncio.to_thread(_get_file_diff, repo_path, file_path)
         bedrock_input = diff_text if diff_text.strip() else _format_commits(commits)
 
-        # ── LangGraph ainvoke() → Bedrock ────────────────────────────────────
+        # ── Step 7. LangGraph ainvoke() → Bedrock (summary + milestones) ─────
         logger.info("[task]   🤖 LangGraph — %s  diff=%d자", file_path, len(bedrock_input))
 
         try:
-            summary: str = await run_file_timeline_graph(
-                file_path    = file_path,
-                commits_text = bedrock_input,
-                commit_type  = commit_type,
-                commit_domain= commit_domain,
+            ai_result: dict = await run_file_timeline_graph(
+                file_path     = file_path,
+                commits_text  = bedrock_input,
+                commit_type   = commit_type,
+                commit_domain = commit_domain,
             )
-            logger.info("[task]   ✅ Bedrock — %s  요약 %d자", file_path, len(summary))
+            summary: str       = ai_result.get("summary", "") or ""
+            ai_milestones: list = ai_result.get("milestones", []) or []
+            logger.info("[task]   ✅ Bedrock — %s  요약 %d자  마일스톤 %d건",
+                        file_path, len(summary), len(ai_milestones))
         except Exception as exc:
             logger.exception("[task]   ❌ LangGraph 실패 — %s : %s", file_path, exc)
             return _FileAnalysis(file_path=file_path, status="failed")
 
+        # ── Step 8. milestones 정제 (AI 결과 우선, 폴백은 기본 구조) ──────────
+        try:
+            if ai_milestones and isinstance(ai_milestones, list):
+                milestones: list = ai_milestones
+            else:
+                milestones = [{"date": "", "description": f"{commit_type} [{commit_domain}]"}]
+        except Exception:
+            milestones = [{"date": "", "description": f"{commit_type} [{commit_domain}]"}]
+
         return _FileAnalysis(
-            file_path    = file_path,
-            status       = "ready",
-            latest_hash  = latest_hash,
-            commit_type  = commit_type,
-            commit_domain= commit_domain,
-            summary      = summary,
-            milestones   = {"type": commit_type, "domain": commit_domain},
-            cache_data   = {
+            file_path     = file_path,
+            status        = "ready",
+            latest_hash   = latest_hash,
+            commit_type   = commit_type,
+            commit_domain = commit_domain,
+            summary       = summary,
+            milestones    = milestones,
+            cache_data    = {
                 "commit_hash": latest_hash,
                 "type":        commit_type,
                 "domain":      commit_domain,
             },
-            cache_exists = (cache_row is not None),
-            file_id      = file_id,
+            cache_exists  = (cache_row is not None),
+            file_id       = file_id,
         )
 
 
@@ -305,6 +318,8 @@ async def _bulk_save(
             )
 
             if existing is None:
+                logger.info("[task]   초기 저장 마일스톤 확인: %s  file=%s",
+                            a.milestones, a.file_path)
                 db.add(TimelineSummary(
                     file_id         = file_id,
                     commit_set_hash = a.latest_hash,
@@ -314,6 +329,8 @@ async def _bulk_save(
                 ))
                 counters["inserted"] += 1
             else:
+                logger.info("[task]   업데이트 마일스톤 확인: %s  file=%s",
+                            a.milestones, a.file_path)
                 existing.commit_set_hash = a.latest_hash
                 existing.summary         = a.summary
                 existing.milestones      = a.milestones

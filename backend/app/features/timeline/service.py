@@ -14,6 +14,11 @@ from app.features.timeline import crud
 
 
 async def summarize(repo_path: str, file_path: str, commits: list[dict]) -> dict:
+    # ① timeline_summaries DB 캐시 먼저 조회 — 있으면 Bedrock 재호출 없이 바로 반환
+    cached = await crud.get_timeline_summary_by_path(repo_path, file_path)
+    if cached:
+        return cached
+
     # ② PostgreSQL에 upsert 후 전체 이력 조회
     await crud.upsert_commits(repo_path, file_path, commits)
     stored = await crud.get_commits(repo_path, file_path)

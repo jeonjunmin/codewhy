@@ -3,16 +3,12 @@ import * as vscode from 'vscode';
 import { getEditorContext } from '../../shared/editor';
 import { CommitInput } from '../../shared/types';
 import { fetchTimelineSummary } from './api';
-import { showTimelineSummaryView } from './view';
+import { TimelineSidebarProvider } from './sidebar';
 
-/**
- * `codewhy.timelineSummary` 명령 핸들러.
- *
- * ① 로컬 git log 수집 → ② 서버 전송 → ③ 별도 패널에 타임라인 출력
- *
- * 👤 담당: 개발자 B
- */
-export async function runTimelineSummary(context: vscode.ExtensionContext) {
+export async function runTimelineSummary(
+    _context: vscode.ExtensionContext,
+    sidebar: TimelineSidebarProvider,
+) {
     const ctx = getEditorContext();
     if (!ctx) { return; }
 
@@ -22,8 +18,12 @@ export async function runTimelineSummary(context: vscode.ExtensionContext) {
         return;
     }
 
+    // 패널이 아직 열려있지 않으면 먼저 focus 명령으로 열어준다
+    vscode.commands.executeCommand('codewhy.timelineSummary.focus');
+    sidebar.showLoading(ctx);
+
     await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: 'CodeWhy: 파일 역사 요약 중...' },
+        { location: vscode.ProgressLocation.Notification, title: 'CodeWhy: 타임라인 요약 분석 중...' },
         async () => {
             try {
                 const result = await fetchTimelineSummary({
@@ -31,13 +31,14 @@ export async function runTimelineSummary(context: vscode.ExtensionContext) {
                     repoPath: ctx.repoPath,
                     commits,
                 });
-                showTimelineSummaryView(ctx, result);
+                sidebar.setTimeline(ctx, result);
             } catch (err) {
                 vscode.window.showErrorMessage(
                     `Timeline Summary 실패: ${(err as Error).message}`
                 );
+                sidebar.showEmpty();
             }
-        }
+        },
     );
 }
 

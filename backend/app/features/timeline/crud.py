@@ -6,11 +6,54 @@
   get_commits    — repo_path + file_path 기준 전체 이력 최신순 반환
 """
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+import os
 
-from app.db.models import CommitLog
+from sqlalchemy import select
+
+from app.db.models import CommitLog, File, Repository, TimelineSummary
 from app.db.postgres import AsyncSessionLocal
+
+
+async def get_timeline_summary_by_path(
+    repo_path: str, file_path: str
+) -> dict | None:
+    """timeline_summaries 에 저장된 Bedrock 요약을 반환한다. 없으면 None.
+
+    repositories(identifier=폴더명) → files(repo_id, 상대경로) → timeline_summaries
+    """
+    folder_name = os.path.basename(os.path.normpath(repo_path))
+
+    # 절대경로 → 상대경로, 슬래시 정규화 (git 저장 형식)
+    try:
+        rel_path = os.path.relpath(file_path, repo_path).replace("\\", "/")
+    except ValueError:
+        return None  # Windows 드라이브가 다를 때
+
+    async with AsyncSessionLocal() as db:
+        repo_id = await db.scalar(
+            select(Repository.id).where(Repository.identifier == folder_name)
+        )
+        if not repo_id:
+            return None
+
+        file_id = await db.scalar(
+            select(File.id).where(
+                File.repo_id   == repo_id,
+                File.file_path == rel_path,
+            )
+        )
+        if not file_id:
+            return None
+
+        row = await db.scalar(
+            select(TimelineSummary).where(TimelineSummary.file_id == file_id)
+        )
+        if not row or not row.summary:
+            return None
+
+        # milestones: DB에 저장된 AI 추출 결과 (list). 없으면 빈 리스트.
+        milestones = row.milestones if isinstance(row.milestones, list) else []
+        return {"summary": row.summary, "milestones": milestones}
 
 
 async def upsert_commits(

@@ -1,16 +1,17 @@
 import * as vscode from 'vscode';
 import { runTimelineSummary } from './command';
+import { TimelineSidebarProvider, VIEW_ID } from './sidebar';
 
-/**
- * Timeline Summary 기능 진입점.
- *
- * 👤 담당: 개발자 B
- */
 export function registerTimelineSummary(context: vscode.ExtensionContext) {
+    const sidebar = new TimelineSidebarProvider(context.extensionUri);
+
     context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(VIEW_ID, sidebar, {
+            webviewOptions: { retainContextWhenHidden: true },
+        }),
         vscode.commands.registerCommand(
             'codewhy.timelineSummary',
-            () => runTimelineSummary(context),
+            () => runTimelineSummary(context, sidebar),
         ),
     );
 }
