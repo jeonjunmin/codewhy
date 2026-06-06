@@ -22,6 +22,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     LargeBinary,
     String,
     Text,
@@ -153,6 +154,21 @@ class TimelineSummary(Base):
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     milestones: Mapped[list | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TimelineSummaryCache(Base):
+    """프로젝트 파일별 마지막 분석 커밋 해시 캐시. (repo_path, file_path) UNIQUE."""
+
+    __tablename__ = "timeline_summary_cache"
+    __table_args__ = (
+        UniqueConstraint("repo_path", "file_path", name="uq_timeline_summary_cache"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    repo_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    file_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    data: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 # ── 역추적: 서버 문서 저장 + git 연결 ──────────────────────────────────────────
