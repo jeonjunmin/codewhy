@@ -67,22 +67,20 @@ async def get_project_timeline(project_path: str) -> list[dict[str, Any]]:
     """DB에 저장된 타임라인 요약을 즉시 반환한다. Bedrock 을 절대 호출하지 않는다.
 
     3단계 역추적 쿼리:
-      Step 1. repositories → identifier 로 repo_id 조회
+      Step 1. repositories → identifier(전체 경로) 로 repo_id 조회
       Step 2. files        → repo_id 로 파일 목록 조회
       Step 3. timeline_summaries → file_id IN (...) 로 요약 조회
     """
-    folder_name = os.path.basename(os.path.normpath(project_path))
-
     async with AsyncSessionLocal() as db:
 
         # ── Step 1. repositories → repo_id ───────────────────────────────────
         repo: Repository | None = await db.scalar(
-            select(Repository).where(Repository.identifier == folder_name)
+            select(Repository).where(Repository.identifier == project_path)
         )
         if repo is None:
             raise HTTPException(
                 status_code=404,
-                detail=f"'{folder_name}' 레포지토리를 찾을 수 없습니다. "
+                detail=f"'{project_path}' 레포지토리를 찾을 수 없습니다. "
                        "POST /initialize 를 먼저 호출해 분석을 완료하세요.",
             )
 
@@ -129,11 +127,9 @@ async def get_analyze_status(project_path: str) -> dict:
     """분석된 파일 수를 반환한다."""
     from sqlalchemy import func
 
-    folder_name = os.path.basename(os.path.normpath(project_path))
-
     async with AsyncSessionLocal() as db:
         repo: Repository | None = await db.scalar(
-            select(Repository).where(Repository.identifier == folder_name)
+            select(Repository).where(Repository.identifier == project_path)
         )
         if repo is None:
             return {"project_path": project_path, "analyzed_files": 0, "status": "NOT_INITIALIZED"}

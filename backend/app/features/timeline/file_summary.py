@@ -18,11 +18,11 @@ import re
 from datetime import datetime
 
 from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.ai.timeline_file_graph import run_file_timeline_graph
 from app.core import git
-from app.db.models import File, TimelineSummary
+from app.db import crud_common
+from app.db.models import TimelineSummary
 from app.db.postgres import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
@@ -56,43 +56,16 @@ def _format_commits(commits: list[dict]) -> str:
 
 
 async def _upsert_file(repo_path: str, file_path: str) -> int:
-    """files 테이블에서 (repo_path, file_path) 로 id 를 가져오거나 INSERT 후 반환한다.
+    """repositories + files 테이블에서 file_id 를 가져오거나 INSERT 후 반환한다.
 
-    timeline_summaries.file_id FK 원본이 되는 실제 DB id 를 확보하는 단계.
-    PostgreSQL INSERT ... ON CONFLICT DO NOTHING 을 사용해 동시성도 안전하다.
+    File 모델은 repo_path 컬럼이 없고 repo_id(FK) 를 사용하므로,
+    crud_common 을 통해 Repository 를 먼저 확보한 뒤 File 을 upsert 한다.
     """
     async with AsyncSessionLocal() as db:
-        # 1차: 이미 존재하면 바로 반환
-        existing_id: int | None = await db.scalar(
-            select(File.id).where(
-                File.repo_path == repo_path,
-                File.file_path == file_path,
-            )
-        )
-        if existing_id:
-            return existing_id
-
-        # 2차: INSERT ON CONFLICT DO NOTHING (중복 방지)
-        stmt = (
-            pg_insert(File)
-            .values(repo_path=repo_path, file_path=file_path, created_at=datetime.utcnow())
-            .on_conflict_do_nothing(constraint="uq_files_repo_file")
-            .returning(File.id)
-        )
-        new_id: int | None = await db.scalar(stmt)
+        repo = await crud_common.get_or_create_repository(db, repo_path)
+        file = await crud_common.get_or_create_file(db, repo.id, file_path)
         await db.commit()
-
-        if new_id:
-            return new_id
-
-        # 3차: 동시 삽입 경합으로 returning 이 None 일 때 재조회
-        real_id: int = await db.scalar(
-            select(File.id).where(
-                File.repo_path == repo_path,
-                File.file_path == file_path,
-            )
-        )
-        return real_id
+        return file.id
 
 
 # ── 메인 ──────────────────────────────────────────────────────────────────────
