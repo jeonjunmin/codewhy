@@ -11,6 +11,7 @@ POST /api/blame/context — 한 라인의 변경 사유를 분석해 반환한�
 👤 담당: 개발자 A
 """
 
+import asyncio
 import logging
 from datetime import date, datetime
 
@@ -66,9 +67,12 @@ async def context_blame(req: BlameRequest, db: AsyncSession = Depends(get_db)):
             return BlameResponse(**cached)
 
     # 3. 미스 → 분석 후 캐시 저장
-    #    1단계에서 이미 구한 info 를 넘겨 service 의 중복 git blame 을 피한다(없으면 service 가 재조회).
+    #    service.analyze_blame 은 git subprocess + Bedrock(boto3) 가 전부 동기 블로킹이므로
+    #    asyncio.to_thread 로 스레드에 위임해 이벤트 루프를 점유하지 않는다.
     try:
-        result = service.analyze_blame(req.repoPath, req.filePath, req.line, info=info)
+        result = await asyncio.to_thread(
+            service.analyze_blame, req.repoPath, req.filePath, req.line, info=info
+        )
     except Exception as e:
         logger.exception("context blame 분석 실패 — repo=%s file=%s line=%s", req.repoPath, req.filePath, req.line)
         raise HTTPException(status_code=500, detail=f"context blame 실패: {e}")

@@ -77,7 +77,7 @@ function ensureInitialized(context: vscode.ExtensionContext) {
 
     // ── 사이드바 Provider 등록 ─────────────────────────────────────
     sidebar = new ContextBlameSidebarProvider(context.extensionUri, {
-        onOpenSpec: (sourceRef) => openSpecDocument(sourceRef),
+        onOpenSpec: (sourceRef, issueUrl) => openSpecDocument(sourceRef, issueUrl),
         onOpenCommit: (commitHash, repoPath) =>
             vscode.commands.executeCommand('codewhy.blame.openCommit', { commitHash, repoPath }),
         onOpenHistory: () => vscode.commands.executeCommand('codewhy.timelineSummary'),
@@ -137,6 +137,16 @@ function ensureInitialized(context: vscode.ExtensionContext) {
                 },
             },
         ),
+    );
+
+    // ── 문서 수정 감지 → 해당 파일의 블레임 캐시·핀 무효화
+    //    줄이 밀리면 캐시 키(filePath:line)가 엉뚱한 줄을 가리키므로 통째로 지운다.
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeTextDocument(e => {
+            if (e.contentChanges.length === 0) { return; }
+            const changedPath = e.document.uri.fsPath;
+            invalidateFileCache(changedPath);
+        }),
     );
 
     // ── 커서 이동 감지 → CodeLens 위치 갱신 + 캐시 있으면 사이드바 자동 갱신
@@ -289,9 +299,16 @@ function refreshPinnedDecorations(editor: vscode.TextEditor) {
 // 5. AI 후속 질문 — 사이드바 인풋에서 Enter 친 경우
 // ─────────────────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
-// 5-b. 기획서 열기 — sourceRef("파일명.pdf §4.2")의 문서를 documentPaths 에서 찾아 연다
+// 5-b. 출처 열기 — 우선순위:
+//      (1) issueUrl 이 있으면 연관 GitHub Issue 페이지를 브라우저로 연다
+//      (2) sourceRef 에서 로컬 기획서 파일명을 뽑을 수 있으면 documentPaths 에서 찾아 연다
+//      (3) 둘 다 실패하면 요구사항 역추적으로 폴백
 // ─────────────────────────────────────────────────────────────────────────────
-async function openSpecDocument(sourceRef: string | null) {
+async function openSpecDocument(sourceRef: string | null, issueUrl: string | null) {
+    if (issueUrl) {
+        await vscode.env.openExternal(vscode.Uri.parse(issueUrl));
+        return;
+    }
     const fileName = extractSpecFileName(sourceRef);
     if (fileName) {
         const uri = await findDocumentUri(fileName);
@@ -364,3 +381,23 @@ function parseDateLoose(s: string): Date | null {
 }
 
 const truncate = (s: string, n: number) => s.length > n ? `${s.slice(0, n - 1)}…` : s;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. 캐시 무효화 — 파일 편집 시 줄 번호가 밀려 캐시가 stale 해지는 것을 방지
+// ─────────────────────────────────────────────────────────────────────────────
+function invalidateFileCache(filePath: string) {
+    for (const key of [...blameCache.keys()]) {
+        if (key.startsWith(filePath + ':')) {
+            blameCache.delete(key);
+        }
+    }
+    for (const key of [...pinned]) {
+        if (key.startsWith(filePath + ':')) {
+            pinned.delete(key);
+        }
+    }
+    const editor = vscode.window.activeTextEditor;
+    if (editor && editor.document.uri.fsPath === filePath) {
+        refreshPinnedDecorations(editor);
+    }
+}

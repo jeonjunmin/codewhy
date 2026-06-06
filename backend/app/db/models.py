@@ -127,10 +127,12 @@ class BlameExplanation(Base):
     commit_id: Mapped[int] = mapped_column(ForeignKey("commits.id", ondelete="CASCADE"), nullable=False)
     explanation: Mapped[str] = mapped_column(Text, nullable=False)
     ai_suggestion: Mapped[str | None] = mapped_column(Text)
-    source_ref: Mapped[str | None] = mapped_column(Text)
-    change_stats: Mapped[dict | None] = mapped_column(JSONB)
-    pr_info: Mapped[dict | None] = mapped_column(JSONB)
-    related_changes: Mapped[list | None] = mapped_column(JSONB)
+    source_ref: Mapped[str | None] = mapped_column(Text)             # 예: "Issue #12: 결제 취소 정책 변경"
+    issue_url: Mapped[str | None] = mapped_column(Text)              # 사이드바 '출처' 클릭 시 외부 링크
+    attachments: Mapped[list | None] = mapped_column(JSONB)          # [{label, url}, ...]
+    change_stats: Mapped[dict | None] = mapped_column(JSONB)         # {added, removed}
+    pr_info: Mapped[dict | None] = mapped_column(JSONB)              # {url, lines}
+    related_changes: Mapped[list | None] = mapped_column(JSONB)      # RelatedChange[]
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     commit: Mapped["Commit"] = relationship()

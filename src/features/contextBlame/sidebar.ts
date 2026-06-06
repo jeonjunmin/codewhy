@@ -30,7 +30,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     constructor(
         private readonly extensionUri: vscode.Uri,
         private readonly handlers: {
-            onOpenSpec: (sourceRef: string | null) => void;
+            onOpenSpec: (sourceRef: string | null, issueUrl: string | null) => void;
             onOpenCommit: (commitHash: string, repoPath: string) => void;
             onOpenHistory: () => void;
             onTogglePin: (filePath: string, line: number) => void;
@@ -84,7 +84,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         const { ctx, result } = this.last;
         switch (msg.type) {
             case 'openSpec':
-                this.handlers.onOpenSpec(result.sourceRef ?? result.specRef ?? null);
+                this.handlers.onOpenSpec(
+                    result.sourceRef ?? result.specRef ?? null,
+                    result.issueUrl ?? null,
+                );
                 break;
             case 'openCommit':
                 this.handlers.onOpenCommit(result.commitHash, ctx.repoPath);

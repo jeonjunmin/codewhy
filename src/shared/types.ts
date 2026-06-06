@@ -28,10 +28,20 @@ export interface BlameResult {
     changeStats?: { added: number; removed: number };
     /** 같은 PR의 총 라인 수 등 PR 컨텍스트 — "동일 PR 23 라인". */
     prInfo?: { url?: string; lines: number };
-    /** 기획서 원문 위치 — 예: "2026_결제_기획서.pdf §4.2". */
+    /** 요구사항 출처 표시 — 예: "Issue #12: 결제 취소 정책 변경". */
     sourceRef?: string;
+    /** 사이드바 '출처' 클릭 시 외부로 열 이슈 페이지 URL. */
+    issueUrl?: string;
+    /** 연관 이슈 본문에 첨부된 요구사항 문서 링크들. */
+    attachments?: Attachment[];
     /** "이 변경과 함께 일어난 일" 섹션에 들어가는 관련 변경들. */
     relatedChanges?: RelatedChange[];
+}
+
+/** 연관 이슈에 첨부된 요구사항 문서 한 건. */
+export interface Attachment {
+    label: string;
+    url: string;
 }
 
 /**
@@ -40,8 +50,8 @@ export interface BlameResult {
  */
 export interface RelatedChange {
     kind: 'doc' | 'branch' | 'security' | 'commit';
-    title: string;   // 예: "기획서 §4.2 조항 추가"
-    meta: string;    // 예: "PAY-2041 · 김기획" / "+78 라인 · 같은 PR"
+    title: string;   // 예: "Issue #12: 결제 취소 정책 변경" / "auth_service.py 변경"
+    meta: string;    // 예: "Issue #12" / "+78 라인 · 같은 PR"
 }
 
 /** "AI에게 더 묻기" — 현재 라인 블레임 맥락 위에서의 후속 질문. */

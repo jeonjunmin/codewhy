@@ -178,8 +178,10 @@ def _get_commit_message(repo_path: str, commit_hash: str) -> str:
 
 
 def _get_commit_diff(repo_path: str, commit_hash: str, file_path: str) -> str:
+    # `-p` 가 빠지면 LLM 이 실제 변경 hunk 를 못 보고 메시지만으로 추론 → 설명이 커밋 메시지 재진술이 된다.
+    # `--stat` 도 같이 둬서 파일 통계(파일명·±라인)는 보존한다.
     return subprocess.check_output(
-        ["git", "show", "--stat", commit_hash, "--", file_path],
+        ["git", "show", "-p", "--stat", commit_hash, "--", file_path],
         cwd=repo_path,
         text=True,
         encoding="utf-8",

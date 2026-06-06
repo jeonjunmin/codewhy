@@ -51,6 +51,23 @@ class PullRequest:
     files: list[ChangedFile] = field(default_factory=list)
 
 
+@dataclass
+class Attachment:
+    """이슈 본문에 첨부된 문서/파일 한 건."""
+    label: str  # 표시명 (마크다운 링크 텍스트 또는 파일명)
+    url: str
+
+
+@dataclass
+class Issue:
+    """커밋에 연결된 GitHub Issue 한 건."""
+    number: int
+    title: str
+    url: str
+    body: str = ""
+    attachments: list[Attachment] = field(default_factory=list)
+
+
 def detect_remote(repo_path: str) -> Remote | None:
     """`origin` remote URL 을 파싱해 호스트/소유자/저장소를 알아낸다."""
     try:
@@ -221,3 +238,127 @@ def _count_gitlab_diff_lines(diffs: list[dict]) -> tuple[int, int]:
             elif line.startswith("-") and not line.startswith("---"):
                 removed += 1
     return added, removed
+
+
+# ─── GitHub Issues (요구사항 문서 출처) ─────────────────────────────────
+#
+# 컨텍스트 블레임의 '요구사항 문서 출처' 는 더 이상 Bedrock KB 가 아니라
+# 커밋이 속한 PR 본문이 가리키는 GitHub Issue 의 첨부 링크로 채운다.
+# PR 본문은 vcs.find_pr_for_commit 이 이미 가져오므로(`PullRequest.body`),
+# 호출 측은 그 body 만 넘기면 추가 PR 조회 없이 issue 까지 풀어낼 수 있다.
+
+# "Closes #12", "fix: resolves #34", "Related to GH-56" 등에서 이슈 번호를 뽑는다.
+# 단독 "#N" 도 허용하되, conventional commit 의 "feat[blame]: #2 …" 처럼
+# 본문 첫 머리만 봐도 의도가 분명한 경우를 위해 별도 키워드 없이도 매칭한다.
+_ISSUE_REF_RE = re.compile(
+    r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|ref(?:s|erence[sd]?)?|related\s+to)?\s*"
+    r"(?:#|GH-)(\d+)",
+    re.IGNORECASE,
+)
+
+# 첨부 후보 URL 패턴.
+# (1) GitHub user-attachments (드래그-드롭 업로드): files/, assets/
+# (2) 레포 raw / blob 의 파일 링크 (기획서를 레포에 같이 두는 케이스)
+_ATTACHMENT_URL_RES = (
+    re.compile(r"https?://github\.com/user-attachments/(?:files|assets)/[^\s)\]]+", re.IGNORECASE),
+    re.compile(r"https?://[^\s)\]]+\.(?:pdf|docx?|xlsx?|pptx?|hwp|md|txt)", re.IGNORECASE),
+)
+
+# 마크다운 링크 `[label](url)` — label 이 첨부 표시명으로 더 친절하다.
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
+
+
+def find_issues_from_pr_body(remote: Remote, pr_body: str) -> list[Issue]:
+    """PR 본문에서 연결된 이슈 번호를 뽑고, 각 이슈 본문의 첨부 링크까지 채워 돌려준다.
+
+    실패하거나 매칭이 없으면 빈 리스트 — 사이드바는 해당 영역만 비우고 진행한다.
+    GitLab/그 외 호스트는 이번 범위 밖(빈 리스트).
+    """
+    if remote.host != "github" or not pr_body:
+        return []
+
+    numbers = _extract_issue_numbers(pr_body)
+    if not numbers:
+        return []
+
+    headers = _github_headers()
+    issues: list[Issue] = []
+    for n in numbers:
+        try:
+            payload = _get_json(
+                f"{remote.base}/repos/{remote.owner}/{remote.repo}/issues/{n}",
+                headers,
+            )
+        except (urllib.error.URLError, KeyError, ValueError, TimeoutError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        body = payload.get("body") or ""
+        issues.append(
+            Issue(
+                number=n,
+                title=payload.get("title", ""),
+                url=payload.get("html_url", ""),
+                body=body,
+                attachments=_extract_attachments(body),
+            )
+        )
+    return issues
+
+
+def _extract_issue_numbers(text: str) -> list[int]:
+    """PR 본문에서 이슈 번호를 순서 보존·중복 제거하며 추출."""
+    seen: set[int] = set()
+    out: list[int] = []
+    for m in _ISSUE_REF_RE.finditer(text):
+        try:
+            n = int(m.group(1))
+        except (ValueError, TypeError):
+            continue
+        if n in seen:
+            continue
+        seen.add(n)
+        out.append(n)
+    return out
+
+
+def _extract_attachments(body: str) -> list[Attachment]:
+    """이슈 본문에서 첨부 링크를 뽑는다.
+
+    우선순위: 마크다운 링크(라벨이 있어 친절) → 본문 안 raw URL 패턴(라벨은 파일명).
+    중복 URL 은 한 번만 담는다.
+    """
+    if not body:
+        return []
+
+    seen: set[str] = set()
+    out: list[Attachment] = []
+
+    for m in _MD_LINK_RE.finditer(body):
+        label, url = m.group(1).strip(), m.group(2)
+        if url in seen or not _looks_like_attachment(url):
+            continue
+        seen.add(url)
+        out.append(Attachment(label=label or _filename_from_url(url), url=url))
+
+    for pat in _ATTACHMENT_URL_RES:
+        for m in pat.finditer(body):
+            url = m.group(0)
+            if url in seen:
+                continue
+            seen.add(url)
+            out.append(Attachment(label=_filename_from_url(url), url=url))
+
+    return out
+
+
+def _looks_like_attachment(url: str) -> bool:
+    for pat in _ATTACHMENT_URL_RES:
+        if pat.search(url):
+            return True
+    return False
+
+
+def _filename_from_url(url: str) -> str:
+    tail = url.rsplit("/", 1)[-1]
+    return urllib.parse.unquote(tail) or url

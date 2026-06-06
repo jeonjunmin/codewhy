@@ -32,8 +32,14 @@ class RelatedChange(BaseModel):
     프론트 src/shared/types.ts 의 RelatedChange 와 키가 일치해야 한다.
     """
     kind: str   # 'doc' | 'branch' | 'security' | 'commit'
-    title: str  # 예: "기획서 §4.2 조항 추가"
-    meta: str   # 예: "PAY-2041 · 김기획" / "+78 라인 · 같은 PR"
+    title: str  # 예: "Issue #12: 결제 취소 정책 변경" / "auth_service.py 변경"
+    meta: str   # 예: "Issue #12" / "+78 라인 · 같은 PR"
+
+
+class Attachment(BaseModel):
+    """연관 이슈 본문에 첨부된 요구사항 문서 한 건."""
+    label: str  # 표시명 (마크다운 라벨 또는 파일명)
+    url: str    # 다운로드/열람 URL
 
 
 class BlameResponse(BaseModel):
@@ -43,12 +49,14 @@ class BlameResponse(BaseModel):
     date: str
     # "이름표 대신 사유서" 카드의 칩/AI 추론용 — 백엔드 점진 도입을 위해 옵셔널
     ticket: str | None = None        # 예: "PAY-2041"
-    specRef: str | None = None       # 예: "기획서 §4.2"
+    specRef: str | None = None       # 예: "Issue #12: 결제 취소 정책 변경"
     team: str | None = None          # 예: "결제팀"
     aiSuggestion: str | None = None  # AI 개선 제안 한 문장
 
     # ── Context Blame 사이드바 추가 필드 (모두 옵셔널, 점진 도입) ──────────
-    sourceRef: str | None = None              # 예: "2026_결제_기획서.pdf §4.2"
+    sourceRef: str | None = None              # 예: "Issue #12: 결제 취소 정책 변경"
+    issueUrl: str | None = None               # 사이드바 '출처' 클릭 시 외부로 열 URL
+    attachments: list[Attachment] = Field(default_factory=list)
     changeStats: ChangeStats | None = None
     prInfo: PrInfo | None = None
     relatedChanges: list[RelatedChange] = Field(default_factory=list)
