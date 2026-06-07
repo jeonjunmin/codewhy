@@ -29,14 +29,7 @@
         {
           "type": "webview",
           "id": "codewhy.contextBlame",
-          "name": "Context Blame",
-          "icon": "images/codewhy-icon.svg",
-          "contextualTitle": "CodeWhy"
-        },
-        {
-          "type": "webview",
-          "id": "codewhy.timelineSummary",
-          "name": "타임라인 요약",
+          "name": "CodeWhy",
           "icon": "images/codewhy-icon.svg",
           "contextualTitle": "CodeWhy"
         }

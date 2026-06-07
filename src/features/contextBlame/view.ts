@@ -1,6 +1,9 @@
+import { execSync } from 'child_process';
 import * as vscode from 'vscode';
-import { EditorContext } from '../../shared/editor';
-import { BlameResult } from '../../shared/types';
+import { EditorContext, getEditorContext } from '../../shared/editor';
+import { BlameResult, CommitInput } from '../../shared/types';
+import { fetchRequirementTrace } from '../requirementTrace/api';
+import { streamTimelineSummary } from '../timelineSummary/api';
 import { askBlame, fetchContextBlame } from './api';
 import { ContextBlameSidebarProvider, VIEW_ID } from './sidebar';
 
@@ -81,6 +84,8 @@ function ensureInitialized(context: vscode.ExtensionContext) {
         onOpenCommit: (commitHash, repoPath) =>
             vscode.commands.executeCommand('codewhy.blame.openCommit', { commitHash, repoPath }),
         onOpenHistory: () => vscode.commands.executeCommand('codewhy.timelineSummary'),
+        onSwitchTab: (tab) => handleSwitchTab(tab),
+        onOpenIssue: (url) => { vscode.env.openExternal(vscode.Uri.parse(url)); },
         onTogglePin: (filePath, line) =>
             vscode.commands.executeCommand('codewhy.blame.pin', { filePath, line }),
         onAskAi: (question, ctx, result) => handleAskAi(question, ctx, result),
@@ -202,6 +207,91 @@ async function handleAnalyzeAndShow(args: { filePath: string; line: number; repo
     if (!entry) { return; }
     updateStatusBar(args.line, entry.result);
     pushToSidebar(entry.ctx, entry.result);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 공통 탭바 — 한 패널 안 세 페인. 탭 클릭 시 현재 커서 라인 기준으로 자동 분석한다.
+// 각 탭의 결과는 모두 같은 sidebar provider 의 set*() 메서드로 밀어넣는다.
+// ─────────────────────────────────────────────────────────────────────────────
+function handleSwitchTab(tab: string) {
+    switch (tab) {
+        case 'timeline': runTimelineTab(); break;
+        case 'issue': runIssueTab(); break;
+        case 'blame':
+        default: runBlameTab(); break;
+    }
+}
+
+/** 블레임 탭: 현재 커서 라인을 분석(캐시 적중 시 즉시)해 패널에 표시. */
+export function runBlameTab() {
+    const ctx = getEditorContext();
+    if (!ctx) { return; }
+    handleAnalyzeAndShow({ filePath: ctx.filePath, line: ctx.line, repoPath: ctx.repoPath });
+}
+
+/** 타임라인 탭: 파일 커밋 이력을 모아 AI 요약을 스트리밍으로 패널에 표시. */
+export function runTimelineTab() {
+    if (!sidebar) { return; }
+    sidebar.activateTab('timeline');
+    const ctx = getEditorContext();
+    if (!ctx) { return; }
+
+    const fileName = ctx.filePath.split(/[\\/]/).pop() ?? ctx.filePath;
+    const commits = collectGitLog(ctx.repoPath, ctx.filePath);
+    if (commits.length === 0) {
+        sidebar.timelineEmpty('이 파일의 git 커밋 이력을 찾을 수 없습니다.');
+        return;
+    }
+
+    sidebar.timelineStreaming(fileName);
+    streamTimelineSummary(
+        { filePath: ctx.filePath, repoPath: ctx.repoPath, commits },
+        {
+            onDelta: (delta) => sidebar!.timelineDelta(delta),
+            onDone: (result) => sidebar!.timelineResult(fileName, result),
+            onError: (message) => sidebar!.timelineEmpty(`타임라인 요약 실패: ${message}`),
+        },
+    ).catch((err) => sidebar!.timelineEmpty(`타임라인 요약 실패: ${(err as Error).message}`));
+}
+
+/** 이슈 탭: 현재 라인과 연관된 GitHub Issue 를 역추적해 목록으로 표시. */
+export async function runIssueTab() {
+    if (!sidebar) { return; }
+    sidebar.activateTab('issue');
+    const ctx = getEditorContext();
+    if (!ctx) { return; }
+
+    sidebar.issueLoading();
+    try {
+        const result = await fetchRequirementTrace({
+            filePath: ctx.filePath,
+            line: ctx.line,
+            repoPath: ctx.repoPath,
+        });
+        if (!result.documents || result.documents.length === 0) {
+            sidebar.issueEmpty(`L${ctx.line} 와 연관된 GitHub Issue를 찾지 못했습니다.`);
+            return;
+        }
+        sidebar.issueResult(ctx.line, result);
+    } catch (err) {
+        sidebar.issueEmpty(`요구사항 역추적 실패: ${(err as Error).message}`);
+    }
+}
+
+/** 파일의 git 커밋 이력(타임라인 입력)을 수집한다. */
+function collectGitLog(repoPath: string, filePath: string): CommitInput[] {
+    try {
+        const out = execSync(
+            `git log --follow --format="%H|%an|%ad|%s" --date=short -- "${filePath}"`,
+            { cwd: repoPath, timeout: 10_000 },
+        ).toString().trim();
+        return out.split('\n').filter(Boolean).map(line => {
+            const [hash, author, date, ...rest] = line.split('|');
+            return { hash, author, date, subject: rest.join('|') };
+        });
+    } catch {
+        return [];
+    }
 }
 
 function pushToSidebar(ctx: EditorContext, r: BlameResult) {

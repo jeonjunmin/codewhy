@@ -1,17 +1,16 @@
 import * as vscode from 'vscode';
-import { runTimelineSummary } from './command';
-import { TimelineSidebarProvider, VIEW_ID } from './sidebar';
+import { runTimelineTab } from '../contextBlame/view';
 
+/**
+ * Timeline Summary 진입점.
+ *
+ * 타임라인은 이제 독립 webview 가 아니라 CodeWhy 통합 패널의 '타임라인' 탭으로 표시된다.
+ * 명령(codewhy.timelineSummary)은 통합 패널을 열어 해당 탭을 띄우고 분석을 실행한다.
+ *
+ * 👤 담당: 개발자 B
+ */
 export function registerTimelineSummary(context: vscode.ExtensionContext) {
-    const sidebar = new TimelineSidebarProvider(context.extensionUri);
-
     context.subscriptions.push(
-        vscode.window.registerWebviewViewProvider(VIEW_ID, sidebar, {
-            webviewOptions: { retainContextWhenHidden: true },
-        }),
-        vscode.commands.registerCommand(
-            'codewhy.timelineSummary',
-            () => runTimelineSummary(context, sidebar),
-        ),
+        vscode.commands.registerCommand('codewhy.timelineSummary', () => runTimelineTab()),
     );
 }

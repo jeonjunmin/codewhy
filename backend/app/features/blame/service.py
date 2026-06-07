@@ -97,6 +97,7 @@ def analyze_blame(
     ]
 
     related = _build_related_changes(issues, pr, followups, file_path)
+    line_history = _build_line_history(repo_path, file_path, line)
 
     return {
         "explanation": explanation,
@@ -112,6 +113,7 @@ def analyze_blame(
         "changeStats": {"added": info.added, "removed": info.removed},
         "prInfo": ({"url": pr.url, "lines": pr.added + pr.removed} if pr else None),
         "relatedChanges": related,
+        "lineHistory": line_history,
         "aiSuggestion": _suggest_improvement(info, issues, context=context),
     }
 
@@ -335,6 +337,58 @@ def _build_related_changes(
         })
 
     return related
+
+
+def _build_line_history(repo_path: str, file_path: str, line: int) -> list[dict]:
+    """사이드바 '라인 수정 이력' 목록을 조립한다.
+
+    git.get_line_history 로 '이 한 줄이 실제로 바뀐' 커밋들을 받아,
+    각 커밋이 참조하는 이슈 수(_count_linked_issues)를 '이슈 N' 배지용으로 덧붙인다.
+
+    git 조회 자체는 가볍지만(한 줄 로그), 커밋별 이슈 수는 GitHub API 를 부르지 않고
+    커밋 메시지의 #N 참조만 세어 비용 0 으로 추정한다.
+    """
+    history = git.get_line_history(repo_path, file_path, line)
+    return [
+        {
+            "hash": c["hash"],
+            "author": c["author"],
+            "date": c["date"],
+            "subject": c["subject"],
+            "issueCount": _safe_count_linked_issues(c["subject"]),
+        }
+        for c in history
+    ]
+
+
+def _safe_count_linked_issues(message: str) -> int:
+    """_count_linked_issues 가 아직 미구현(또는 예외)이어도 이력 목록 자체는 살린다.
+
+    배지는 부가 정보이므로, 세는 로직이 없으면 0(배지 숨김)으로 폴백한다.
+    """
+    try:
+        return _count_linked_issues(message)
+    except NotImplementedError:
+        return 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 👉 사용자 작성 구역 — '라인 수정 이력' 행의 '이슈 N' 배지 숫자
+#
+# 한 커밋이 몇 개의 이슈와 엮였는지를, GitHub API 호출 없이 커밋 메시지(제목/본문)
+# 텍스트만으로 추정한다. 설계 결정이 들어가는 작은 함수라 직접 채워 주세요(5~10줄).
+#
+# 고려할 점:
+#   · GitHub 이슈 참조 관례는 "#12", "#5" 처럼 '#' + 숫자. 정규식 r"#(\d+)" 로 뽑을 수 있다.
+#   · 같은 이슈를 두 번 적은 경우(#12 #12)는 한 번으로 — set() 으로 중복 제거할지?
+#   · "PAY-2041" 같은 지라 티켓도 셀지, GitHub 이슈(#N)만 셀지? (스샷 예시는 이슈 기준)
+#   · 매칭이 없으면 0 을 반환 — 프론트는 0 이면 배지를 숨긴다.
+#
+# 반환: 이 커밋이 참조하는 이슈 개수(int)
+# ─────────────────────────────────────────────────────────────────────────────
+def _count_linked_issues(message: str) -> int:
+    # TODO(개발자 A): 위 가이드를 참고해 이슈 참조 개수를 세어 반환하세요.
+    raise NotImplementedError("이슈 참조 개수 세는 로직을 구현해 주세요")
 
 
 def _explain_blame(info: git.BlameInfo, issues: list[Issue], *, context: str | None = None) -> str:

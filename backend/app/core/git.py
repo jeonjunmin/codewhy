@@ -164,6 +164,48 @@ def get_file_log(repo_path: str, file_path: str) -> list[dict]:
     return commits
 
 
+def get_line_history(
+    repo_path: str, file_path: str, line: int, max_count: int = 8
+) -> list[dict]:
+    """특정 라인이 '실제로 바뀐' 커밋들의 이력을 최신순으로 반환한다.
+
+    파일 전체 이력(get_file_log)과 달리, `git log -L<line>,<line>:<file>` 로
+    해당 한 줄의 변천만 추린다 — 그 줄을 건드리지 않은 커밋은 빠진다.
+    `-s`(--no-patch)로 diff hunk 는 억제하고 메타데이터만 받는다.
+
+    사이드바 '라인 수정 이력' 섹션에 쓴다.
+    blame 과 달리 줄이 막 추가돼 이력이 한 건뿐이어도 빈 리스트가 아니라 그 한 건을 준다.
+    실패(미커밋/범위 초과 등)하면 빈 리스트 — 호출부에서 섹션을 숨긴다.
+
+    반환: [{"hash","author","date","subject"}, ...]  (최신순, 최대 max_count 건)
+    """
+    try:
+        out = subprocess.check_output(
+            [
+                "git", "log", "-s",
+                f"-L{line},{line}:{file_path}",
+                f"-n{max_count}",
+                "--format=%H|%an|%ad|%s",
+                "--date=short",
+            ],
+            cwd=repo_path,
+            text=True,
+            encoding="utf-8",
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.CalledProcessError:
+        return []
+
+    commits: list[dict] = []
+    for raw in out.strip().splitlines():
+        parts = raw.split("|", 3)
+        if len(parts) == 4:
+            commits.append(
+                {"hash": parts[0], "author": parts[1], "date": parts[2], "subject": parts[3]}
+            )
+    return commits
+
+
 def get_repo_log(repo_path: str, since: str = "", limit: int = 0) -> list[dict]:
     """레포 전체 커밋 이력을 변경 파일 목록과 함께 반환한다(브라운필드 백필용).
 

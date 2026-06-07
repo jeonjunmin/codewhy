@@ -36,6 +36,20 @@ export interface BlameResult {
     attachments?: Attachment[];
     /** "이 변경과 함께 일어난 일" 섹션에 들어가는 관련 변경들. */
     relatedChanges?: RelatedChange[];
+    /** 사이드바 하단 "라인 수정 이력" — 이 라인이 실제로 바뀐 커밋들(최신순). */
+    lineHistory?: LineHistoryEntry[];
+}
+
+/**
+ * "라인 수정 이력" 한 행 — 이 라인이 실제로 바뀐 커밋 하나.
+ * 백엔드 schemas.py 의 LineHistoryEntry 와 키가 일치해야 한다.
+ */
+export interface LineHistoryEntry {
+    hash: string;        // 전체 해시 (UI 에서 7자리로 축약)
+    author: string;
+    date: string;        // YYYY-MM-DD
+    subject: string;     // 커밋 제목
+    issueCount: number;  // 참조 이슈 수 — 0 이면 배지 숨김
 }
 
 /** 연관 이슈에 첨부된 요구사항 문서 한 건. */

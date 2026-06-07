@@ -42,6 +42,18 @@ class Attachment(BaseModel):
     url: str    # 다운로드/열람 URL
 
 
+class LineHistoryEntry(BaseModel):
+    """사이드바 '라인 수정 이력' 한 행 — 이 라인이 실제로 바뀐 커밋 하나.
+
+    프론트 src/shared/types.ts 의 LineHistoryEntry 와 키가 일치해야 한다.
+    """
+    hash: str          # 전체 커밋 해시 (프론트에서 7자리로 축약 표시)
+    author: str        # 작성자
+    date: str          # YYYY-MM-DD
+    subject: str       # 커밋 제목 한 줄
+    issueCount: int = 0  # 이 커밋이 참조하는 이슈 수 ('이슈 N' 배지)
+
+
 class BlameResponse(BaseModel):
     explanation: str
     commitHash: str
@@ -60,6 +72,7 @@ class BlameResponse(BaseModel):
     changeStats: ChangeStats | None = None
     prInfo: PrInfo | None = None
     relatedChanges: list[RelatedChange] = Field(default_factory=list)
+    lineHistory: list[LineHistoryEntry] = Field(default_factory=list)
 
 
 class AskRequest(BaseModel):
