@@ -12,13 +12,12 @@ import os
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 
 from app.db.models import File, Repository, TimelineSummary
 from app.db.postgres import AsyncSessionLocal
-from app.features.project.tasks import analyze_files_timeline_task
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -47,17 +46,15 @@ class TimelineItem(BaseModel):
 # ── POST /initialize ──────────────────────────────────────────────────────────
 
 @router.post("/initialize", response_model=InitializeResponse)
-async def initialize_project(
-    req: InitializeRequest,
-    background_tasks: BackgroundTasks,
-) -> InitializeResponse:
-    """프로젝트 오픈 / 커밋 감지 시 호출 — 즉시 STARTED 반환, 분석은 백그라운드 처리."""
-    logger.info("initialize: %s", req.project_path)
-    background_tasks.add_task(analyze_files_timeline_task, req.project_path)
-    return InitializeResponse(
-        status="STARTED",
-        message=f"'{req.project_path}' 파일별 분석 시작. 터미널 로그에서 진행 상황 확인.",
-    )
+async def initialize_project(req: InitializeRequest) -> InitializeResponse:
+    """프로젝트 오픈 / 커밋 감지 시 호출.
+
+    일괄 분석은 폐지되었다(TIMELINE_OPTIMIZATION_PLAN.md A1) — 사용자가 실제로 여는
+    파일만 `/api/timeline/summary` 호출 시점에 lazy 분석된다. 본 엔드포인트는
+    프론트엔드 호출 계약 유지를 위해 즉시 ACK만 반환한다.
+    """
+    logger.info("initialize: %s (일괄 분석 트리거 없음 — lazy on-demand)", req.project_path)
+    return InitializeResponse(status="READY")
 
 
 # ── GET /timeline ─────────────────────────────────────────────────────────────
