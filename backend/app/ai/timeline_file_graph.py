@@ -1,18 +1,14 @@
-"""파일별 타임라인 분석 LangGraph.
+"""파일별 타임라인 분석 — Bedrock 스트리밍 호출.
 
-단일 노드 구성:
-  [summarize_file] ──▶ END
-
-Bedrock 이 summary + milestones 를 JSON 으로 반환하도록 프롬프트를 구성한다.
-JSON 파싱 실패 시 전체 텍스트를 summary 로, milestones 는 [] 로 폴백한다.
+ChatGPT 류 실시간 출력 요구사항에 맞춰 LangGraph 단일 노드(ainvoke) 대신
+async generator 로 직접 Bedrock 을 호출한다 — 토큰이 생성되는 즉시 yield 한다.
 """
 
 import json
 import re
-from typing import Any, TypedDict
+from typing import Any, AsyncGenerator
 
 from langchain_core.messages import HumanMessage
-from langgraph.graph import END, StateGraph
 
 from app.core.bedrock import get_bedrock_llm
 
@@ -56,48 +52,11 @@ milestones 는 커밋 이력에서 중요한 변경점 2~5개를 날짜순으로
 {commits_text}"""
 
 
-# ── State ──────────────────────────────────────────────────────────────────────
-
-class FileTimelineState(TypedDict):
-    file_path:     str
-    commits_text:  str
-    commit_type:   str
-    commit_domain: str
-    summary:       str | None
-
-
-# ── 노드 ──────────────────────────────────────────────────────────────────────
-
-def summarize_file(state: FileTimelineState) -> FileTimelineState:
-    """type/domain 힌트를 포함해 Bedrock 으로 파일 요약을 생성한다."""
-    llm = get_bedrock_llm(max_tokens=800)
-    prompt = _build_prompt(
-        file_path=state["file_path"],
-        commits_text=state["commits_text"],
-        commit_type=state["commit_type"],
-        commit_domain=state["commit_domain"],
-    )
-    response = llm.invoke([HumanMessage(content=prompt)])
-    return {**state, "summary": response.content.strip()}
-
-
-# ── 그래프 빌드 ────────────────────────────────────────────────────────────────
-
-def _build_graph():
-    g = StateGraph(FileTimelineState)
-    g.add_node("summarize_file", summarize_file)
-    g.set_entry_point("summarize_file")
-    g.add_edge("summarize_file", END)
-    return g.compile()
-
-
-_FILE_GRAPH = _build_graph()
-
-
-def _parse_ai_response(raw: str) -> dict[str, Any]:
-    """Bedrock 응답 문자열에서 summary + milestones 를 추출한다.
+def parse_ai_response(raw: str) -> dict[str, Any]:
+    """Bedrock 누적 응답 문자열에서 summary + milestones 를 추출한다.
 
     JSON 파싱 성공 시 그대로 반환, 실패 시 raw 텍스트를 summary 로 폴백한다.
+    스트리밍 종료 후 누적된 전체 텍스트를 파싱할 때도 동일하게 사용한다.
     """
     # 코드블록 마커 제거 (```json ... ``` 형태 대응)
     cleaned = re.sub(r"```(?:json)?\s*|\s*```", "", raw).strip()
@@ -123,27 +82,25 @@ def _parse_ai_response(raw: str) -> dict[str, Any]:
         return {"summary": raw, "milestones": []}
 
 
-async def run_file_timeline_graph(
+async def stream_file_summary(
     file_path: str,
     commits_text: str,
     commit_type: str,
     commit_domain: str,
-) -> dict[str, Any]:
-    """파일 커밋 이력 + 타입/도메인 힌트로 Bedrock 요약과 마일스톤을 비동기 생성한다.
+) -> AsyncGenerator[str, None]:
+    """Bedrock 응답을 토큰(델타) 단위로 즉시 yield 한다.
 
-    Returns:
-        {"summary": str, "milestones": list[{"date": str, "description": str}]}
+    SSE 프레이밍(`data: ...\\n\\n`)이나 누적/파싱은 호출 측(service.py) 책임이다 —
+    이 함수는 raw text delta 만 흘려보낸다.
     """
-    final: FileTimelineState = await _FILE_GRAPH.ainvoke({
-        "file_path":     file_path,
-        "commits_text":  commits_text,
-        "commit_type":   commit_type,
-        "commit_domain": commit_domain,
-        "summary":       None,
-    })
-
-    raw = final.get("summary") or ""
-    if not raw:
-        raise RuntimeError(f"LangGraph 가 요약을 반환하지 않았습니다 — {file_path}")
-
-    return _parse_ai_response(raw)
+    llm = get_bedrock_llm(max_tokens=800)
+    prompt = _build_prompt(
+        file_path=file_path,
+        commits_text=commits_text,
+        commit_type=commit_type,
+        commit_domain=commit_domain,
+    )
+    async for chunk in llm.astream([HumanMessage(content=prompt)]):
+        piece = chunk.content
+        if piece:
+            yield piece

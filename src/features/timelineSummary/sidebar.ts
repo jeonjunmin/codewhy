@@ -38,7 +38,7 @@ function splitDesc(desc: string): { title: string; body: string } {
 
 type State =
     | { kind: 'empty' }
-    | { kind: 'loading'; fileName: string }
+    | { kind: 'streaming'; ctx: EditorContext; fileName: string; text: string }
     | { kind: 'result'; ctx: EditorContext; result: TimelineResult };
 
 export class TimelineSidebarProvider implements vscode.WebviewViewProvider {
@@ -65,13 +65,19 @@ export class TimelineSidebarProvider implements vscode.WebviewViewProvider {
         this._render();
     }
 
-    showLoading(ctx: EditorContext) {
+    startStreaming(ctx: EditorContext) {
         const fileName = ctx.filePath.split(/[\\/]/).pop() ?? ctx.filePath;
-        this.state = { kind: 'loading', fileName };
+        this.state = { kind: 'streaming', ctx, fileName, text: '' };
         if (!this.view) {
             vscode.commands.executeCommand(`${VIEW_ID}.focus`);
             return;
         }
+        this._render();
+    }
+
+    appendStreamDelta(delta: string) {
+        if (this.state.kind !== 'streaming') { return; }
+        this.state = { ...this.state, text: this.state.text + delta };
         this._render();
     }
 
@@ -106,8 +112,17 @@ export class TimelineSidebarProvider implements vscode.WebviewViewProvider {
             return `<div class="empty"><div class="empty-icon">⏱</div><div>파일을 우클릭 후<br><strong>이 파일의 역사 요약</strong>을 선택하세요.</div></div>`;
         }
 
-        if (s.kind === 'loading') {
-            return `<div class="scroll"><div class="loading"><div class="spinner"></div><span>${esc(s.fileName)} 분석 중...</span></div></div>`;
+        if (s.kind === 'streaming') {
+            if (!s.text) {
+                return `<div class="scroll"><div class="loading"><div class="spinner"></div><span>AI가 소스 코드를 분석 중입니다...</span></div></div>`;
+            }
+            return `<div class="scroll">
+<div class="file-chip"><span>📄</span><span class="file-chip-name">${esc(s.fileName)}</span></div>
+<div class="ai-card">
+  <div class="ai-label"><span class="ai-label-icon">✳</span> AI 요약</div>
+  <div class="ai-text">${renderBold(s.text)}<span class="caret"></span></div>
+</div>
+</div>`;
         }
 
         // result
@@ -225,6 +240,15 @@ body {
   word-break: keep-all;
 }
 .ai-text strong { color: #fff; font-weight: 700; }
+.caret {
+  display: inline-block;
+  width: 2px; height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--vscode-editor-foreground);
+  animation: caret-blink 0.9s steps(1) infinite;
+}
+@keyframes caret-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
 .section-hd {
   display: flex; align-items: center; gap: 8px;
   margin-bottom: 14px;

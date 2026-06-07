@@ -113,7 +113,7 @@ async def get_project_timeline(project_path: str) -> list[dict[str, Any]]:
     # file_path 기준 정렬
     result.sort(key=lambda x: x["file_path"])
 
-    logger.info("timeline: %s → %d개 파일 반환", folder_name, len(result))
+    logger.info("timeline: %s → %d개 파일 반환", os.path.basename(project_path), len(result))
     return result
 
 

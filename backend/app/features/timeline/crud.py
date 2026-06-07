@@ -39,17 +39,19 @@ async def upsert_commits(
     file = await crud_common.get_or_create_file(db, repo.id, file_path)
     logger.info("[crud] file — id=%d  repo_id=%d  path=%s", file.id, file.repo_id, file_path)
 
-    for c in commits:
-        commit = await crud_common.upsert_commit(
-            db,
-            repo.id,
-            c["hash"],
-            author=c.get("author"),
-            committed_date=_parse_date(c.get("date", "")),
-            message=c.get("subject"),
-            ticket=extract_ticket(c.get("subject", "")),
-        )
-        await crud_common.link_commit_file(db, commit.id, file.id)
+    if commits:
+        commit_values = [
+            {
+                "commit_hash": c["hash"],
+                "author": c.get("author"),
+                "committed_date": _parse_date(c.get("date", "")),
+                "message": c.get("subject"),
+                "ticket": extract_ticket(c.get("subject", "")),
+            }
+            for c in commits
+        ]
+        hash_to_id = await crud_common.upsert_commits_bulk(db, repo.id, commit_values)
+        await crud_common.link_commits_files_bulk(db, list(hash_to_id.values()), file.id)
 
     await db.commit()
     return file
@@ -92,13 +94,13 @@ async def get_cached_summary(
     logger.info("[crud] get_cached_summary — file_id=%d  hash=%s…  hit=%s",
                 file_id, commit_set_hash[:16], row is not None)
 
-    # 동일 file_id 의 모든 기존 요약 해시 출력 (불일치 디버그용)
-    if row is None:
+    # 동일 file_id 의 모든 기존 요약 해시 출력 (불일치 디버그용) — DEBUG 레벨에서만 추가 쿼리 실행
+    if row is None and logger.isEnabledFor(logging.DEBUG):
         all_rows = (await db.execute(
             select(TimelineSummary.commit_set_hash).where(TimelineSummary.file_id == file_id)
         )).scalars().all()
-        logger.info("[crud] DB 내 file_id=%d 요약 해시 목록: %s",
-                    file_id, [h[:16] + "…" for h in all_rows] if all_rows else "없음")
+        logger.debug("[crud] DB 내 file_id=%d 요약 해시 목록: %s",
+                     file_id, [h[:16] + "…" for h in all_rows] if all_rows else "없음")
 
     return row
 
