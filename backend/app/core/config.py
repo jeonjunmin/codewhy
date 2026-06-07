@@ -25,7 +25,7 @@ _ENV_FILE = Path(__file__).parent.parent.parent / ".env"
 
 # boto3 는 os.environ 을 직접 읽으므로, pydantic-settings 가 읽기 전에
 # load_dotenv() 로 .env → os.environ 에 먼저 주입해야 한다.
-load_dotenv(_ENV_FILE, override=False)
+load_dotenv(_ENV_FILE, override=True)
 
 
 class Settings(BaseSettings):
