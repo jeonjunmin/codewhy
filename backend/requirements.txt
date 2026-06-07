@@ -25,3 +25,6 @@ langchain-core>=0.3.0
 
 # 문서 파싱 — PDF 페이지 수 추출
 pypdf>=4.0.0
+
+# 테스트 — 단위 테스트 (backend/tests/)
+pytest>=8.0.0

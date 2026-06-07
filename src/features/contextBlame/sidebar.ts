@@ -596,10 +596,12 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     function decorate(s) {
-        // "..." 인용은 코드 강조로 변환
+        // "..." 인용은 코드 강조로, 줄바꿈은 <br> 로 변환 (메타/본문 분리 렌더링용)
         const esc = String(s)
             .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        return esc.replace(/"([^"]+)"/g, '<code>$1</code>');
+        return esc
+            .replace(/"([^"]+)"/g, '<code>$1</code>')
+            .replace(/\n/g, '<br/>');
     }
 
     function formatChange(stats, pr) {
@@ -680,21 +682,21 @@ function josa(word: string, withFinal: string, withoutFinal: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 콜아웃 본문 — "홍길동님이 3월 15일에 \"…\" 기획 내용을 반영하기 위해 추가했습니다."
+// 콜아웃 본문 — 메타(작성자·날짜)와 LLM 본문(explanation)을 분리해 어색한 연결을 피한다.
 //
-// 이미 갖춰진 것(중복 작업 불필요):
-//   · 작성자 조사 "님이" 고정 — "님"(받침 ㅁ) 뒤는 항상 "이" 라 분기 불필요.
-//   · 인용 "..." → <code> 강조 : 웹뷰 decorate() 가 처리하므로 따옴표를 그대로 통과시키면 됨.
-//   · 연도 생략 한국식 날짜      : formatDisplayDate() 가 "3월 15일" 형태로 반환.
-//   · josa() 헬퍼는 목적어 조사("을/를" 등) 분기에 필요하면 쓸 수 있게 남겨둠.
+// 이전 패턴: "홍길동님이 3월 15일에 {explanation}"  ← explanation 이 이미 완결문이라
+//            "3월 15일에 …했습니다" 같이 시간 부사가 완결문을 강제로 받음
+// 새 패턴 : "홍길동 · 3월 15일\n{explanation}"  ← 메타는 한 줄 메타로, 본문은 본문대로
 //
-// TODO(개발자 A) — 아래 본문 한 문장을 시안 톤으로 다듬어주세요. 남은 확인 포인트 2가지:
-//   (a) "…에 {explanation}" 연결 톤 — explanation 은 이미 완결된 한 문장이라
-//       "3월 15일에 " 뒤에 그대로 붙으면 어색할 수 있음. 연결 표현/어미를 다듬을 것.
-//   (b) explanation 에 인용 "..." 이 없는 경우에도 한 문장으로 매끄럽게 흐르는지 확인.
+// 처리 규칙:
+//   · author / date 가 없으면 메타 줄을 통째로 생략하고 explanation 만 노출
+//   · explanation 끝의 마침표 중복은 그대로 둠 (decorate() 가 따옴표만 코드화)
 // ─────────────────────────────────────────────────────────────────────────────
 export function formatNarrative(r: BlameResult): string {
-    return `${r.author}님이 ${formatDisplayDate(r.date)}에 ${r.explanation}`;
+    const explanation = (r.explanation ?? '').trim() || '변경 사유를 분석할 수 없습니다.';
+    const parts = [r.author, formatDisplayDate(r.date)].filter(Boolean);
+    if (parts.length === 0) { return explanation; }
+    return `${parts.join(' · ')}\n${explanation}`;
 }
 
 function formatDisplayDate(s: string): string {

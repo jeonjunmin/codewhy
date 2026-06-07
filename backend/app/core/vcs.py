@@ -19,10 +19,20 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from functools import lru_cache
 
-from app.core.config import get_github_token, get_gitlab_token
+from app.core.config import (
+    get_attachment_domain_allowlist,
+    get_github_token,
+    get_gitlab_token,
+)
 
 _TIMEOUT = 6  # 초 — 호스팅 API 가 느려도 블레임 응답을 오래 잡지 않는다
+
+# §6 공통 처리 원칙 #4 — GitHub PR/Issue 메모이즈 캐시 크기.
+# 라인 클릭마다 같은 PR·Issue 를 재조회하는 비용을 차단한다. 128은 한 세션의
+# 활성 PR/Issue 수보다 넉넉히 큰 값. 프로세스 재시작 시 자연 무효화.
+_VCS_CACHE_SIZE = 128
 
 
 @dataclass
@@ -137,24 +147,15 @@ def _github_headers() -> dict:
 
 
 def _github_pr_for_commit(remote: Remote, commit_hash: str) -> PullRequest | None:
-    headers = _github_headers()
-    listing = _get_json(
-        f"{remote.base}/repos/{remote.owner}/{remote.repo}/commits/{commit_hash}/pulls",
-        headers,
-    )
-    if not isinstance(listing, list) or not listing:
+    listing = _github_pr_listing_for_commit(remote.base, remote.owner, remote.repo, commit_hash)
+    if not listing:
         return None
     pr = listing[0]  # 가장 연관 높은 PR
     number = pr["number"]
+    pr_url = pr.get("html_url", "")
 
-    detail = _get_json(
-        f"{remote.base}/repos/{remote.owner}/{remote.repo}/pulls/{number}",
-        headers,
-    )
-    files_json = _get_json(
-        f"{remote.base}/repos/{remote.owner}/{remote.repo}/pulls/{number}/files?per_page=100",
-        headers,
-    )
+    detail = _github_pr_detail(remote.base, remote.owner, remote.repo, number)
+    files_json = _github_pr_files(remote.base, remote.owner, remote.repo, number)
     files = (
         [
             ChangedFile(path=f["filename"], added=f.get("additions", 0), status=f.get("status", ""))
@@ -165,7 +166,7 @@ def _github_pr_for_commit(remote: Remote, commit_hash: str) -> PullRequest | Non
     )
 
     return PullRequest(
-        url=pr.get("html_url", ""),
+        url=pr_url,
         number=number,
         title=detail.get("title", ""),
         body=detail.get("body") or "",
@@ -173,6 +174,64 @@ def _github_pr_for_commit(remote: Remote, commit_hash: str) -> PullRequest | Non
         removed=detail.get("deletions", 0),
         files=files,
     )
+
+
+# ─── GitHub API 메모이즈 (§6 공통 처리 원칙 #4) ───────────────────────────
+# 라인 클릭마다 같은 PR·Issue 를 재조회하는 것을 차단한다.
+# - 인자는 str/int (hashable)
+# - 반환은 응답 JSON 의 안전한 사본(list 는 tuple 안의 frozen dict 대신 list 그대로 — 호출 측이
+#   읽기 전용으로만 사용한다는 전제). 호출 측에서 in-place 수정 금지.
+# - 캐시 무효화는 프로세스 재시작 시점 — PR/Issue 본문은 빈번히 바뀌지 않으므로 충분.
+
+@lru_cache(maxsize=_VCS_CACHE_SIZE)
+def _github_pr_listing_for_commit(base: str, owner: str, repo: str, commit_hash: str) -> tuple[dict, ...]:
+    """커밋이 속한 PR 목록 (가장 연관도 높은 PR 1건만 사용). 빈 결과면 빈 튜플."""
+    payload = _get_json(f"{base}/repos/{owner}/{repo}/commits/{commit_hash}/pulls", _github_headers())
+    return tuple(payload) if isinstance(payload, list) else ()
+
+
+@lru_cache(maxsize=_VCS_CACHE_SIZE)
+def _github_pr_detail(base: str, owner: str, repo: str, number: int) -> dict:
+    """PR 상세 (title/body/additions/deletions). 실패 시 빈 dict."""
+    payload = _get_json(f"{base}/repos/{owner}/{repo}/pulls/{number}", _github_headers())
+    return payload if isinstance(payload, dict) else {}
+
+
+_PR_FILES_PAGE_SIZE = 100
+_PR_FILES_MAX_PAGES = 3  # 최대 300건. 더 큰 PR은 "외 N건" 표기로 안내한다.
+
+
+@lru_cache(maxsize=_VCS_CACHE_SIZE)
+def _github_pr_files(base: str, owner: str, repo: str, number: int) -> tuple[dict, ...]:
+    """PR 변경 파일 목록(최대 _PR_FILES_MAX_PAGES 페이지). 빈 결과면 빈 튜플.
+
+    GitHub은 페이지당 최대 100건. 마지막 페이지가 페이지 사이즈보다 작거나 빈
+    페이지가 나오면 조회를 중단한다.
+    """
+    headers = _github_headers()
+    collected: list[dict] = []
+    for page in range(1, _PR_FILES_MAX_PAGES + 1):
+        url = (
+            f"{base}/repos/{owner}/{repo}/pulls/{number}/files"
+            f"?per_page={_PR_FILES_PAGE_SIZE}&page={page}"
+        )
+        try:
+            payload = _get_json(url, headers)
+        except (urllib.error.URLError, KeyError, ValueError, TimeoutError):
+            break
+        if not isinstance(payload, list) or not payload:
+            break
+        collected.extend(payload)
+        if len(payload) < _PR_FILES_PAGE_SIZE:
+            break
+    return tuple(collected)
+
+
+@lru_cache(maxsize=_VCS_CACHE_SIZE)
+def _github_issue(base: str, owner: str, repo: str, number: int) -> dict:
+    """Issue 본문/첨부 페치. 실패 시 빈 dict."""
+    payload = _get_json(f"{base}/repos/{owner}/{repo}/issues/{number}", _github_headers())
+    return payload if isinstance(payload, dict) else {}
 
 
 # ─── GitLab ─────────────────────────────────────────────────────────
@@ -269,41 +328,72 @@ _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
 
 
 def find_issues_from_pr_body(remote: Remote, pr_body: str) -> list[Issue]:
-    """PR 본문에서 연결된 이슈 번호를 뽑고, 각 이슈 본문의 첨부 링크까지 채워 돌려준다.
+    """PR/MR 본문에서 연결된 이슈 번호를 뽑고, 각 이슈 본문의 첨부 링크까지 채워 돌려준다.
 
     실패하거나 매칭이 없으면 빈 리스트 — 사이드바는 해당 영역만 비우고 진행한다.
-    GitLab/그 외 호스트는 이번 범위 밖(빈 리스트).
+    GitHub·GitLab 모두 지원. 그 외 호스트는 빈 리스트.
     """
-    if remote.host != "github" or not pr_body:
+    if not pr_body:
         return []
-
     numbers = _extract_issue_numbers(pr_body)
     if not numbers:
         return []
+    return _fetch_issues(remote, numbers)
 
-    headers = _github_headers()
+
+def find_issues_from_commit_message(remote: Remote, commit_message: str) -> list[Issue]:
+    """PR/MR 본문이 비거나 매칭이 안 됐을 때 커밋 메시지에서 직접 #N 패턴을 찾는 2차 폴백.
+
+    Squash/Rebase 후 PR 본문이 사라지거나, PR 자체가 없는 직접 푸시 커밋도 살린다.
+    """
+    if not commit_message:
+        return []
+    numbers = _extract_issue_numbers(commit_message)
+    if not numbers:
+        return []
+    return _fetch_issues(remote, numbers)
+
+
+def _fetch_issues(remote: Remote, numbers: list[int]) -> list[Issue]:
+    """이슈 번호 목록으로 GitHub/GitLab 에서 본문·첨부를 채워 Issue 객체로 반환."""
     issues: list[Issue] = []
     for n in numbers:
         try:
-            payload = _get_json(
-                f"{remote.base}/repos/{remote.owner}/{remote.repo}/issues/{n}",
-                headers,
-            )
+            if remote.host == "github":
+                payload = _github_issue(remote.base, remote.owner, remote.repo, n)
+                if not payload:
+                    continue
+                body = payload.get("body") or ""
+                issues.append(Issue(
+                    number=n,
+                    title=payload.get("title", ""),
+                    url=payload.get("html_url", ""),
+                    body=body,
+                    attachments=_extract_attachments(body),
+                ))
+            elif remote.host == "gitlab":
+                payload = _gitlab_issue(remote.base, remote.owner, remote.repo, n)
+                if not payload:
+                    continue
+                body = payload.get("description") or ""
+                issues.append(Issue(
+                    number=n,
+                    title=payload.get("title", ""),
+                    url=payload.get("web_url", ""),
+                    body=body,
+                    attachments=_extract_attachments(body),
+                ))
         except (urllib.error.URLError, KeyError, ValueError, TimeoutError):
             continue
-        if not isinstance(payload, dict):
-            continue
-        body = payload.get("body") or ""
-        issues.append(
-            Issue(
-                number=n,
-                title=payload.get("title", ""),
-                url=payload.get("html_url", ""),
-                body=body,
-                attachments=_extract_attachments(body),
-            )
-        )
     return issues
+
+
+@lru_cache(maxsize=_VCS_CACHE_SIZE)
+def _gitlab_issue(base: str, owner: str, repo: str, iid: int) -> dict:
+    """GitLab Issue 본문/첨부 페치. 실패 시 빈 dict."""
+    project_id = urllib.parse.quote(f"{owner}/{repo}", safe="")
+    payload = _get_json(f"{base}/projects/{project_id}/issues/{iid}", _gitlab_headers())
+    return payload if isinstance(payload, dict) else {}
 
 
 def _extract_issue_numbers(text: str) -> list[int]:
@@ -356,6 +446,15 @@ def _looks_like_attachment(url: str) -> bool:
     for pat in _ATTACHMENT_URL_RES:
         if pat.search(url):
             return True
+    # 도메인 화이트리스트(Notion/Confluence/위키 등 확장자 없는 외부 링크)
+    allowlist = get_attachment_domain_allowlist()
+    if allowlist:
+        try:
+            host = urllib.parse.urlparse(url).hostname or ""
+        except ValueError:
+            return False
+        host = host.lower()
+        return any(host == d or host.endswith("." + d) for d in allowlist)
     return False
 
 

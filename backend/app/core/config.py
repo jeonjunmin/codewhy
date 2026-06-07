@@ -175,3 +175,17 @@ def get_github_token() -> str:
 
 def get_gitlab_token() -> str:
     return os.getenv("GITLAB_TOKEN", "")
+
+
+def get_attachment_domain_allowlist() -> tuple[str, ...]:
+    """이슈 본문에서 '첨부'로 인정할 외부 도메인 목록.
+
+    GitHub user-attachments 와 흔한 문서 확장자는 vcs.py 가 기본으로 처리한다.
+    Notion·Confluence·Wiki 처럼 확장자 없는 위키 링크를 첨부로 띄우려면 여기에 도메인을 추가한다.
+
+    env: CODEWHY_ATTACHMENT_DOMAINS="notion.so,confluence.atlassian.com,wiki.example.com"
+    """
+    raw = os.getenv("CODEWHY_ATTACHMENT_DOMAINS", "")
+    if not raw.strip():
+        return ()
+    return tuple(d.strip().lower() for d in raw.split(",") if d.strip())

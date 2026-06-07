@@ -20,9 +20,17 @@ import re
 
 from app.core import git, vcs
 from app.core.ai_client import call_bedrock
+from app.core.commit_classifier import SKIP_TYPES, classify_commit
 from app.core.config import get_team_map
 from app.core.tickets import extract_ticket
 from app.core.vcs import Issue, PullRequest
+
+# 노이즈 커밋 type → 사용자에게 보일 한국어 라벨
+_NOISE_LABELS: dict[str, str] = {
+    "docs": "문서",
+    "test": "테스트",
+    "chore": "설정/잡무",
+}
 
 # ask_followup 에서 재사용할 맥락 캐시 — (repo_path, file_path, commit_hash) → context str
 # analyze_blame 이 채우고 ask_followup 이 읽는다.  LRU 없이 최대 100건만 보관.
@@ -62,8 +70,14 @@ def analyze_blame(
         ticket = extract_ticket(info.message, branch)
     team = get_team_map().get(info.author)
 
+    # 노이즈 커밋(test/chore/docs) 우회 — §6 공통 처리 원칙 #2
+    # 분류는 commit_classifier(타임라인과 공유). 우회 시 Bedrock·GitHub API 모두 호출하지 않는다.
+    classified = classify_commit({"message": info.message, "subject": info.message.splitlines()[0] if info.message else ""})
+    if classified["type"] in SKIP_TYPES:
+        return _noise_response(info, ticket, team, classified["type"])
+
     pr = _safe_find_pr(repo_path, info.commit_hash)
-    issues = _safe_find_issues(repo_path, pr)
+    issues = _safe_find_issues(repo_path, pr, commit_message=info.message)
     followups = git.find_followup_commits(repo_path, ticket, exclude_hash=info.commit_hash)
 
     context = _build_context(info, issues)
@@ -102,6 +116,45 @@ def analyze_blame(
     }
 
 
+def _noise_response(
+    info: git.BlameInfo, ticket: str | None, team: str | None, commit_type: str
+) -> dict:
+    """노이즈 커밋(test/chore/docs)용 정형 응답.
+
+    Bedrock·GitHub API 호출 없이 BlameResponse 와 동일한 스키마로 응답한다.
+    relatedChanges/issueUrl/attachments 등 LLM·외부 의존 필드는 모두 빈 값.
+    aiSuggestion 은 None — 사이드바가 해당 섹션을 숨긴다.
+    """
+    return {
+        "explanation": _build_noise_explanation(info, commit_type),
+        "commitHash": info.commit_hash,
+        "author": info.author,
+        "date": info.date,
+        "ticket": ticket,
+        "team": team,
+        "sourceRef": None,
+        "specRef": None,
+        "issueUrl": None,
+        "attachments": [],
+        "changeStats": {"added": info.added, "removed": info.removed},
+        "prInfo": None,
+        "relatedChanges": [],
+        "aiSuggestion": None,
+    }
+
+
+def _build_noise_explanation(info: git.BlameInfo, commit_type: str) -> str:
+    """노이즈 커밋용 사용자 표시 문구를 조립한다.
+
+    📌 임시 폴백 — 최종 문구는 §10 P1 'TODO: 노이즈 응답 문구 확정' 참조.
+    현재는 동작 보장을 위해 보수적인 한 줄을 반환한다.
+    """
+    label = _NOISE_LABELS.get(commit_type, commit_type)
+    first_line = info.message.splitlines()[0] if info.message else ""
+    quote = first_line.strip() or "(커밋 메시지 없음)"
+    return f'[자동 분류] {label} 정비 커밋입니다 — "{quote}"'
+
+
 def ask_followup(repo_path: str, file_path: str, line: int, question: str) -> str:
     """현재 라인 블레임 맥락 위에서 들어온 후속 질문에 답한다.
 
@@ -112,7 +165,7 @@ def ask_followup(repo_path: str, file_path: str, line: int, question: str) -> st
     context = _CONTEXT_CACHE.get((repo_path, file_path, info.commit_hash))
     if context is None:
         pr = _safe_find_pr(repo_path, info.commit_hash)
-        issues = _safe_find_issues(repo_path, pr)
+        issues = _safe_find_issues(repo_path, pr, commit_message=info.message)
         context = _build_context(info, issues)
 
     instruction = f"""위 변경 맥락에 근거해 사용자의 질문에 한국어로 1~2문장으로 답하세요.
@@ -137,15 +190,26 @@ def _safe_find_pr(repo_path: str, commit_hash: str) -> PullRequest | None:
         return None
 
 
-def _safe_find_issues(repo_path: str, pr: PullRequest | None) -> list[Issue]:
-    """PR 본문에서 연결 이슈를 파싱 — 호스트/토큰/API 어느 단계든 실패 시 빈 리스트."""
-    if pr is None or not pr.body:
-        return []
+def _safe_find_issues(
+    repo_path: str, pr: PullRequest | None, commit_message: str = ""
+) -> list[Issue]:
+    """PR 본문에서 연결 이슈를 파싱 — 호스트/토큰/API 어느 단계든 실패 시 빈 리스트.
+
+    PR 본문이 비거나 매칭이 없으면 커밋 메시지의 #N 패턴으로 2차 폴백
+    (Squash/Rebase 후 PR 본문이 사라지는 케이스 대비).
+    """
     try:
         remote = vcs.detect_remote(repo_path)
         if remote is None:
             return []
-        return vcs.find_issues_from_pr_body(remote, pr.body)
+        if pr is not None and pr.body:
+            issues = vcs.find_issues_from_pr_body(remote, pr.body)
+            if issues:
+                return issues
+        # 폴백: 커밋 메시지의 #N 직접 매칭
+        if commit_message:
+            return vcs.find_issues_from_commit_message(remote, commit_message)
+        return []
     except Exception:
         return []
 
@@ -183,9 +247,9 @@ def _build_related_changes(
     # ② 같은 PR 의 다른 파일들 (현재 파일 제외)
     if pr:
         current_name = os.path.basename(current_file)
-        for f in pr.files:
-            if os.path.basename(f.path) == current_name:
-                continue
+        pr_files_others = [f for f in pr.files if os.path.basename(f.path) != current_name]
+        pr_cap_index = len(related)  # PR 영역 시작점
+        for f in pr_files_others:
             is_new = f.status == "added"
             related.append({
                 "kind": "branch" if is_new else "commit",
@@ -194,8 +258,18 @@ def _build_related_changes(
             })
             if len(related) >= 5:  # 사이드바 과밀 방지
                 break
+        # 잘린 PR 파일이 있으면 "외 N건" 한 줄 추가 (이슈 카드/현재 파일 제외 후 잔여)
+        shown_pr_files = len(related) - pr_cap_index
+        remaining_pr = len(pr_files_others) - shown_pr_files
+        if remaining_pr > 0:
+            related.append({
+                "kind": "commit",
+                "title": f"외 {remaining_pr}개 파일",
+                "meta": "같은 PR",
+            })
 
     # ③ 같은 티켓을 참조한 후속 커밋
+    followup_cap_index = len(related)
     for c in followups:
         subject = c.get("subject", "")
         is_security = any(term.lower() in subject.lower() for term in _SECURITY_TERMS)
@@ -206,6 +280,14 @@ def _build_related_changes(
         })
         if len(related) >= 6:
             break
+    shown_followups = len(related) - followup_cap_index
+    remaining_followups = len(followups) - shown_followups
+    if remaining_followups > 0:
+        related.append({
+            "kind": "commit",
+            "title": f"외 {remaining_followups}개 커밋",
+            "meta": "같은 티켓",
+        })
 
     return related
 
@@ -267,13 +349,17 @@ def _build_context(info: git.BlameInfo, issues: list[Issue]) -> str:
     핵심: 호출마다 달라지는 '작업 지시문/질문'은 여기 넣지 말고, 변하지 않는 맥락 데이터만 둔다.
     """
     issue_block = _format_issues(issues)
-    return f"""[작성자] {info.author}
-[날짜] {info.date}
+    # 빈 메시지/diff (initial commit, merge, 바이너리-only 등)는 LLM 이 무엇이 비었는지
+    # 알 수 있도록 명시 라벨로 폴백한다 — 빈 줄만 보내면 환각 가능성↑.
+    message = info.message.strip() or "(커밋 메시지 없음)"
+    diff = _truncate_diff(info.diff) if info.diff.strip() else "(변경 hunk 없음 — 바이너리/병합 커밋이거나 rename 만 발생)"
+    return f"""[작성자] {info.author or "(작성자 미상)"}
+[날짜] {info.date or "(날짜 미상)"}
 [커밋 메시지]
-{info.message}
+{message}
 
 [변경 내용]
-{_truncate_diff(info.diff)}
+{diff}
 
 [연관 이슈]
 {issue_block}"""
@@ -282,13 +368,49 @@ def _build_context(info: git.BlameInfo, issues: list[Issue]) -> str:
 def _truncate_diff(diff: str) -> str:
     """Bedrock 에 보낼 diff 를 _MAX_DIFF_CHARS 상한으로 자른다(거대 커밋의 토큰 폭발 방지).
 
-    head-only 대신 head + tail 전략 — 앞쪽(헝크 헤더·초기 변경)과
-    뒤쪽(마지막 변경)을 모두 포함해 큰 커밋의 핵심을 놓치지 않는다.
+    전략: **hunk 헤더 우선 보존**.
+    - 파일 헤더(`diff --git`/`+++`/`---`)와 hunk 헤더(`@@ … @@`)를 식별해, 가능한 한
+      많은 hunk 를 통째로 살린다. 한도가 차면 잘라낸 hunk 들의 헤더만 끝에 모아
+      `[잘린 hunks]` 블록으로 붙여 LLM 이 '어느 영역이 잘렸는지'는 인지하게 한다.
+    - hunk 헤더가 하나도 없으면(=patch 가 아닌 stat-only 등) head+tail 폴백.
     """
     if len(diff) <= _MAX_DIFF_CHARS:
         return diff
-    half = _MAX_DIFF_CHARS // 2
-    return diff[:half] + "\n…(중략)…\n" + diff[-half:]
+
+    lines = diff.splitlines()
+    # hunk 시작 인덱스 + 파일 헤더 시작 인덱스(파일 단위 컨텍스트 보존용)
+    hunk_starts = [i for i, l in enumerate(lines) if l.startswith("@@ ")]
+    if not hunk_starts:
+        # patch 가 아닌 경우(예: --stat 만) head+tail 폴백
+        half = _MAX_DIFF_CHARS // 2
+        return diff[:half] + "\n…(중략)…\n" + diff[-half:]
+
+    file_header_idx = next((i for i, l in enumerate(lines) if l.startswith("diff --git")), 0)
+    preamble = "\n".join(lines[file_header_idx:hunk_starts[0]])
+
+    # 각 hunk 의 [시작, 다음 hunk 시작) 범위를 본문으로 잡는다
+    boundaries = hunk_starts + [len(lines)]
+    hunks = [
+        "\n".join(lines[boundaries[k]:boundaries[k + 1]])
+        for k in range(len(hunk_starts))
+    ]
+
+    kept: list[str] = []
+    skipped_headers: list[str] = []
+    used = len(preamble) + 1
+    for hunk in hunks:
+        if used + len(hunk) + 1 <= _MAX_DIFF_CHARS:
+            kept.append(hunk)
+            used += len(hunk) + 1
+        else:
+            # 본문 대신 헤더 한 줄(@@ … @@)만 남긴다
+            header = hunk.splitlines()[0]
+            skipped_headers.append(header)
+
+    parts = [preamble] + kept
+    if skipped_headers:
+        parts.append("[잘린 hunks — 헤더만 보존]\n" + "\n".join(skipped_headers))
+    return "\n".join(parts)
 
 
 def _format_issues(issues: list[Issue]) -> str:

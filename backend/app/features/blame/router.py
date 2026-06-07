@@ -40,9 +40,12 @@ def _parse_date(value: str) -> date | None:
 async def context_blame(req: BlameRequest, db: AsyncSession = Depends(get_db)):
     # 1. blamed 커밋 해석 + 백본 행 확보 (캐시 키에 commit_id 포함)
     info = None
+    branch = None
+    ticket = None
     try:
         info = git.get_blame_info(req.repoPath, req.filePath, req.line)
         branch = git.get_current_branch(req.repoPath)
+        ticket = extract_ticket(info.message, branch)
         repo = await crud_common.get_or_create_repository(db, req.repoPath)
         file = await crud_common.get_or_create_file(db, repo.id, req.filePath)
         commit = await crud_common.upsert_commit(
@@ -52,7 +55,7 @@ async def context_blame(req: BlameRequest, db: AsyncSession = Depends(get_db)):
             author=info.author,
             committed_date=_parse_date(info.date),
             message=info.message,
-            ticket=extract_ticket(info.message, branch),
+            ticket=ticket,
         )
         await crud_common.link_commit_file(db, commit.id, file.id, info.added, info.removed)
         await db.commit()
@@ -74,7 +77,7 @@ async def context_blame(req: BlameRequest, db: AsyncSession = Depends(get_db)):
         result = await asyncio.to_thread(
             service.analyze_blame,
             req.repoPath, req.filePath, req.line,
-            info=info, branch=branch, ticket=extract_ticket(info.message, branch) if info else None,
+            info=info, branch=branch, ticket=ticket,
         )
     except Exception as e:
         logger.exception("context blame 분석 실패 — repo=%s file=%s line=%s", req.repoPath, req.filePath, req.line)

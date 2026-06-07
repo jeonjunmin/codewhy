@@ -319,9 +319,9 @@ codewhy/
 | # | 원칙 | 블레임 | 타임라인 |
 |---|------|-------|---------|
 | 1 | **Lazy on-demand** — 사용자 액션 시점에만 분석, 일괄 prefetch 금지 | ✅ 적용 (라인 클릭 1회) | ✅ A1 전환 후 적용 (`TIMELINE_OPTIMIZATION_PLAN.md`) |
-| 2 | **노이즈 커밋 LLM 우회** — test/chore/docs는 LLM 호출·캐시 무효화에서 모두 제외 | ⏳ 보정 예정 (§10 P1) | ⏳ 캐시 키 면제 예정 (별도 plan) |
+| 2 | **노이즈 커밋 LLM 우회** — test/chore/docs는 LLM 호출·캐시 무효화에서 모두 제외 | ✅ 적용 (`analyze_blame` 진입 분기, 2026-06-07) | ⏳ 캐시 키 면제 예정 (별도 plan) |
 | 3 | **공유 백본** — repo/commit/file upsert는 항상 `db/crud_common.py` 경유 | ✅ | ✅ |
-| 4 | **외부 API 메모이즈** — GitHub PR·Issue 조회는 요청 스코프 캐시로 중복 호출 차단 | ⏳ 보정 예정 (§10 P1) | — (외부 API 미사용) |
+| 4 | **외부 API 메모이즈** — GitHub PR·Issue 조회는 요청 스코프 캐시로 중복 호출 차단 | ✅ 적용 (`vcs.py` lru_cache 128, 2026-06-07) | — (외부 API 미사용) |
 | 5 | **폴백 정책 일관** — 외부 의존성 미설정·실패 시 예외 대신 동등 형식의 폴백 응답 | ✅ `[Bedrock 미연동] …` | ✅ `apply_fallback` + `_fallback_summary` |
 
 원칙 2, 4를 위해 **공통 커밋 분류기**(`backend/app/core/commit_classifier.py`)를 신설할 예정 — `_classify_commit`/`SKIP_TYPES`를 타임라인 graph.py에서 추출해 블레임도 동일한 기준으로 호출 우회를 적용한다. (§10 인프라 참고)
@@ -495,6 +495,7 @@ npm run watch                              # 다른 터미널: TS 감시 빌드
 | `GITHUB_TOKEN` | GitHub PR·Issue·첨부 조회 | PR/Issue 연동 생략 |
 | `GITLAB_TOKEN` | GitLab MR 조회 (계획) | MR 연동 생략 |
 | `CODEWHY_TEAM_MAP` | 작성자→팀 매핑 JSON 경로 | team 칸 생략 |
+| `CODEWHY_ATTACHMENT_DOMAINS` | 첨부로 인정할 외부 도메인 화이트리스트 (쉼표 구분, 예: `notion.so,confluence.atlassian.com`) | 확장자/사용자업로드 휴리스틱만 사용 |
 
 > **설계 미덕**: 거의 모든 외부 연동이 미설정 시 *no-op/폴백*으로 동작 → 로컬에서 일부 기능만으로도 깨지지 않음.
 
@@ -536,62 +537,68 @@ alembic revision --autogenerate -m "..."  # 스키마 변경 시
 
 #### 🟡 P1 — 품질·기능 공백
 
-- [ ] **ask_followup 매 질문마다 전부 재계산**
-  - 위치: `blame/service.py::ask_followup`
-  - 현상: 질문마다 git blame + `_build_context`를 처음부터 다시 함. 직전 analyze_blame의 context 재사용 안 함.
-  - 방향: 분석 시 만든 context를 ask 경로가 재사용. 필요 시 Q&A를 DB에 누적.
+- [x] **ask_followup 매 질문마다 전부 재계산** (이미 적용됨)
+  - `service.py`의 `_CONTEXT_CACHE`(LRU 100건)로 `analyze_blame`이 만든 context를 `ask_followup`이 재사용. 캐시 미스 시에만 재빌드.
 
-- [ ] **중복 git 호출**
-  - 위치: `blame/service.py:50-51`
-  - 현상: router가 이미 구한 branch/ticket을 service가 `get_current_branch`/`extract_ticket`으로 재계산
-  - 방향: router가 구한 branch/ticket을 service에 함께 전달
+- [ ] **ask_followup Q&A DB 누적 (보류, UX 결정 대기)**
+  - 보류 이유: 비용 측면은 `_CONTEXT_CACHE`로 해결됨. DB 누적은 "다른 세션/차원에서 이어 보기" UX가 정해질 때 의미. 그 전엔 작업량 대비 가치 작음.
+  - 진행 시 범위: Alembic revision + `blame_qa(file_id, commit_id, question, answer, created_at)` 신규 테이블 + 사이드바 스레드 히스토리 노출.
 
-- [ ] **diff 잘라내기 전략 개선**
-  - 위치: `blame/service.py::_truncate_diff`
-  - 현상: head-only(앞 N자)라 큰 커밋 뒷부분 변경 손실
-  - 방향: head+tail 또는 hunk 헤더 우선 보존
+- [x] **중복 git 호출** (2026-06-07)
+  - router가 구한 `info`/`branch`/`ticket`을 `analyze_blame`에 그대로 전달. router 내부에서도 `ticket`을 한 번만 계산해 캐시 키와 service 인자에 재사용.
 
-- [ ] **관련 변경/PR 범위 한계**
-  - 위치: `core/vcs.py` (PR 파일 `per_page=100`), `relatedChanges` 5~6개 캡
-  - 현상: 대형 PR에서 핵심 변경 누락 가능
-  - 방향: 페이지네이션 또는 "외 N건" 표기
+- [x] **diff 잘라내기 전략 개선** (이미 적용됨)
+  - `_truncate_diff`가 `head + "\n…(중략)…\n" + tail` 전략으로 양끝 보존. hunk 헤더 우선 보존은 §10 선택(`diff 토큰 관리 전략 통일`)에서 다룸.
 
-- [ ] **사이드바 내러티브 다듬기**
-  - 위치: `contextBlame/sidebar.ts`의 `TODO(개발자 A)`
-  - 현상: "3월 15일에"와 설명 사이 연결이 어색, 인용문 없을 때 흐름 부자연스러움
+- [x] **관련 변경/PR 범위 한계** (2026-06-07)
+  - `_github_pr_files` 페이지네이션(최대 3페이지/300건). `_build_related_changes`가 캡(5/6) 도달 시 "외 N개 파일"·"외 N개 커밋" 한 줄을 카드 형태로 추가해 잔여 변경 가시화.
 
-- [ ] **노이즈 커밋 LLM 우회 (타임라인과 처리 원칙 정렬)**
-  - 위치: `blame/service.py::analyze_blame`
-  - 현상: 커밋 type 분류 없이 docs/test/chore 커밋에도 Bedrock 2회(설명+제안) 호출
-  - 방향: 공통 분류기(§10 인프라 "공통 커밋 분류기 추출")로 type 판별 → `SKIP_TYPES` 해당 시 `[자동 분류] 문서/테스트/설정 정비 커밋입니다` 식 정형 응답 반환 — Bedrock 0회
-  - 효과: 블레임/타임라인의 §6 공통 처리 원칙 #2 정렬
+- [x] **사이드바 내러티브 다듬기** (2026-06-07)
+  - `formatNarrative`를 메타("작성자 · 날짜")와 본문(`explanation`) 두 줄로 분리. `decorate()`에 `\n → <br/>` 변환 추가. 빈 explanation 폴백 포함.
 
-- [ ] **GitHub PR/Issue 조회 메모이즈**
-  - 위치: `core/vcs.py::find_pr_for_commit`, `_fetch_issue`(또는 동등 함수)
-  - 현상: 같은 PR·Issue를 라인 클릭마다 재조회 — 블레임 빈도 고려 시 누적 비용 큼
-  - 방향: 요청 스코프 dict 캐시 또는 `functools.lru_cache(maxsize=…)`. TTL은 짧게(요청 단위로 충분)
-  - 효과: §6 공통 처리 원칙 #4 정렬
+- [x] **노이즈 커밋 LLM 우회 (타임라인과 처리 원칙 정렬)** (2026-06-07)
+  - 적용: `blame/service.py::analyze_blame` 진입 직후 `commit_classifier.classify_commit` 호출 → `SKIP_TYPES` 해당 시 `_noise_response`로 즉시 반환. Bedrock·GitHub API 0회.
+  - 결과: §6 공통 처리 원칙 #2 정렬 완료
+
+- [ ] **노이즈 응답 문구 확정 (UX)**
+  - 위치: `blame/service.py::_build_noise_explanation`
+  - 현상: 임시 폴백 문구(`[자동 분류] {label} 정비 커밋입니다 — "{quote}"`)로 동작 중. 사이드바 톤과 일관성 미점검.
+  - 결정 사항: 사이드바 톤(존댓말 / 따옴표 종류 / 분류 라벨 표현) 정해 5~10줄 본문 확정
+  - 후보 패턴:
+    - `"[자동 분류] {label} 정비 커밋입니다 — \"{quote}\""` (현재 임시값)
+    - `"이 줄은 \"{quote}\" 커밋의 일부로, {label} 변경이라 별도 분석을 건너뛰었습니다."`
+  - 입력 변수: `label`(`_NOISE_LABELS`: 문서/테스트/설정/잡무), `quote`(커밋 메시지 첫 줄, 폴백 `(커밋 메시지 없음)`)
+
+- [x] **GitHub PR/Issue 조회 메모이즈** (2026-06-07)
+  - 적용: `core/vcs.py`에 저수준 헬퍼 4개(`_github_pr_listing_for_commit`/`_github_pr_detail`/`_github_pr_files`/`_github_issue`) 분리 + `@lru_cache(maxsize=128)`. 인자는 `(base, owner, repo, …)` str/int 조합으로 hashable.
+  - 무효화: 프로세스 재시작 시 자연 만료. PR 본문·Issue 본문은 빈번히 바뀌지 않으므로 충분.
+  - 결과: §6 공통 처리 원칙 #4 정렬 완료
 
 #### 🟢 P2 — 테스트·견고성
 
-- [ ] **블레임 단위 테스트 부재** — 우선 대상:
-  - `extract_keywords` (불용어·도메인 우선·중복 제거·순서 보존)
-  - `crud.save_blame` / `get_cached_blame` (커밋×파일 dedup 히트/미스)
-  - `_build_related_changes` (분류·캡)
-  - `vcs._extract_issue_numbers` / `_extract_attachments` 정규식
-- [ ] **엣지케이스 견고성** — merge 커밋, detached HEAD, 빈 커밋 메시지, 바이너리 파일
+- [x] **블레임 단위 테스트 추가** (2026-06-07)
+  - `backend/tests/blame/` 신설(38건, 전부 PASS): `test_extract_keywords` / `test_related_changes` / `test_vcs_regex` / `test_commit_classifier`(SSOT 보호) / `test_truncate_diff`(hunk 보존) / `test_to_response`(crud mapping). `pytest>=8.0.0`을 `requirements.txt`에 추가.
+  - 남은 항목: `crud.save_blame`/`get_cached_blame`의 ON CONFLICT 통합 테스트 — PostgreSQL testcontainer 도입 시점에 별도 진행(아래 신규 TODO).
 
-#### 🆕 GitHub Issue 연동 후속 (2026-06-06 전환)
+- [ ] **crud DB 통합 테스트 (Postgres testcontainer)**
+  - 위치: `backend/tests/blame/test_crud_db.py` (예정)
+  - 의도: `save_blame`의 `ON CONFLICT DO UPDATE`와 `get_cached_blame`의 커밋×파일 dedup 적중을 실제 PostgreSQL 로 검증. `JSONB` 필드 round-trip 도 포함.
+  - 의존성: `testcontainers-python` 또는 `docker-compose -f tests/docker-compose.yml`. 도입 시점에 함께 작성.
 
-- [ ] **GitLab(MR→Issue) 미지원**
-  - 위치: `vcs.find_issues_from_pr_body` — 현재 GitHub host 한정
-  - 방향: GitLab MR description의 `Closes #N`도 동일하게 처리
-- [ ] **PR 본문 없는 커밋 폴백**
-  - 현상: Squash/Rebase 후 PR 본문 없거나 PR 매칭 안 되는 커밋은 issues=[]
-  - 방향: 커밋 메시지에서 `#N` 패턴 추출하는 2차 경로
-- [ ] **첨부 URL 휴리스틱 정밀화**
-  - 현상: PDF/DOCX 확장자 + GitHub user-attachments만 감지, 외부 위키/노션 누락
-  - 방향: 도메인 화이트리스트 옵션화
+- [x] **엣지케이스 견고성** (2026-06-07)
+  - `_get_commit_diff`에 `-m --first-parent` 추가 (merge 커밋 일반 diff 강제)
+  - `get_current_branch`는 이미 detached HEAD 시 빈 문자열 반환
+  - `_build_context`가 빈 message/diff/author/date 각각 폴백 라벨로 LLM 환각 방지
+  - `_get_commit_numstat`은 바이너리 `-` 를 `0`으로 처리 (기존)
+
+#### 🆕 GitHub Issue 연동 후속 (2026-06-06 전환 / 2026-06-07 완료)
+
+- [x] **GitLab(MR→Issue) 지원** (2026-06-07)
+  - `find_issues_from_pr_body`의 host 가드 제거 + `_fetch_issues`가 GitHub/GitLab 분기. `_gitlab_issue` 헬퍼(lru_cache 128).
+- [x] **PR 본문 없는 커밋 폴백** (2026-06-07)
+  - `find_issues_from_commit_message` 신설 + `_safe_find_issues`가 PR 본문에서 매칭이 없으면 커밋 메시지 `#N` 으로 2차 폴백.
+- [x] **첨부 URL 휴리스틱 도메인 화이트리스트** (2026-06-07)
+  - `CODEWHY_ATTACHMENT_DOMAINS` 환경변수(쉼표 구분)로 Notion/Confluence/위키 등 확장자 없는 외부 링크를 첨부로 인정. `config.get_attachment_domain_allowlist`.
 
 ---
 
@@ -599,7 +606,9 @@ alembic revision --autogenerate -m "..."  # 스키마 변경 시
 
 - [ ] 역추적 시맨틱 폴백 결과 캐시 (blame처럼 file_id/commit_id 키)
 - [ ] 타임라인 map 단계 Bedrock 호출 병렬화 (LangGraph `Send()` API)
-- [ ] **diff 토큰 관리 전략 통일** — 블레임 `_truncate_diff`(head-only)와 타임라인 청크 전략을 hunk 헤더 우선 보존 방식으로 정렬 (블레임 P1 "diff 잘라내기 전략 개선"과 결합)
+- [x] **diff 토큰 관리 전략 통일 (블레임 측)** (2026-06-07)
+  - `_truncate_diff`가 hunk 헤더(`@@ ... @@`) 우선 보존 — 통째로 살릴 수 있는 hunk 는 살리고, 잘린 hunk 들의 헤더만 `[잘린 hunks — 헤더만 보존]` 블록으로 끝에 모아 LLM 이 어느 영역이 잘렸는지 인지하게 함. patch 가 아니면 head+tail 폴백.
+  - 타임라인 청크 전략 정렬은 별도 plan(타임라인 map 청크 사이즈 정책) 후속.
 
 ---
 

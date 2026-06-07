@@ -178,10 +178,14 @@ def _get_commit_message(repo_path: str, commit_hash: str) -> str:
 
 
 def _get_commit_diff(repo_path: str, commit_hash: str, file_path: str) -> str:
-    # `-p` 가 빠지면 LLM 이 실제 변경 hunk 를 못 보고 메시지만으로 추론 → 설명이 커밋 메시지 재진술이 된다.
-    # `--stat` 도 같이 둬서 파일 통계(파일명·±라인)는 보존한다.
+    """커밋의 파일별 변경 diff(stat+patch).
+
+    Merge 커밋은 `git show` 기본 동작이 'combined diff'라 단일 파일 patch 가 비어 나온다.
+    `-m --first-parent` 로 mainline 부모 기준 일반 diff 를 강제하면 merge 도 동일한 형식의
+    hunk 를 얻는다(비-머지 커밋에는 영향 없음).
+    """
     return subprocess.check_output(
-        ["git", "show", "-p", "--stat", commit_hash, "--", file_path],
+        ["git", "show", "-p", "--stat", "-m", "--first-parent", commit_hash, "--", file_path],
         cwd=repo_path,
         text=True,
         encoding="utf-8",
