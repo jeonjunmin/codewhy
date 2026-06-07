@@ -3,22 +3,27 @@
 데이터 흐름:
   ① 확장이 보낸 commits
   → ② PostgreSQL 백본에 upsert + 파일 전체 이력 조회 (crud.py)
-  → ③ commit_set_hash 로 요약 캐시 조회 — 적중 시 즉시 반환
-  → ④ 미스 시 git diff 추출 → run_file_timeline_graph(Bedrock, 단일 호출) 후 캐시 저장
-  → ⑤ 결과 반환
+  → ③ commit_set_hash 로 요약 캐시 조회
+       — 적중 시 prepare_summary() 가 즉시 결과를 반환 (router 가 JSON 응답)
+       — 미스 시 prepare_summary() 가 스트리밍 컨텍스트를 반환 (router 가 SSE 스트림 응답)
+  → ④ 미스일 때만: git diff 추출 → stream_summary() 가 Bedrock 토큰을
+       SSE(`data: ...`) 프레임으로 실시간 전달하고, 스트림 종료 시점에 누적 텍스트를
+       파싱해 timeline_summaries 캐시에 저장한다
 
 👤 담당: 개발자 B
 """
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 import subprocess
+from typing import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.timeline_file_graph import run_file_timeline_graph
+from app.ai.timeline_file_graph import parse_ai_response, stream_file_summary
 from app.core.commit_classifier import filter_meaningful
 from app.features.timeline import crud
 
@@ -64,10 +69,16 @@ def _format_commits(commits: list[dict]) -> str:
     )
 
 
-async def summarize(
+async def prepare_summary(
     db: AsyncSession, repo_path: str, file_path: str, commits: list[dict]
 ) -> dict:
-    logger.info("[timeline] ▶ summarize 시작 — repo=%s  file=%s  ext_commits=%d건",
+    """① 백본 upsert + ② 이력 조회 + ③ 캐시 조회까지 수행하고, 라우터가 응답 형식을
+    결정할 수 있도록 결과를 분기해 반환한다.
+
+    캐시 적중: {"cached": True, "result": {"summary","milestones"}}  → 라우터가 JSON 즉시 응답
+    캐시 미스: {"cached": False, "ctx": {...}}                       → 라우터가 SSE 스트림 응답
+    """
+    logger.info("[timeline] ▶ prepare_summary 시작 — repo=%s  file=%s  ext_commits=%d건",
                 repo_path, file_path, len(commits))
 
     # ② 백본 upsert + 파일 전체 이력 조회
@@ -86,11 +97,34 @@ async def summarize(
     cached = await crud.get_cached_summary(db, file.id, set_hash)
     if cached:
         logger.info("[timeline] ✅ 캐시 적중 — file_id=%d", file.id)
-        return {"summary": cached.summary, "milestones": cached.milestones or []}
+        return {"cached": True, "result": {"summary": cached.summary, "milestones": cached.milestones or []}}
 
-    logger.info("[timeline] ❌ 캐시 미스 — Bedrock 호출 시작")
+    logger.info("[timeline] ❌ 캐시 미스 — 스트리밍 응답으로 전환")
+    return {
+        "cached": False,
+        "ctx": {
+            "file": file,
+            "set_hash": set_hash,
+            "repo_path": repo_path,
+            "file_path": file_path,
+            "stored": stored,
+        },
+    }
 
-    # ④ 미스 → git diff 추출 → Bedrock 요약
+
+async def stream_summary(db: AsyncSession, ctx: dict) -> AsyncGenerator[str, None]:
+    """캐시 미스 시 Bedrock 토큰을 SSE(`data: ...\\n\\n`) 프레임으로 실시간 전달한다.
+
+    스트림이 끝나면(요구사항 3) 누적 텍스트를 파싱해 timeline_summaries 캐시에
+    저장하는 DB 적재 로직을 그대로 수행한다 — 캐시 히트 로직과의 정합성 유지.
+    """
+    file       = ctx["file"]
+    set_hash   = ctx["set_hash"]
+    repo_path  = ctx["repo_path"]
+    file_path  = ctx["file_path"]
+    stored     = ctx["stored"]
+
+    # 미스 → git diff 추출 → Bedrock 입력 구성
     diff_text = await asyncio.to_thread(_get_file_diff, repo_path, file_path)
     commits_text = diff_text.strip() if diff_text.strip() else _format_commits(stored)
     logger.info("[timeline] bedrock 입력 — diff=%d자  (diff_empty=%s)",
@@ -98,17 +132,30 @@ async def summarize(
 
     latest = stored[0] if stored else {}
     parsed = _parse_commit(latest.get("subject", ""))
-    logger.info("[timeline] commit type=%s  domain=%s", parsed["type"], parsed["domain"])
+    logger.info("[timeline] 🔴 스트리밍 시작 — file=%s  type=%s  domain=%s",
+                file_path, parsed["type"], parsed["domain"])
 
-    result = await run_file_timeline_graph(
-        file_path=file_path,
-        commits_text=commits_text,
-        commit_type=parsed["type"],
-        commit_domain=parsed["domain"],
-    )
-    logger.info("[timeline] Bedrock 완료 — summary=%d자  milestones=%d건",
+    full_text = ""
+    try:
+        async for delta in stream_file_summary(
+            file_path=file_path,
+            commits_text=commits_text,
+            commit_type=parsed["type"],
+            commit_domain=parsed["domain"],
+        ):
+            full_text += delta
+            yield f"data: {json.dumps({'delta': delta}, ensure_ascii=False)}\n\n"
+    except Exception as exc:
+        logger.exception("[timeline] 스트리밍 중 오류 — file=%s : %s", file_path, exc)
+        yield f"data: {json.dumps({'error': str(exc)}, ensure_ascii=False)}\n\n"
+        return
+
+    # 스트림 종료 → 누적 텍스트 파싱 + 캐시 저장 (요구사항 3)
+    result = parse_ai_response(full_text)
+    logger.info("[timeline] Bedrock 스트리밍 완료 — summary=%d자  milestones=%d건",
                 len(result.get("summary", "")), len(result.get("milestones", [])))
 
     await crud.save_summary(db, file.id, set_hash, result)
     logger.info("[timeline] 캐시 저장 완료 — file_id=%d  hash=%s", file.id, set_hash[:16] + "…")
-    return result
+
+    yield f"data: {json.dumps({'done': True, **result}, ensure_ascii=False)}\n\n"

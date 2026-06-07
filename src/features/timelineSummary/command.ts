@@ -2,7 +2,7 @@ import { execSync } from 'child_process';
 import * as vscode from 'vscode';
 import { getEditorContext } from '../../shared/editor';
 import { CommitInput } from '../../shared/types';
-import { fetchTimelineSummary } from './api';
+import { streamTimelineSummary } from './api';
 import { TimelineSidebarProvider } from './sidebar';
 
 export async function runTimelineSummary(
@@ -20,26 +20,27 @@ export async function runTimelineSummary(
 
     // 패널이 아직 열려있지 않으면 먼저 focus 명령으로 열어준다
     vscode.commands.executeCommand('codewhy.timelineSummary.focus');
-    sidebar.showLoading(ctx);
 
-    await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: 'CodeWhy: 타임라인 요약 분석 중...' },
-        async () => {
-            try {
-                const result = await fetchTimelineSummary({
-                    filePath: ctx.filePath,
-                    repoPath: ctx.repoPath,
-                    commits,
-                });
-                sidebar.setTimeline(ctx, result);
-            } catch (err) {
-                vscode.window.showErrorMessage(
-                    `Timeline Summary 실패: ${(err as Error).message}`
-                );
-                sidebar.showEmpty();
-            }
-        },
-    );
+    // 스트리밍 연결 직전 — "AI가 소스 코드를 분석 중입니다..." 안내 표시,
+    // 첫 delta 수신 시 sidebar 가 자동으로 타자기 효과로 전환한다.
+    sidebar.startStreaming(ctx);
+
+    try {
+        await streamTimelineSummary(
+            { filePath: ctx.filePath, repoPath: ctx.repoPath, commits },
+            {
+                onDelta: (delta) => sidebar.appendStreamDelta(delta),
+                onDone: (result) => sidebar.setTimeline(ctx, result),
+                onError: (message) => {
+                    vscode.window.showErrorMessage(`Timeline Summary 실패: ${message}`);
+                    sidebar.showEmpty();
+                },
+            },
+        );
+    } catch (err) {
+        vscode.window.showErrorMessage(`Timeline Summary 실패: ${(err as Error).message}`);
+        sidebar.showEmpty();
+    }
 }
 
 function collectGitLog(repoPath: string, filePath: string): CommitInput[] {
