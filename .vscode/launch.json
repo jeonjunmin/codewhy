@@ -10,7 +10,9 @@
 			"type": "extensionHost",
 			"request": "launch",
 			"args": [
-				"--extensionDevelopmentPath=${workspaceFolder}"
+				"--extensionDevelopmentPath=${workspaceFolder}",
+				"--disable-extension=GitHub.copilot",
+				"--disable-extension=GitHub.copilot-chat"
 			],
 			"outFiles": [
 				"${workspaceFolder}/out/**/*.js"

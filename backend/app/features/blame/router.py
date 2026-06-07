@@ -38,14 +38,19 @@ def _parse_date(value: str) -> date | None:
 
 @router.post("/context", response_model=BlameResponse)
 async def context_blame(req: BlameRequest, db: AsyncSession = Depends(get_db)):
-    # 1. blamed 커밋 해석 + 백본 행 확보 (캐시 키에 commit_id 포함)
-    info = None
-    branch = None
-    ticket = None
+    # 0. blamed 커밋 해석 — 커밋 이력이 없으면(미커밋 파일/라인) 분석할 대상이 없으므로
+    #    500 대신 안내 응답으로 단락한다. (analyze_blame 의 중복 git 호출도 함께 차단)
     try:
         info = git.get_blame_info(req.repoPath, req.filePath, req.line)
-        branch = git.get_current_branch(req.repoPath)
-        ticket = extract_ticket(info.message, branch)
+    except git.BlameUnavailable as e:
+        logger.info("blame 불가 — %s (reason=%s)", e, e.reason)
+        return BlameResponse(**service.uncommitted_response(e.reason))
+
+    branch = git.get_current_branch(req.repoPath)
+    ticket = extract_ticket(info.message, branch)
+
+    # 1. 백본 행 확보 (캐시 키에 commit_id 포함)
+    try:
         repo = await crud_common.get_or_create_repository(db, req.repoPath)
         file = await crud_common.get_or_create_file(db, repo.id, req.filePath)
         commit = await crud_common.upsert_commit(
@@ -97,6 +102,9 @@ def ask_blame(req: AskRequest):
     """AI에게 더 묻기 — 현재 라인 블레임 맥락 위에서 후속 질문에 답한다."""
     try:
         answer = service.ask_followup(req.repoPath, req.filePath, req.line, req.question)
+    except git.BlameUnavailable as e:
+        logger.info("blame ask 불가 — %s (reason=%s)", e, e.reason)
+        return AskResponse(answer=service.uncommitted_response(e.reason)["explanation"])
     except Exception as e:
         logger.exception("blame ask 실패 — repo=%s file=%s line=%s", req.repoPath, req.filePath, req.line)
         raise HTTPException(status_code=500, detail=f"blame ask 실패: {e}")

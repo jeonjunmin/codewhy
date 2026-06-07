@@ -8,6 +8,31 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 
+class BlameUnavailable(Exception):
+    """blame 을 낼 수 없는 '정상적인' 상황 — 시스템 오류가 아니다.
+
+    대표 케이스: 아직 커밋되지 않은(untracked) 파일이라 HEAD 에 경로가 없음.
+    이 예외는 500 이 아니라 사용자에게 보여줄 안내로 변환되어야 한다.
+    reason: 'uncommitted' | 'no_history'
+    """
+
+    def __init__(self, message: str, reason: str = "no_history"):
+        super().__init__(message)
+        self.reason = reason
+
+
+def _is_tracked(repo_path: str, file_path: str) -> bool:
+    """파일이 git 에 추적(커밋 이력 보유)되는지 여부."""
+    result = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", file_path],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    return result.returncode == 0
+
+
 @dataclass
 class BlameInfo:
     commit_hash: str
@@ -20,13 +45,28 @@ class BlameInfo:
 
 
 def get_blame_info(repo_path: str, file_path: str, line: int) -> BlameInfo:
-    """특정 라인의 마지막 커밋 정보와 diff 를 반환한다."""
-    blame_out = subprocess.check_output(
-        ["git", "blame", "-L", f"{line},{line}", "--porcelain", file_path],
-        cwd=repo_path,
-        text=True,
-        encoding="utf-8",
-    )
+    """특정 라인의 마지막 커밋 정보와 diff 를 반환한다.
+
+    아직 커밋되지 않은 파일/라인은 HEAD 에 경로가 없어 git blame 이 exit 128 로 실패한다.
+    이는 시스템 오류가 아니라 '추적할 이력이 없는' 정상 상황이므로 BlameUnavailable 로 변환한다.
+    """
+    try:
+        blame_out = subprocess.check_output(
+            ["git", "blame", "-L", f"{line},{line}", "--porcelain", file_path],
+            cwd=repo_path,
+            text=True,
+            encoding="utf-8",
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.CalledProcessError as e:
+        if not _is_tracked(repo_path, file_path):
+            raise BlameUnavailable(
+                f"아직 커밋되지 않은 파일입니다: {file_path}", reason="uncommitted"
+            ) from e
+        # 추적은 되지만 blame 실패(예: 라인 범위 초과) — 역시 분석 불가
+        raise BlameUnavailable(
+            (e.stderr or "").strip() or "blame 을 가져올 수 없습니다", reason="no_history"
+        ) from e
 
     lines = blame_out.splitlines()
     commit_hash = lines[0].split()[0]

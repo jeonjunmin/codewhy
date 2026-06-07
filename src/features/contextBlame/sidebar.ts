@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { EditorContext } from '../../shared/editor';
+import { log } from '../../shared/log';
 import { BlameResult, RelatedChange } from '../../shared/types';
 
 /**
@@ -26,6 +27,12 @@ export const VIEW_ID = 'codewhy.contextBlame';
 export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     private view?: vscode.WebviewView;
     private last?: { ctx: EditorContext; result: BlameResult; pinned: boolean };
+    /**
+     * 웹뷰 스크립트가 message 리스너를 등록하고 'ready' 를 보내올 때까지 false.
+     * html 주입 직후 보낸 postMessage 는 리스너가 붙기 전이라 유실되므로,
+     * ready 이전에는 렌더를 쏘지 않고 this.last 에만 담아 뒀다가 ready 수신 시 flush 한다.
+     */
+    private ready = false;
 
     constructor(
         private readonly extensionUri: vscode.Uri,
@@ -40,13 +47,30 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     ) {}
 
     resolveWebviewView(view: vscode.WebviewView) {
+        log('sidebar', 'resolveWebviewView 호출됨 — 패널이 펼쳐짐');
         this.view = view;
+        this.ready = false;  // 새 웹뷰 인스턴스 — 스크립트가 'ready' 를 보낼 때까지 대기
         view.webview.options = { enableScripts: true, localResourceRoots: [this.extensionUri] };
+
+        // ⚠️ 메시지 리스너를 html 주입 '전에' 등록한다.
+        // html 을 넣는 순간 웹뷰 스크립트가 실행되며 곧장 'ready' 를 보내는데,
+        // 리스너가 그 뒤에 붙으면(특히 리로드로 웹뷰 프로세스가 warm 할 때) ready 를 놓쳐
+        // flushPending 이 영영 안 돌고 패널이 빈 상태로 멈춘다.
+        view.webview.onDidReceiveMessage(msg => this.handleMessage(msg));
         view.webview.html = this.renderHtml();
 
-        view.webview.onDidReceiveMessage(msg => this.handleMessage(msg));
+        // 웹뷰가 사라지면(탭 닫힘 등) 다음 resolve 가 다시 핸드셰이크하도록 상태 초기화
+        view.onDidDispose(() => {
+            this.view = undefined;
+            this.ready = false;
+        });
 
-        // 사이드바를 다시 열었을 때 마지막 분석 결과 복원
+        // ⚠️ 여기서 곧바로 postMessage 하지 않는다 — 웹뷰 스크립트의 message 리스너가
+        //    아직 등록되기 전이라 유실된다. 실제 렌더는 'ready' 수신 시 flushPending() 에서.
+    }
+
+    /** 웹뷰 스크립트가 'ready' 를 보내오면 보류해 둔 마지막 상태를 한 번 그린다. */
+    private flushPending() {
         if (this.last) {
             this.postRender(this.last.ctx, this.last.result, this.last.pinned);
         } else {
@@ -57,13 +81,24 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     /** Context Blame 분석이 끝났을 때 view.ts 에서 호출. */
     setBlame(ctx: EditorContext, result: BlameResult, pinned: boolean) {
         this.last = { ctx, result, pinned };
+        log('sidebar', 'setBlame', { hasView: !!this.view, ready: this.ready });
         if (!this.view) {
             // 사이드바가 아직 안 열려 있으면 강제로 표시한다 — 첫 분석 시 자연스럽게 펼쳐짐
-            vscode.commands.executeCommand(`${VIEW_ID}.focus`);
+            log('sidebar', `view 없음 → ${VIEW_ID}.focus 실행`);
+            vscode.commands.executeCommand(`${VIEW_ID}.focus`).then(
+                () => log('sidebar', 'focus 명령 완료'),
+                (e) => log('sidebar', 'focus 명령 실패', String(e)),
+            );
+            return;
+        }
+        this.view.show?.(true);
+        if (!this.ready) {
+            // 웹뷰 스크립트가 아직 ready 전 — 지금 postMessage 하면 유실될 수 있으니
+            // this.last 에만 담아 두고, ready 수신 시 flushPending() 이 그린다.
+            log('sidebar', 'view 있으나 아직 ready 전 — flushPending 에 위임');
             return;
         }
         this.postRender(ctx, result, pinned);
-        this.view.show?.(true);
     }
 
     /** 핀 토글 시 그라데이션·아이콘만 갱신. */
@@ -80,6 +115,17 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
 
     // ─── 메시지 라우팅 ────────────────────────────────────────────────────
     private handleMessage(msg: { type: string; payload?: any }) {
+        // 'ready' 는 분석 결과(this.last) 유무와 무관하게 항상 먼저 처리한다.
+        if (msg.type === 'ready') {
+            log('sidebar', 'webview ready 수신 → flushPending', { hasLast: !!this.last });
+            this.ready = true;
+            this.flushPending();
+            return;
+        }
+        if (msg.type === 'webview-error') {
+            log('sidebar', '⚠️ webview 스크립트 오류', msg.payload);
+            return;
+        }
         if (!this.last) { return; }
         const { ctx, result } = this.last;
         switch (msg.type) {
@@ -115,6 +161,17 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private postRender(ctx: EditorContext, r: BlameResult, pinned: boolean) {
+        // commitHash 가 비면 분석할 커밋 이력이 없는 경우(미커밋 라인 등) — 백엔드의
+        // uncommitted_response. 메타/관련변경/CTA 는 채울 게 없으므로 안내 문구만 표시한다.
+        if (!r.commitHash) {
+            log('sidebar', 'commitHash 없음 → info 안내 상태로 렌더');
+            this.view?.webview.postMessage({
+                type: 'info',
+                payload: { message: r.explanation || '이 라인의 변경 이력을 찾을 수 없습니다.' },
+            });
+            return;
+        }
+
         const fileName = ctx.filePath.split(/[\\/]/).pop() ?? ctx.filePath;
         const payload = {
             fileName,
@@ -217,6 +274,18 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         background: var(--line); color: var(--fg-dim);
         padding: 1px 6px; border-radius: 4px; font-size: 11px;
     }
+
+    /* ── 안내 상태: 커밋 이력 없음(미커밋 라인 등) ────────────────── */
+    .info {
+        margin: 14px;
+        padding: 14px 16px;
+        display: flex; gap: 10px; align-items: flex-start;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+    }
+    .info__icon { color: var(--accent-violet); flex-shrink: 0; margin-top: 1px; }
+    .info__text { color: var(--fg-dim); font-size: 12.5px; line-height: 1.6; }
 
     /* ── 콜아웃: 이 라인이 추가된 이유 ───────────────────────────── */
     .callout {
@@ -398,6 +467,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         에디터에서 라인을 선택하고 <span class="kbd">🔍 왜 바꿨어?</span> 렌즈를 클릭하면<br/>이곳에 변경 사유가 나타납니다.
     </div>
 
+    <div id="info" class="info hidden">
+        <span class="info__icon" id="ico-info"></span>
+        <div class="info__text" id="info-text"></div>
+    </div>
+
     <div id="content" class="body hidden">
         <section class="callout">
             <div class="callout__title">
@@ -452,6 +526,16 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
 <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
 
+    // 웹뷰 스크립트에서 던져진 에러를 확장 Output 채널로 되쏜다(웹뷰 DevTools 없이 진단).
+    window.addEventListener('error', function (e) {
+        try {
+            vscode.postMessage({
+                type: 'webview-error',
+                payload: (e && e.message) + ' @ ' + (e && e.filename) + ':' + (e && e.lineno),
+            });
+        } catch (_) { /* noop */ }
+    });
+
     // ── 아이콘들 (인라인 SVG) ───────────────────────────────────────
     const ICON = {
         spark:  '<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l1.5 4.5L14 7l-4.5 1.5L8 13l-1.5-4.5L2 7l4.5-1.5L8 1z"/></svg>',
@@ -463,20 +547,30 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         shield: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M8 1l6 2v5c0 4-2.8 6.6-6 7-3.2-.4-6-3-6-7V3l6-2z"/></svg>',
         commit: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="2.5"/><path d="M0 8h5M11 8h5"/></svg>',
     };
-    document.getElementById('ico-spark').innerHTML = ICON.spark;
-    document.getElementById('ico-callout').innerHTML = ICON.spark;
-    document.getElementById('ico-ai').innerHTML = ICON.spark;
-    document.getElementById('ico-ask').innerHTML = ICON.spark;
-    document.getElementById('ico-cta').innerHTML = ICON.doc;
-    document.getElementById('ico-commit-btn').innerHTML = ICON.branch;
-    setPin(false);
+    // 아이콘 주입은 보조 장식이므로, 한 요소가 없더라도 핸드셰이크(ready)까지 죽지 않게 격리한다.
+    try {
+        const setIcon = (id, svg) => { const el = document.getElementById(id); if (el) { el.innerHTML = svg; } };
+        setIcon('ico-spark', ICON.spark);
+        setIcon('ico-callout', ICON.spark);
+        setIcon('ico-ai', ICON.spark);
+        setIcon('ico-ask', ICON.spark);
+        setIcon('ico-cta', ICON.doc);
+        setIcon('ico-commit-btn', ICON.branch);
+        setIcon('ico-info', ICON.spark);
+        setPin(false);
+    } catch (err) {
+        vscode.postMessage({ type: 'webview-error', payload: '아이콘 초기화 실패: ' + String(err) });
+    }
 
     // ── 메시지 수신 ────────────────────────────────────────────────
     window.addEventListener('message', (e) => {
         const msg = e.data;
         if (msg.type === 'render') {
             render(msg.payload);
+        } else if (msg.type === 'info') {
+            showInfo(msg.payload.message);
         } else if (msg.type === 'empty') {
+            document.getElementById('info').classList.add('hidden');
             document.getElementById('empty').classList.remove('hidden');
             document.getElementById('content').classList.add('hidden');
         } else if (msg.type === 'pinned') {
@@ -520,8 +614,18 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         btn.classList.toggle('active', !!pinned);
     }
 
+    // 커밋 이력이 없는 라인(미커밋 파일 등) — 깨져 보이는 메타 카드 대신 안내 문구만 깔끔히
+    function showInfo(message) {
+        document.getElementById('empty').classList.add('hidden');
+        document.getElementById('content').classList.add('hidden');
+        const info = document.getElementById('info');
+        info.classList.remove('hidden');
+        document.getElementById('info-text').innerHTML = decorate(message);
+    }
+
     function render(p) {
         document.getElementById('empty').classList.add('hidden');
+        document.getElementById('info').classList.add('hidden');
         document.getElementById('content').classList.remove('hidden');
 
         document.getElementById('narrative').innerHTML = decorate(p.narrative);
@@ -601,7 +705,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         return esc
             .replace(/"([^"]+)"/g, '<code>$1</code>')
-            .replace(/\n/g, '<br/>');
+            // ⚠️ 이 함수는 TS 템플릿 리터럴 안의 웹뷰 스크립트다. 개행 메타문자는 반드시
+            // 백슬래시를 이중(아래처럼)으로 써야 한다. 단일로 쓰면 컴파일 시 실제 줄바꿈으로
+            // 치환돼 생성된 HTML 의 정규식이 줄을 넘겨 깨진다(Invalid regular expression).
+            // 주석에도 단일 개행 메타문자를 적지 말 것 — 주석 자체가 두 줄로 쪼개져 깨진다.
+            .replace(/\\n/g, '<br/>');
     }
 
     function formatChange(stats, pr) {
@@ -637,6 +745,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         if (!el) return;
         vscode.postMessage({ type: el.dataset.action });
     });
+
+    // ── 핸드셰이크: 리스너가 모두 등록된 지금 시점에 extension 으로 'ready' 통지 ──
+    // 이 신호 이전에 온 render 메시지는 유실되므로, extension 은 ready 를 받고 나서
+    // 보류해 둔 마지막 분석 결과를 보내준다.
+    vscode.postMessage({ type: 'ready' });
 </script>
 </body>
 </html>`;

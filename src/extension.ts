@@ -3,6 +3,7 @@ import { registerContextBlame } from './features/contextBlame';
 import { registerTimelineSummary } from './features/timelineSummary';
 import { registerRequirementTrace } from './features/requirementTrace';
 import { createHttpClient } from './shared/http';
+import { channel as output } from './shared/log';
 
 /**
  * CodeWhy VSCode 확장 진입점.
@@ -13,8 +14,6 @@ import { createHttpClient } from './shared/http';
  *   3. git 커밋 감지 (.git/COMMIT_EDITMSG 파일 변경 감시)
  *   4. 파일 저장 후 30초 디바운스 (커밋 없이 변경이 많을 때 보조 트리거)
  */
-
-const output = vscode.window.createOutputChannel('CodeWhy');
 
 // ── 백엔드 호출 ──────────────────────────────────────────────────────────────
 

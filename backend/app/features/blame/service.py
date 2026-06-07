@@ -116,6 +116,51 @@ def analyze_blame(
     }
 
 
+def uncommitted_response(reason: str) -> dict:
+    """커밋 이력이 없는 라인(미커밋 파일 등)용 안내 응답.
+
+    git.get_blame_info 가 BlameUnavailable 을 던졌을 때 라우터가 호출한다.
+    blamed 커밋이 없으므로 commit/author/date 등은 모두 빈 값이고,
+    explanation 에만 사용자에게 보여줄 안내 문구를 담는다.
+
+    reason: 'uncommitted'  — 아직 커밋되지 않은(untracked) 파일
+            'no_history'  — 추적은 되지만 해당 라인의 이력을 못 찾음(라인 범위 초과 등)
+
+    TODO(개발자 A): 아래 _UNCOMMITTED_MESSAGE 를 채워 주세요. (5~10줄)
+    """
+    return {
+        "explanation": _UNCOMMITTED_MESSAGE.get(reason, _UNCOMMITTED_MESSAGE["no_history"]),
+        "commitHash": "",
+        "author": "",
+        "date": "",
+        "ticket": None,
+        "team": None,
+        "sourceRef": None,
+        "specRef": None,
+        "issueUrl": None,
+        "attachments": [],
+        "changeStats": None,
+        "prInfo": None,
+        "relatedChanges": [],
+        "aiSuggestion": None,
+    }
+
+
+# 👉 사용자 작성 구역 — reason 별 안내 문구
+#    'uncommitted': 아직 커밋되지 않아 추적할 이력이 없다는 점 + 다음 행동(커밋하면 분석 가능) 안내
+#    'no_history' : 해당 라인의 커밋 이력을 찾지 못했다는 점 안내
+_UNCOMMITTED_MESSAGE: dict[str, str] = {
+    "uncommitted": (
+        "아직 커밋되지 않은 코드라 변경 이력을 추적할 수 없어요. "
+        "이 줄을 한 번 커밋하면 그때부터 변경 사유와 연관 이슈를 함께 보여드릴 수 있습니다."
+    ),
+    "no_history": (
+        "이 줄의 커밋 이력을 찾지 못했어요. "
+        "파일이 막 추가됐거나 해당 줄이 아직 기록되지 않은 상태일 수 있습니다."
+    ),
+}
+
+
 def _noise_response(
     info: git.BlameInfo, ticket: str | None, team: str | None, commit_type: str
 ) -> dict:
