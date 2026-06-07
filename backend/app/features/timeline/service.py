@@ -19,6 +19,7 @@ import subprocess
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.timeline_file_graph import run_file_timeline_graph
+from app.core.commit_classifier import filter_meaningful
 from app.features.timeline import crud
 
 logger = logging.getLogger(__name__)
@@ -29,9 +30,12 @@ _COMMIT_RE = re.compile(r"^(?P<type>\w+)(?:\[(?P<domain>[^\]]+)\])?:")
 def compute_commit_set_hash(commits: list[dict]) -> str:
     """파일의 커밋 목록으로부터 타임라인 요약 캐시 키(SHA-256 hex)를 계산한다.
 
-    커밋 해시 목록만 사용 — 새 커밋이 생길 때만 재요약 (비용 최소).
+    노이즈 커밋(test/chore/docs)은 LangGraph 진입 전에 이미 걸러지므로
+    캐시 키 계산에서도 동일하게 제외한다 — 노이즈 커밋만 추가됐을 때
+    캐시가 불필요하게 무효화되는 것을 방지한다 (TIMELINE_OPTIMIZATION_PLAN.md §2 C).
     """
-    serialized = "\n".join(sorted(c["hash"] for c in commits))
+    target = filter_meaningful(commits)
+    serialized = "\n".join(sorted(c["hash"] for c in target))
     return hashlib.sha256(serialized.encode()).hexdigest()
 
 
