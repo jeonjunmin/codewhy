@@ -15,8 +15,11 @@ git 으로 라인 단위 마지막 커밋(diff + 커밋 메시지)을 가져오�
 👤 담당: 개발자 A
 """
 
+import logging
 import os
 import re
+
+from botocore.exceptions import BotoCoreError, ClientError
 
 from app.core import git, vcs
 from app.core.ai_client import call_bedrock
@@ -24,6 +27,8 @@ from app.core.commit_classifier import SKIP_TYPES, classify_commit
 from app.core.config import get_team_map
 from app.core.tickets import extract_ticket
 from app.core.vcs import Issue, PullRequest
+
+logger = logging.getLogger(__name__)
 
 # 노이즈 커밋 type → 사용자에게 보일 한국어 라벨
 _NOISE_LABELS: dict[str, str] = {
@@ -87,7 +92,7 @@ def analyze_blame(
         _CONTEXT_CACHE.pop(next(iter(_CONTEXT_CACHE)))
     _CONTEXT_CACHE[_cache_key] = context
 
-    explanation = _explain_blame(info, issues, context=context)
+    explanation, ai_degraded = _explain_blame(info, issues, context=context)
     source_ref = _format_source_ref(issues)
     primary_issue = issues[0] if issues else None
     attachments = [
@@ -101,6 +106,7 @@ def analyze_blame(
 
     return {
         "explanation": explanation,
+        "aiDegraded": ai_degraded,
         "commitHash": info.commit_hash,
         "author": info.author,
         "date": info.date,
@@ -225,8 +231,9 @@ def ask_followup(repo_path: str, file_path: str, line: int, question: str) -> st
         return call_bedrock(
             instruction, system=_SYSTEM_PROMPT, context=context, cache=True, max_tokens=300
         ).strip()
-    except Exception:
-        return "[Bedrock 미연동] 후속 질문에 답하려면 AWS Bedrock 자격증명이 필요합니다."
+    except Exception as e:
+        logger.exception("Bedrock 후속 질문 응답 실패 — commit=%s", info.commit_hash[:8] if info.commit_hash else "?")
+        return _degraded_explanation(info, e)
 
 
 def _safe_find_pr(repo_path: str, commit_hash: str) -> PullRequest | None:
@@ -391,11 +398,15 @@ def _count_linked_issues(message: str) -> int:
     raise NotImplementedError("이슈 참조 개수 세는 로직을 구현해 주세요")
 
 
-def _explain_blame(info: git.BlameInfo, issues: list[Issue], *, context: str | None = None) -> str:
+def _explain_blame(
+    info: git.BlameInfo, issues: list[Issue], *, context: str | None = None
+) -> tuple[str, bool]:
     """코드 + 커밋 메시지 + 연관 이슈를 Bedrock 에 넣어 변경 사유를 추론한다.
 
+    반환: (설명, degraded). degraded=True 면 Bedrock 호출에 실패해 폴백 문구를 반환한 것이며,
+    호출부(analyze_blame)는 이를 응답의 aiDegraded 로 올려 프론트·DB 캐시가 캐싱을 건너뛰게 한다.
+
     context 를 미리 받으면 _build_context 재호출을 생략한다(프롬프트 캐시 공유).
-    Bedrock 호출이 불가한 환경(자격증명 없음 등)에서는 커밋 메시지를 그대로 반환한다.
     """
     if context is None:
         context = _build_context(info, issues)
@@ -405,12 +416,48 @@ def _explain_blame(info: git.BlameInfo, issues: list[Issue], *, context: str | N
 이슈 본문이나 첨부 라벨에 근거가 있으면 핵심 표현을 큰따옴표("…")로 인용하세요."""
 
     try:
-        return call_bedrock(
+        text = call_bedrock(
             instruction, system=_SYSTEM_PROMPT, context=context, cache=True, max_tokens=300
         ).strip()
-    except Exception:
-        # Bedrock 미설정/호출 실패 시 git 커밋 메시지로 폴백 (개발/테스트용)
-        return f"[Bedrock 미연동] 커밋 메시지: {info.message or '(메시지 없음)'}"
+        return text, False
+    except Exception as e:
+        # 실제 원인을 로그로 남긴다 — 운영 중 "왜 미연동인지"를 알 수 있게.
+        # (이전엔 모든 실패를 동일 문구로 뭉개 진단이 불가능했다.)
+        logger.exception("Bedrock 변경 사유 추론 실패 — commit=%s", info.commit_hash[:8] if info.commit_hash else "?")
+        return _degraded_explanation(info, e), True
+
+
+def _degraded_explanation(info: git.BlameInfo, e: Exception) -> str:
+    """Bedrock 호출 실패 시 사용자에게 보일 원인별 안내 문구.
+
+    가능하면 실패 원인(세션 토큰 만료/권한/쓰로틀링 등)을 구분해, 다음 행동을 알려준다.
+    이 문구는 degraded 응답이라 캐싱되지 않으므로, 원인이 해소되면 다음 분석에서 자동 회복된다.
+    """
+    code = ""
+    if isinstance(e, ClientError):
+        code = e.response.get("Error", {}).get("Code", "")
+
+    cause = _BEDROCK_ERROR_HINTS.get(code)
+    if cause is None and isinstance(e, BotoCoreError):
+        # 자격증명 자체를 못 찾은 경우(NoCredentialsError 등)
+        cause = "AWS 자격증명을 찾지 못했어요. backend/.env 의 AWS 키를 확인하고 백엔드를 재시작해 주세요."
+    if cause is None:
+        cause = "AI 설명 생성에 실패했어요. 백엔드 로그에서 자세한 원인을 확인할 수 있습니다."
+
+    return f"AI 설명을 표시하지 못했습니다 — {cause}"
+
+
+# Bedrock(boto3) 오류 코드 → 사용자 안내. 코드는 ClientError.response['Error']['Code'].
+_BEDROCK_ERROR_HINTS: dict[str, str] = {
+    "ExpiredTokenException": "AWS 세션 토큰이 만료됐어요. 자격증명을 갱신하고 백엔드를 재시작해 주세요.",
+    "ExpiredToken": "AWS 세션 토큰이 만료됐어요. 자격증명을 갱신하고 백엔드를 재시작해 주세요.",
+    "UnrecognizedClientException": "AWS 자격증명이 올바르지 않습니다. 액세스 키/시크릿을 확인해 주세요.",
+    "InvalidSignatureException": "AWS 자격증명 서명이 올바르지 않습니다. 키 값을 확인해 주세요.",
+    "AccessDeniedException": "이 Bedrock 모델에 대한 접근 권한이 없습니다. 모델 액세스/IAM 권한을 확인해 주세요.",
+    "ThrottlingException": "Bedrock 요청이 일시적으로 제한됐어요. 잠시 후 다시 시도해 주세요.",
+    "ValidationException": "Bedrock 요청이 거부됐어요(모델 ID/리전 확인 필요).",
+    "ResourceNotFoundException": "Bedrock 모델을 찾지 못했어요. BEDROCK_MODEL_ID 와 리전을 확인해 주세요.",
+}
 
 
 def _suggest_improvement(info: git.BlameInfo, issues: list[Issue], *, context: str | None = None) -> str | None:

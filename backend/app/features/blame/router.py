@@ -88,7 +88,8 @@ async def context_blame(req: BlameRequest, db: AsyncSession = Depends(get_db)):
         logger.exception("context blame 분석 실패 — repo=%s file=%s line=%s", req.repoPath, req.filePath, req.line)
         raise HTTPException(status_code=500, detail=f"context blame 실패: {e}")
 
-    if commit is not None and file is not None:
+    # degraded(=Bedrock 폴백) 결과는 캐싱하지 않는다 — 원인 해소 후 다음 요청에서 자동 회복되도록.
+    if commit is not None and file is not None and not result.get("aiDegraded"):
         try:
             await crud.save_blame(db, file.id, commit.id, result)
         except Exception:

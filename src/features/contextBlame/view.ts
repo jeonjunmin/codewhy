@@ -4,7 +4,7 @@ import { EditorContext, getEditorContext } from '../../shared/editor';
 import { BlameResult, CommitInput } from '../../shared/types';
 import { fetchRequirementTrace } from '../requirementTrace/api';
 import { streamTimelineSummary } from '../timelineSummary/api';
-import { askBlame, fetchContextBlame } from './api';
+import { fetchContextBlame } from './api';
 import { ContextBlameSidebarProvider, VIEW_ID } from './sidebar';
 
 /**
@@ -80,19 +80,14 @@ function ensureInitialized(context: vscode.ExtensionContext) {
 
     // ── 사이드바 Provider 등록 ─────────────────────────────────────
     sidebar = new ContextBlameSidebarProvider(context.extensionUri, {
-        onOpenSpec: (sourceRef, issueUrl) => openSpecDocument(sourceRef, issueUrl),
         onOpenCommit: (commitHash, repoPath) =>
             vscode.commands.executeCommand('codewhy.blame.openCommit', { commitHash, repoPath }),
-        onOpenHistory: () => vscode.commands.executeCommand('codewhy.timelineSummary'),
         onSwitchTab: (tab) => handleSwitchTab(tab),
         onOpenIssue: (url) => { vscode.env.openExternal(vscode.Uri.parse(url)); },
         onTogglePin: (filePath, line) =>
             vscode.commands.executeCommand('codewhy.blame.pin', { filePath, line }),
-        onAskAi: (question, ctx, result) => handleAskAi(question, ctx, result),
-        onCopy: (text) => {
-            vscode.env.clipboard.writeText(text);
-            vscode.window.setStatusBarMessage('CodeWhy: 카드 내용을 클립보드에 복사했어요.', 2000);
-        },
+        onOpenSettings: () =>
+            vscode.commands.executeCommand('workbench.action.openSettings', 'codewhy'),
     });
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(VIEW_ID, sidebar, {
@@ -196,7 +191,9 @@ async function handleAnalyzeAndShow(args: { filePath: string; line: number; repo
                 try {
                     const result = await fetchContextBlame(args);
                     entry = { ctx: args, result };
-                    blameCache.set(key, entry);
+                    // degraded(Bedrock 폴백) 응답은 일시적 실패이므로 캐싱하지 않는다.
+                    // 이번엔 사용자에게 보여주되, 다음 분석 때 다시 호출해 자동 회복되게 한다.
+                    if (!result.aiDegraded) { blameCache.set(key, entry); }
                 } catch (err) {
                     vscode.window.showErrorMessage(`Context Blame 실패: ${(err as Error).message}`);
                 }
@@ -383,72 +380,6 @@ function refreshPinnedDecorations(editor: vscode.TextEditor) {
         });
     }
     editor.setDecorations(pinDecoration, decorations);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 5. AI 후속 질문 — 사이드바 인풋에서 Enter 친 경우
-// ─────────────────────────────────────────────────────────────────────────────
-// ─────────────────────────────────────────────────────────────────────────────
-// 5-b. 출처 열기 — 우선순위:
-//      (1) issueUrl 이 있으면 연관 GitHub Issue 페이지를 브라우저로 연다
-//      (2) sourceRef 에서 로컬 기획서 파일명을 뽑을 수 있으면 documentPaths 에서 찾아 연다
-//      (3) 둘 다 실패하면 요구사항 역추적으로 폴백
-// ─────────────────────────────────────────────────────────────────────────────
-async function openSpecDocument(sourceRef: string | null, issueUrl: string | null) {
-    if (issueUrl) {
-        await vscode.env.openExternal(vscode.Uri.parse(issueUrl));
-        return;
-    }
-    const fileName = extractSpecFileName(sourceRef);
-    if (fileName) {
-        const uri = await findDocumentUri(fileName);
-        if (uri) {
-            await vscode.commands.executeCommand('vscode.open', uri);
-            if (/§/.test(sourceRef ?? '')) {
-                vscode.window.setStatusBarMessage(`CodeWhy: ${sourceRef} 로 이동했어요 (섹션은 문서에서 확인).`, 4000);
-            }
-            return;
-        }
-        vscode.window.showWarningMessage(
-            `CodeWhy: "${fileName}" 문서를 documentPaths 설정에서 찾지 못했어요. 요구사항 역추적으로 대신 검색합니다.`,
-        );
-    }
-    // 파일명을 못 뽑았거나 문서를 못 찾으면 기존 요구사항 역추적으로 폴백
-    vscode.commands.executeCommand('codewhy.requirementTrace');
-}
-
-/** "2026_결제_기획서.pdf §4.2" → "2026_결제_기획서.pdf" */
-function extractSpecFileName(sourceRef: string | null): string | null {
-    if (!sourceRef) { return null; }
-    const m = sourceRef.match(/[^\s§]+\.(pdf|docx|xlsx|md|txt)/i);
-    return m ? m[0] : null;
-}
-
-/** documentPaths 설정의 폴더들에서 파일명이 일치하는 문서를 찾는다. */
-async function findDocumentUri(fileName: string): Promise<vscode.Uri | undefined> {
-    const folders = vscode.workspace.getConfiguration('codewhy').get<string[]>('documentPaths') ?? [];
-    for (const folder of folders) {
-        const pattern = new vscode.RelativePattern(folder, `**/${fileName}`);
-        const hits = await vscode.workspace.findFiles(pattern, undefined, 1);
-        if (hits.length) { return hits[0]; }
-    }
-    return undefined;
-}
-
-async function handleAskAi(question: string, ctx: EditorContext, _result: BlameResult) {
-    if (!sidebar) { return; }
-    sidebar.showAnswer(question, '…'); // 즉시 질문 버블 + 로딩 표시
-    try {
-        const { answer } = await askBlame({
-            filePath: ctx.filePath,
-            line: ctx.line,
-            repoPath: ctx.repoPath,
-            question,
-        });
-        sidebar.showAnswer(question, answer);
-    } catch (err) {
-        sidebar.showAnswer(question, `답변을 가져오지 못했어요: ${(err as Error).message}`);
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

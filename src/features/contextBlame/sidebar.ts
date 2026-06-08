@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { EditorContext } from '../../shared/editor';
 import { log } from '../../shared/log';
-import { BlameResult, RelatedChange, TimelineResult, TraceResult } from '../../shared/types';
+import { BlameResult, TimelineResult, TraceResult } from '../../shared/types';
 
 /**
  * CodeWhy 통합 사이드바 — 하나의 WebviewView 안에서 탭으로 세 기능을 전환한다.
@@ -49,14 +49,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     constructor(
         private readonly extensionUri: vscode.Uri,
         private readonly handlers: {
-            onOpenSpec: (sourceRef: string | null, issueUrl: string | null) => void;
             onOpenCommit: (commitHash: string, repoPath: string) => void;
-            onOpenHistory: () => void;
             onSwitchTab: (tab: string) => void;
             onOpenIssue: (url: string) => void;
             onTogglePin: (filePath: string, line: number) => void;
-            onAskAi: (question: string, ctx: EditorContext, result: BlameResult) => void;
-            onCopy: (text: string) => void;
+            onOpenSettings: () => void;
         },
     ) {}
 
@@ -128,11 +125,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         if (!this.last || !this.view) { return; }
         this.last.pinned = pinned;
         this.view.webview.postMessage({ type: 'pinned', pinned });
-    }
-
-    /** "AI에게 더 묻기" 답변을 질문 버블과 함께 표시. answer='…' 면 로딩 상태. */
-    showAnswer(question: string, answer: string) {
-        this.view?.webview.postMessage({ type: 'answer', payload: { question, answer } });
     }
 
     // ─── 타임라인 탭 (개발자 B) ───────────────────────────────────────────
@@ -233,15 +225,14 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             }
             return;
         }
+        // 헤더 ⚙ 설정 — 블레임 결과 없이도 동작한다.
+        if (msg.type === 'openSettings') {
+            this.handlers.onOpenSettings();
+            return;
+        }
         if (!this.last) { return; }
         const { ctx, result } = this.last;
         switch (msg.type) {
-            case 'openSpec':
-                this.handlers.onOpenSpec(
-                    result.sourceRef ?? result.specRef ?? null,
-                    result.issueUrl ?? null,
-                );
-                break;
             case 'openCommit':
                 this.handlers.onOpenCommit(result.commitHash, ctx.repoPath);
                 break;
@@ -250,19 +241,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
                     this.handlers.onOpenCommit(msg.payload.hash, ctx.repoPath);
                 }
                 break;
-            case 'openHistory':
-                this.handlers.onOpenHistory();
-                break;
             case 'togglePin':
                 this.handlers.onTogglePin(ctx.filePath, ctx.line);
-                break;
-            case 'askAi':
-                if (typeof msg.payload?.question === 'string' && msg.payload.question.trim()) {
-                    this.handlers.onAskAi(msg.payload.question.trim(), ctx, result);
-                }
-                break;
-            case 'copy':
-                this.handlers.onCopy(plainTextOf(ctx, result));
                 break;
         }
     }
@@ -288,20 +268,18 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         const payload = {
             fileName,
             line: ctx.line,
-            narrative: formatNarrative(r),
+            explanation: (r.explanation ?? '').trim(),
             author: r.author,
             team: r.team,
             commitShort: (r.commitHash || '').slice(0, 7),
             ticket: r.ticket,
-            date: formatDisplayDate(r.date),
+            dateShort: formatDisplayDate(r.date),   // "3월 15일" — 콜아웃 문장용
+            dateFull: formatISODate(r.date),         // "2026-03-15" — 메타 표용
             relative: formatRelativeKo(r.date),
             changeStats: r.changeStats,
             prInfo: r.prInfo,
             sourceRef: r.sourceRef ?? r.specRef ?? null,
-            specRef: r.specRef,
-            related: r.relatedChanges ?? [],
             lineHistory: r.lineHistory ?? [],
-            aiSuggestion: r.aiSuggestion ?? null,
             pinned,
         };
         this.view?.webview.postMessage({ type: 'render', payload });
@@ -439,6 +417,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .callout__body {
         color: var(--fg); font-size: 13px; line-height: 1.6;
     }
+    .callout__body .ca-author { color: var(--accent-violet); font-weight: 700; }
     .callout__body code {
         background: var(--code-bg); color: var(--code-fg);
         padding: 1px 5px; border-radius: 4px; font-size: 11.5px;
@@ -473,12 +452,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .meta dd { margin: 0; color: var(--fg-dim); }
     .meta dd strong { color: var(--fg); font-weight: 600; }
     .meta .author { display: inline-flex; align-items: center; gap: 6px; }
-    .meta .avatar {
-        width: 18px; height: 18px; border-radius: 50%;
-        background: #DC2626; color: #fff;
-        display: inline-flex; align-items: center; justify-content: center;
-        font-size: 10px; font-weight: 700;
-    }
     .meta a, .meta .link {
         color: var(--fg-dim); text-decoration: none; cursor: pointer;
     }
@@ -492,24 +465,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         margin-bottom: 8px;
     }
     .related__list { display: flex; flex-direction: column; gap: 6px; }
-    .rel-item {
-        display: flex; gap: 10px; align-items: flex-start;
-        padding: 8px 10px;
-        background: var(--surface);
-        border: 1px solid var(--line);
-        border-radius: 8px;
-    }
-    .rel-item__icon {
-        width: 24px; height: 24px; flex-shrink: 0;
-        display: inline-flex; align-items: center; justify-content: center;
-        background: var(--line); border-radius: 6px;
-        color: var(--fg-dim);
-    }
-    .rel-item__text { min-width: 0; }
-    .rel-item__title { color: var(--fg); font-size: 12px; font-weight: 500; }
-    .rel-item__meta { color: var(--fg-mute); font-size: 11px; margin-top: 2px; }
 
-    /* ── 라인 수정 이력 (하단) ───────────────────────────────────── */
+    /* ── 라인 수정 이력 ──────────────────────────────────────────── */
     .history__title {
         color: var(--fg-mute); font-size: 11px; font-weight: 600;
         margin-bottom: 10px;
@@ -566,90 +523,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
     .hist-item__issues .ico { display: inline-flex; opacity: 0.8; }
 
-    /* ── AI 에게 더 묻기 ─────────────────────────────────────────── */
-    .ask {
-        display: flex; align-items: center; gap: 8px;
-        padding: 9px 12px;
-        background: var(--surface);
-        border: 1px solid var(--line);
-        border-radius: 9px;
-    }
-    .ask__icon { color: var(--accent-violet); display: inline-flex; flex-shrink: 0; }
-    .ask__label { color: var(--fg-mute); font-size: 11.5px; flex-shrink: 0; }
-    .ask__input {
-        flex: 1; min-width: 0;
-        background: transparent; border: none; outline: none;
-        color: var(--fg); font-size: 12px;
-        font-family: inherit;
-    }
-    .ask__input::placeholder { color: var(--fg-mute); font-style: italic; }
-
-    /* ── AI 질문/답변 스레드 ─────────────────────────────────────── */
-    .ask-thread { display: flex; flex-direction: column; gap: 8px; }
-    .qa { display: flex; flex-direction: column; gap: 4px; }
-    .qa__q {
-        align-self: flex-end; max-width: 90%;
-        background: var(--line); color: var(--fg);
-        padding: 6px 10px; border-radius: 9px 9px 2px 9px;
-        font-size: 12px;
-    }
-    .qa__a {
-        align-self: flex-start; max-width: 95%;
-        background: var(--callout-bg); color: var(--fg);
-        border: 1px solid var(--line-soft);
-        padding: 8px 11px; border-radius: 9px 9px 9px 2px;
-        font-size: 12.5px; line-height: 1.55;
-    }
-    .qa__a code {
-        background: var(--code-bg); color: var(--code-fg);
-        padding: 1px 5px; border-radius: 4px; font-size: 11.5px;
-    }
-    .qa__a.loading { color: var(--fg-mute); font-style: italic; }
-
-    /* ── 푸터: CTA + 보조 액션 ───────────────────────────────────── */
-    .footer { display: flex; gap: 6px; align-items: stretch; }
-    .cta {
-        flex: 1;
-        display: inline-flex; align-items: center; gap: 8px; justify-content: flex-start;
-        padding: 10px 12px;
-        background: var(--grad);
-        color: #fff; border: none; border-radius: 9px;
-        font-size: 12.5px; font-weight: 600;
-        cursor: pointer; font-family: inherit;
-        transition: filter 0.12s;
-    }
-    .cta:hover { filter: brightness(1.12); }
-    .ghost-btn {
-        background: var(--surface); border: 1px solid var(--line);
-        color: var(--fg-dim);
-        padding: 0 10px; border-radius: 9px;
-        cursor: pointer;
-        display: inline-flex; align-items: center; justify-content: center;
-        transition: background 0.12s, color 0.12s;
-    }
-    .ghost-btn:hover { background: var(--line); color: var(--fg); }
-
     /* ── 작은 보조 ───────────────────────────────────────────────── */
     .hidden { display: none !important; }
-    .ai-suggest {
-        background: var(--surface-2);
-        border: 1px solid var(--line);
-        border-radius: 9px;
-        padding: 9px 11px;
-        font-size: 11.5px; color: #D4D4D8;
-    }
-    .ai-suggest__title {
-        display: inline-flex; align-items: center; gap: 5px;
-        color: var(--accent-cyan); font-weight: 600;
-        margin-bottom: 4px;
-    }
 
     /* ── 탭 페인 ─────────────────────────────────────────────────── */
     .pane.hidden { display: none !important; }
-    .pane-actions {
-        display: flex; justify-content: flex-end; gap: 2px;
-        margin: -4px -4px 0 0;
-    }
 
     /* ── 타임라인 페인 ───────────────────────────────────────────── */
     .file-chip {
@@ -723,6 +601,13 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
 </style>
 </head>
 <body>
+    <header class="head">
+        <span class="head__title"><span class="spark" id="ico-head-spark"></span>CONTEXT BLAME</span>
+        <div class="head__actions">
+            <button class="icon-btn" id="btn-pin" data-action="togglePin" title="이 라인 고정"></button>
+            <button class="icon-btn" id="btn-settings" data-action="openSettings" title="CodeWhy 설정"><span id="ico-settings"></span></button>
+        </div>
+    </header>
     <nav class="tabs">
         <button class="tab active" data-tab="blame"><span class="tab__ico" id="ico-tab-blame"></span>블레임</button>
         <button class="tab" data-tab="timeline"><span class="tab__ico" id="ico-tab-timeline"></span>타임라인</button>
@@ -741,10 +626,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div id="content" class="body hidden">
-        <div class="pane-actions">
-            <button class="icon-btn" id="btn-pin" data-action="togglePin" title="이 라인 고정"></button>
-            <button class="icon-btn" id="btn-copy" data-action="copy" title="내용 복사"></button>
-        </div>
         <section class="callout">
             <div class="callout__title">
                 <span id="ico-callout"></span> 이 라인이 추가된 이유
@@ -761,38 +642,12 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         </div>
 
         <dl class="meta">
-            <dt>작성자</dt><dd class="author"><span class="avatar" id="author-initial"></span><strong id="author-name"></strong><span id="author-team-wrap" class="hidden">&nbsp;·&nbsp;<span id="author-team"></span></span></dd>
+            <dt>작성자</dt><dd class="author"><strong id="author-name"></strong><span id="author-team-wrap" class="hidden">&nbsp;·&nbsp;<span id="author-team"></span></span></dd>
             <dt>커밋</dt><dd><a class="link mono" id="meta-commit" data-action="openCommit"></a><span id="meta-ticket-wrap" class="hidden"> — <span class="ticket" id="meta-ticket"></span></span></dd>
             <dt>날짜</dt><dd><span id="meta-date"></span><span id="meta-relative-wrap" class="hidden"> <span style="color:var(--fg-mute)">(<span id="meta-relative"></span>)</span></span></dd>
             <dt>변경</dt><dd id="meta-change">—</dd>
             <dt>출처</dt><dd id="meta-source">—</dd>
         </dl>
-
-        <section id="related-wrap" class="hidden">
-            <div class="related__title">이 변경과 함께 일어난 일</div>
-            <div class="related__list" id="related-list"></div>
-        </section>
-
-        <div id="ai-suggest" class="ai-suggest hidden">
-            <div class="ai-suggest__title"><span id="ico-ai"></span> AI 추론</div>
-            <div id="ai-suggest-body"></div>
-        </div>
-
-        <div class="ask">
-            <span class="ask__icon" id="ico-ask"></span>
-            <span class="ask__label">AI에게 더 묻기 —</span>
-            <input class="ask__input" id="ask-input" type="text" placeholder='"왜 4%가 아닌 3%일까?"' />
-        </div>
-
-        <div id="ask-thread" class="ask-thread hidden"></div>
-
-        <div class="footer">
-            <button class="cta" data-action="openSpec">
-                <span id="ico-cta"></span><span id="cta-label">기획서 열기</span>
-            </button>
-            <button class="ghost-btn" data-action="openCommit" title="커밋 보기" id="ico-commit-btn"></button>
-            <button class="ghost-btn" data-action="openHistory" title="히스토리">⋯</button>
-        </div>
 
         <section id="history-wrap" class="hidden">
             <div class="history__title">라인 수정 이력</div>
@@ -852,16 +707,14 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         commit: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="2.5"/><path d="M0 8h5M11 8h5"/></svg>',
         clock:  '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="8" cy="8" r="6.5"/><path d="M8 4.5V8l2.5 1.5"/></svg>',
         issue:  '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="6.5"/><circle cx="8" cy="8" r="1.6" fill="currentColor" stroke="none"/></svg>',
+        gear:   '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="8" cy="8" r="2.2"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M13 3l-1.5 1.5M4.5 11.5L3 13"/></svg>',
     };
     // 아이콘 주입은 보조 장식이므로, 한 요소가 없더라도 핸드셰이크(ready)까지 죽지 않게 격리한다.
     try {
         const setIcon = (id, svg) => { const el = document.getElementById(id); if (el) { el.innerHTML = svg; } };
-        setIcon('ico-spark', ICON.spark);
+        setIcon('ico-head-spark', ICON.spark);
+        setIcon('ico-settings', ICON.gear);
         setIcon('ico-callout', ICON.spark);
-        setIcon('ico-ai', ICON.spark);
-        setIcon('ico-ask', ICON.spark);
-        setIcon('ico-cta', ICON.doc);
-        setIcon('ico-commit-btn', ICON.branch);
         setIcon('ico-info', ICON.spark);
         setIcon('ico-tab-blame', ICON.doc);
         setIcon('ico-tab-timeline', ICON.clock);
@@ -885,7 +738,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
                 document.getElementById('content').classList.add('hidden');
                 break;
             case 'pinned': setPin(msg.pinned); break;
-            case 'answer': renderAnswer(msg.payload); break;
             // ── 탭 전환(확장 → 웹뷰) ──
             case 'activateTab': showTab(msg.payload.tab); break;
             // ── 타임라인 ──
@@ -1011,34 +863,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         return el;
     }
 
-    let pendingAnswerEl = null;
-    function renderAnswer(p) {
-        const thread = document.getElementById('ask-thread');
-        thread.classList.remove('hidden');
-        const loading = p.answer === '…';
-        if (loading || !pendingAnswerEl) {
-            // 새 질문 → 질문/답변 버블 한 쌍 추가
-            const qa = document.createElement('div');
-            qa.className = 'qa';
-            const q = document.createElement('div');
-            q.className = 'qa__q';
-            q.textContent = p.question;
-            const a = document.createElement('div');
-            a.className = 'qa__a' + (loading ? ' loading' : '');
-            if (loading) { a.textContent = '답변 작성 중…'; } else { a.innerHTML = decorate(p.answer); }
-            qa.appendChild(q);
-            qa.appendChild(a);
-            thread.appendChild(qa);
-            pendingAnswerEl = loading ? a : null;
-        } else {
-            // 직전 로딩 버블을 실제 답변으로 교체
-            pendingAnswerEl.classList.remove('loading');
-            pendingAnswerEl.innerHTML = decorate(p.answer);
-            pendingAnswerEl = null;
-        }
-        thread.lastElementChild.scrollIntoView({ block: 'nearest' });
-    }
-
     function setPin(pinned) {
         const btn = document.getElementById('btn-pin');
         btn.innerHTML = pinned ? ICON.pinOn : ICON.pinOff;
@@ -1059,13 +883,20 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         document.getElementById('info').classList.add('hidden');
         document.getElementById('content').classList.remove('hidden');
 
-        document.getElementById('narrative').innerHTML = decorate(p.narrative);
+        // 콜아웃 본문 — "{작성자}님이 {월일}에 {설명}" 한 문장. 작성자만 보라색 강조.
+        // author/dateShort 가 없으면 설명만 노출한다.
+        const calloutEl = document.getElementById('narrative');
+        if (p.author && p.dateShort) {
+            calloutEl.innerHTML = '<span class="ca-author"></span>님이 ' + decorate(p.dateShort) + '에 ' + decorate(p.explanation || '');
+            calloutEl.querySelector('.ca-author').textContent = p.author;
+        } else {
+            calloutEl.innerHTML = decorate(p.explanation || '변경 사유를 분석할 수 없습니다.');
+        }
+
         document.getElementById('file-name').textContent = p.fileName;
         document.getElementById('file-line').textContent = 'L' + p.line;
         document.getElementById('file-kind').textContent = fileKind(p.fileName);
 
-        const initial = (p.author || '?').charAt(0);
-        document.getElementById('author-initial').textContent = initial;
         document.getElementById('author-name').textContent = p.author || '?';
         toggle('author-team-wrap', !!p.team);
         if (p.team) document.getElementById('author-team').textContent = p.team;
@@ -1074,7 +905,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         toggle('meta-ticket-wrap', !!p.ticket);
         if (p.ticket) document.getElementById('meta-ticket').textContent = p.ticket;
 
-        document.getElementById('meta-date').textContent = p.date || '—';
+        document.getElementById('meta-date').textContent = p.dateFull || '—';
         toggle('meta-relative-wrap', !!p.relative);
         if (p.relative) document.getElementById('meta-relative').textContent = p.relative;
 
@@ -1082,26 +913,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         document.getElementById('meta-change').textContent = change || '—';
 
         document.getElementById('meta-source').textContent = p.sourceRef || '—';
-
-        // related
-        const wrap = document.getElementById('related-wrap');
-        const list = document.getElementById('related-list');
-        list.innerHTML = '';
-        if (p.related && p.related.length) {
-            wrap.classList.remove('hidden');
-            p.related.forEach(r => list.appendChild(renderRelated(r)));
-        } else {
-            wrap.classList.add('hidden');
-        }
-
-        // ai suggestion
-        const aiWrap = document.getElementById('ai-suggest');
-        if (p.aiSuggestion) {
-            aiWrap.classList.remove('hidden');
-            document.getElementById('ai-suggest-body').textContent = p.aiSuggestion;
-        } else {
-            aiWrap.classList.add('hidden');
-        }
 
         // 라인 수정 이력
         const histWrap = document.getElementById('history-wrap');
@@ -1114,31 +925,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             histWrap.classList.add('hidden');
         }
 
-        // cta label
-        document.getElementById('cta-label').textContent = (p.specRef || '기획서') + ' 열기';
-
-        // 라인이 바뀌면 이전 Q&A 스레드는 초기화
-        const thread = document.getElementById('ask-thread');
-        thread.innerHTML = '';
-        thread.classList.add('hidden');
-        pendingAnswerEl = null;
-
         setPin(!!p.pinned);
-    }
-
-    function renderRelated(r) {
-        const el = document.createElement('div');
-        el.className = 'rel-item';
-        const icon = r.kind === 'doc' ? ICON.doc : r.kind === 'branch' ? ICON.branch : r.kind === 'security' ? ICON.shield : ICON.commit;
-        el.innerHTML =
-            '<span class="rel-item__icon">' + icon + '</span>' +
-            '<div class="rel-item__text">' +
-                '<div class="rel-item__title"></div>' +
-                '<div class="rel-item__meta"></div>' +
-            '</div>';
-        el.querySelector('.rel-item__title').textContent = r.title;
-        el.querySelector('.rel-item__meta').textContent = r.meta;
-        return el;
     }
 
     // 라인 수정 이력 한 줄 — 클릭하면 해당 커밋을 git show 로 연다.
@@ -1206,17 +993,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         document.getElementById(id).classList.toggle('hidden', !on);
     }
 
-    // ── 인풋: Enter 누르면 AI 질문 발사 ───────────────────────────
-    document.getElementById('ask-input').addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-            const v = e.currentTarget.value;
-            if (v.trim()) {
-                vscode.postMessage({ type: 'askAi', payload: { question: v } });
-                e.currentTarget.value = '';
-            }
-        }
-    });
-
     // ── 공통 탭바: 클릭 시 해당 페인으로 전환 + 확장에 분석 요청 ─────
     const PANES = { blame: 'pane-blame', timeline: 'pane-timeline', issue: 'pane-issue' };
     function showTab(tab) {
@@ -1267,19 +1043,6 @@ function randomNonce(): string {
     return s;
 }
 
-function plainTextOf(ctx: EditorContext, r: BlameResult): string {
-    const file = ctx.filePath.split(/[\\/]/).pop() ?? ctx.filePath;
-    return [
-        `[CodeWhy] ${file} : L${ctx.line}`,
-        formatNarrative(r),
-        r.commitHash ? `commit: ${r.commitHash.slice(0, 7)}` : '',
-        r.ticket ? `ticket: ${r.ticket}` : '',
-        r.specRef ? `spec: ${r.specRef}` : '',
-        r.team ? `team: ${r.team}` : '',
-        r.aiSuggestion ? `AI 추론: ${r.aiSuggestion}` : '',
-    ].filter(Boolean).join('\n');
-}
-
 /**
  * 한글 조사 선택 — 단어의 마지막 글자에 받침(종성)이 있으면 withFinal, 없으면 withoutFinal.
  *
@@ -1297,28 +1060,19 @@ function josa(word: string, withFinal: string, withoutFinal: string): string {
     return (code - 0xac00) % 28 !== 0 ? withFinal : withoutFinal;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 콜아웃 본문 — 메타(작성자·날짜)와 LLM 본문(explanation)을 분리해 어색한 연결을 피한다.
-//
-// 이전 패턴: "홍길동님이 3월 15일에 {explanation}"  ← explanation 이 이미 완결문이라
-//            "3월 15일에 …했습니다" 같이 시간 부사가 완결문을 강제로 받음
-// 새 패턴 : "홍길동 · 3월 15일\n{explanation}"  ← 메타는 한 줄 메타로, 본문은 본문대로
-//
-// 처리 규칙:
-//   · author / date 가 없으면 메타 줄을 통째로 생략하고 explanation 만 노출
-//   · explanation 끝의 마침표 중복은 그대로 둠 (decorate() 가 따옴표만 코드화)
-// ─────────────────────────────────────────────────────────────────────────────
-export function formatNarrative(r: BlameResult): string {
-    const explanation = (r.explanation ?? '').trim() || '변경 사유를 분석할 수 없습니다.';
-    const parts = [r.author, formatDisplayDate(r.date)].filter(Boolean);
-    if (parts.length === 0) { return explanation; }
-    return `${parts.join(' · ')}\n${explanation}`;
-}
-
 function formatDisplayDate(s: string): string {
     const d = parseDateLoose(s);
     if (!d) { return s; }
     return `${d.getMonth() + 1}월 ${d.getDate()}일`;
+}
+
+/** 메타 표의 '날짜' 칸용 — "2026-03-15" ISO 형식. 파싱 실패 시 원본 반환. */
+function formatISODate(s: string): string {
+    const d = parseDateLoose(s);
+    if (!d) { return s; }
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${d.getFullYear()}-${mm}-${dd}`;
 }
 
 function formatRelativeKo(s: string): string {

@@ -14,6 +14,9 @@ export interface BlameRequest {
 
 export interface BlameResult {
     explanation: string;
+    /** explanation 이 Bedrock 추론이 아니라 폴백(호출 실패 등)이면 true.
+     *  true 면 일시적 실패이므로 클라이언트 캐시에 담지 않아 다음 시도에 재호출된다. */
+    aiDegraded?: boolean;
     commitHash: string;
     author: string;
     date: string;

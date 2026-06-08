@@ -59,6 +59,9 @@ class BlameResponse(BaseModel):
     commitHash: str
     author: str
     date: str
+    # explanation 이 Bedrock 추론이 아니라 폴백(호출 실패 등)인지 여부.
+    # True 면 프론트가 이 결과를 캐싱하지 않아 다음 시도에 자동 재호출된다.
+    aiDegraded: bool = False
     # "이름표 대신 사유서" 카드의 칩/AI 추론용 — 백엔드 점진 도입을 위해 옵셔널
     ticket: str | None = None        # 예: "PAY-2041"
     specRef: str | None = None       # 예: "Issue #12: 결제 취소 정책 변경"
