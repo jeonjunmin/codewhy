@@ -103,3 +103,4 @@ VSCode 설정(`settings.json` 또는 설정 UI)에서 조정할 수 있습니다
 ## 📄 라이선스
 
 MIT License
+ 
