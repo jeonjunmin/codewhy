@@ -10,7 +10,9 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -27,7 +29,7 @@
         {
           "type": "webview",
           "id": "codewhy.contextBlame",
-          "name": "Context Blame",
+          "name": "CodeWhy",
           "icon": "images/codewhy-icon.svg",
           "contextualTitle": "CodeWhy"
         }

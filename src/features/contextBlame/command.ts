@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { getEditorContext } from '../../shared/editor';
+import { log } from '../../shared/log';
 import { fetchContextBlame } from './api';
 import { showContextBlameView } from './view';
 
@@ -13,10 +14,13 @@ import { showContextBlameView } from './view';
  * 👤 담당: 개발자 A
  */
 export async function runContextBlame(context: vscode.ExtensionContext) {
+    log('command', 'runContextBlame 호출됨');
     const ctx = getEditorContext();
     if (!ctx) {
+        log('command', 'getEditorContext null — 열린 파일 없음, 중단');
         return;
     }
+    log('command', 'editor ctx', ctx);
 
     await vscode.window.withProgress(
         {
@@ -26,8 +30,10 @@ export async function runContextBlame(context: vscode.ExtensionContext) {
         async () => {
             try {
                 const result = await fetchContextBlame(ctx);
+                log('command', 'fetch 성공 — showContextBlameView 호출', { explanationLen: result.explanation?.length });
                 showContextBlameView(context, ctx, result);
             } catch (err) {
+                log('command', 'fetch 실패', (err as Error).message);
                 vscode.window.showErrorMessage(
                     `Context Blame 실패: ${(err as Error).message}`
                 );

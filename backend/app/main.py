@@ -3,14 +3,19 @@
 import logging
 from contextlib import asynccontextmanager
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+)
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.db.postgres import engine
 from app.features.blame.router import router as blame_router
-from app.features.documents.router import router as documents_router
 from app.features.onboarding.router import router as onboarding_router
+from app.features.project.router import router as project_router
 from app.features.timeline.router import router as timeline_router
 from app.features.traceability.router import router as traceability_router
 
@@ -27,7 +32,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("PostgreSQL 연결 실패 — DATABASE_URL / DB 기동 여부를 확인하세요: %s", e)
 
-    yield  # ── 서버 실행 중 ───────────────────────────────────────────────────
+    yield
 
     await engine.dispose()
 
@@ -46,11 +51,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(blame_router,        prefix="/api/blame",     tags=["Context Blame"])
-app.include_router(timeline_router,     prefix="/api/timeline",  tags=["Timeline Summary"])
-app.include_router(traceability_router, prefix="/api/trace",     tags=["Requirement Trace"])
-app.include_router(documents_router,    prefix="/api/documents", tags=["Documents"])
-app.include_router(onboarding_router,    prefix="/api/onboarding", tags=["Onboarding"])
+app.include_router(blame_router,        prefix="/api/blame",      tags=["Context Blame"])
+app.include_router(timeline_router,     prefix="/api/timeline",   tags=["Timeline Summary"])
+app.include_router(traceability_router, prefix="/api/trace",      tags=["Requirement Trace"])
+app.include_router(onboarding_router,   prefix="/api/onboarding", tags=["Onboarding"])
+app.include_router(project_router,      prefix="/api/v1/project", tags=["Project Initialize"])
 
 
 @app.get("/health")

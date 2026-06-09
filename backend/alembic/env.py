@@ -1,7 +1,7 @@
 """Alembic 마이그레이션 환경 설정.
 
-psycopg2(동기) 드라이버로 RDS에 직접 접속한다.
-asyncpg 드라이버는 앱 런타임 전용이며 alembic 에서는 사용하지 않는다.
+psycopg2(동기) 드라이버로 RDS에 접속한다.
+DATABASE_URL_SYNC 환경변수에서 접속 정보를 읽는다.
 """
 
 from logging.config import fileConfig

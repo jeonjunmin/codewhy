@@ -14,6 +14,9 @@ export interface BlameRequest {
 
 export interface BlameResult {
     explanation: string;
+    /** explanation 이 Bedrock 추론이 아니라 폴백(호출 실패 등)이면 true.
+     *  true 면 일시적 실패이므로 클라이언트 캐시에 담지 않아 다음 시도에 재호출된다. */
+    aiDegraded?: boolean;
     commitHash: string;
     author: string;
     date: string;
@@ -28,10 +31,34 @@ export interface BlameResult {
     changeStats?: { added: number; removed: number };
     /** 같은 PR의 총 라인 수 등 PR 컨텍스트 — "동일 PR 23 라인". */
     prInfo?: { url?: string; lines: number };
-    /** 기획서 원문 위치 — 예: "2026_결제_기획서.pdf §4.2". */
+    /** 요구사항 출처 표시 — 예: "Issue #12: 결제 취소 정책 변경". */
     sourceRef?: string;
+    /** 사이드바 '출처' 클릭 시 외부로 열 이슈 페이지 URL. */
+    issueUrl?: string;
+    /** 연관 이슈 본문에 첨부된 요구사항 문서 링크들. */
+    attachments?: Attachment[];
     /** "이 변경과 함께 일어난 일" 섹션에 들어가는 관련 변경들. */
     relatedChanges?: RelatedChange[];
+    /** 사이드바 하단 "라인 수정 이력" — 이 라인이 실제로 바뀐 커밋들(최신순). */
+    lineHistory?: LineHistoryEntry[];
+}
+
+/**
+ * "라인 수정 이력" 한 행 — 이 라인이 실제로 바뀐 커밋 하나.
+ * 백엔드 schemas.py 의 LineHistoryEntry 와 키가 일치해야 한다.
+ */
+export interface LineHistoryEntry {
+    hash: string;        // 전체 해시 (UI 에서 7자리로 축약)
+    author: string;
+    date: string;        // YYYY-MM-DD
+    subject: string;     // 커밋 제목
+    issueCount: number;  // 참조 이슈 수 — 0 이면 배지 숨김
+}
+
+/** 연관 이슈에 첨부된 요구사항 문서 한 건. */
+export interface Attachment {
+    label: string;
+    url: string;
 }
 
 /**
@@ -40,8 +67,8 @@ export interface BlameResult {
  */
 export interface RelatedChange {
     kind: 'doc' | 'branch' | 'security' | 'commit';
-    title: string;   // 예: "기획서 §4.2 조항 추가"
-    meta: string;    // 예: "PAY-2041 · 김기획" / "+78 라인 · 같은 PR"
+    title: string;   // 예: "Issue #12: 결제 취소 정책 변경" / "auth_service.py 변경"
+    meta: string;    // 예: "Issue #12" / "+78 라인 · 같은 PR"
 }
 
 /** "AI에게 더 묻기" — 현재 라인 블레임 맥락 위에서의 후속 질문. */
@@ -87,17 +114,20 @@ export interface TraceRequest {
     repoPath: string;
 }
 
-/** 문서를 찾아낸 경로 — 신뢰도 표시에 쓴다. ticket=확정, backfill/semantic=추정. */
-export type TraceMatchType = 'ticket' | 'backfill' | 'semantic';
+/**
+ * 문서를 찾아낸 경로 — 신뢰도 표시에 쓴다.
+ *   issue    : PR → Issue 직접 연결 (확정)
+ *   ticket   : 커밋 메시지 티켓 번호로 Issue 매칭 (높음)
+ *   semantic : 커밋 키워드로 관련 Issue 검색 (추정)
+ */
+export type TraceMatchType = 'issue' | 'ticket' | 'semantic';
 
 export interface DocumentMatch {
-    documentId: number;
-    name: string;            // 업로드 원본 파일명
-    page?: number;
-    excerpt?: string;
-    downloadUrl: string;     // /api/documents/{id}/download
+    title: string;           // Issue 제목 또는 첨부 파일명
+    url: string;             // Issue URL 또는 첨부 파일 직접 링크
     matchType?: TraceMatchType;
-    confidence?: number;     // 0~1 (ticket 매칭은 없음)
+    confidence?: number;     // 0~1 (issue 확정 매칭은 없음)
+    excerpt?: string;        // Issue 본문 일부 발췌
 }
 
 export interface TraceResult {

@@ -1,69 +1,123 @@
 import * as vscode from 'vscode';
 import { EditorContext } from '../../shared/editor';
-import { BlameResult, RelatedChange } from '../../shared/types';
+import { log } from '../../shared/log';
+import { BlameResult, TimelineResult, TraceResult } from '../../shared/types';
 
 /**
- * Context Blame 사이드바 — 첨부 디자인의 "CONTEXT BLAME" 패널을 그대로 구현.
+ * CodeWhy 통합 사이드바 — 하나의 WebviewView 안에서 탭으로 세 기능을 전환한다.
  *
- * 구성 (위에서 아래):
- *   ┌ 헤더 (✨ CONTEXT BLAME + 핀/설정 아이콘)
- *   ├ ✨ 이 라인이 추가된 이유 — 보라색 콜아웃
- *   ├ 파일 브레드크럼 (PaymentService.kt › L7)
- *   ├ 메타 테이블 (작성자/커밋/날짜/변경/출처)
- *   ├ 이 변경과 함께 일어난 일 — RelatedChange 목록
- *   ├ AI 에게 더 묻기 — 인풋
- *   └ 기획서 §X.X 열기 — Primary CTA + 보조 액션 ⋯ ⌥
+ *   [블레임] [타임라인] [이슈]   ← 공통 탭바 (맨 위, 컨테이너 타이틀 'CodeWhy' 아래)
+ *
+ *   · 블레임  : 라인 단위 변경 사유 + 메타 + 라인 수정 이력  (개발자 A)
+ *   · 타임라인: 파일 변경 역사 AI 요약 + 마일스톤(스트리밍)   (개발자 B)
+ *   · 이슈    : 현재 라인과 연관된 GitHub Issue 역추적 목록    (개발자 C)
+ *
+ * 세 기능 모두 각자 webview 를 만들지 않고, 이 provider 의 set*() 메서드로
+ * postMessage 데이터만 밀어넣는다. 탭 클릭 시에는 onSwitchTab 으로 확장에 알려
+ * 현재 커서 라인 기준 분석을 자동 실행시킨다.
  *
  * 라이프사이클:
  *   - WebviewView 는 활성화될 때 한 번 resolve 된다.
- *   - 라인 변경마다 setBlame() 으로 postMessage 만 보낸다 — HTML 은 다시 안 그린다.
- *
- * 👤 담당: 개발자 A
+ *   - 상태 변경마다 postMessage 만 보낸다 — HTML 은 다시 안 그린다.
  */
 
 export const VIEW_ID = 'codewhy.contextBlame';
 
+type TimelineState =
+    | { kind: 'streaming'; fileName: string; text: string }
+    | { kind: 'result'; fileName: string; result: TimelineResult }
+    | { kind: 'empty'; message?: string };
+
+type IssueState =
+    | { kind: 'loading' }
+    | { kind: 'result'; line: number; result: TraceResult }
+    | { kind: 'empty'; message?: string };
+
 export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     private view?: vscode.WebviewView;
     private last?: { ctx: EditorContext; result: BlameResult; pinned: boolean };
+    private lastTimeline?: TimelineState;
+    private lastIssue?: IssueState;
+    private activeTab: 'blame' | 'timeline' | 'issue' = 'blame';
+    /**
+     * 웹뷰 스크립트가 message 리스너를 등록하고 'ready' 를 보내올 때까지 false.
+     * html 주입 직후 보낸 postMessage 는 리스너가 붙기 전이라 유실되므로,
+     * ready 이전에는 렌더를 쏘지 않고 this.last 에만 담아 뒀다가 ready 수신 시 flush 한다.
+     */
+    private ready = false;
 
     constructor(
         private readonly extensionUri: vscode.Uri,
         private readonly handlers: {
-            onOpenSpec: (sourceRef: string | null) => void;
             onOpenCommit: (commitHash: string, repoPath: string) => void;
-            onOpenHistory: () => void;
+            onSwitchTab: (tab: string) => void;
+            onOpenIssue: (url: string) => void;
             onTogglePin: (filePath: string, line: number) => void;
-            onAskAi: (question: string, ctx: EditorContext, result: BlameResult) => void;
-            onCopy: (text: string) => void;
+            onOpenSettings: () => void;
         },
     ) {}
 
     resolveWebviewView(view: vscode.WebviewView) {
+        log('sidebar', 'resolveWebviewView 호출됨 — 패널이 펼쳐짐');
         this.view = view;
+        this.ready = false;  // 새 웹뷰 인스턴스 — 스크립트가 'ready' 를 보낼 때까지 대기
         view.webview.options = { enableScripts: true, localResourceRoots: [this.extensionUri] };
+
+        // ⚠️ 메시지 리스너를 html 주입 '전에' 등록한다.
+        // html 을 넣는 순간 웹뷰 스크립트가 실행되며 곧장 'ready' 를 보내는데,
+        // 리스너가 그 뒤에 붙으면(특히 리로드로 웹뷰 프로세스가 warm 할 때) ready 를 놓쳐
+        // flushPending 이 영영 안 돌고 패널이 빈 상태로 멈춘다.
+        view.webview.onDidReceiveMessage(msg => this.handleMessage(msg));
         view.webview.html = this.renderHtml();
 
-        view.webview.onDidReceiveMessage(msg => this.handleMessage(msg));
+        // 웹뷰가 사라지면(탭 닫힘 등) 다음 resolve 가 다시 핸드셰이크하도록 상태 초기화
+        view.onDidDispose(() => {
+            this.view = undefined;
+            this.ready = false;
+        });
 
-        // 사이드바를 다시 열었을 때 마지막 분석 결과 복원
+        // ⚠️ 여기서 곧바로 postMessage 하지 않는다 — 웹뷰 스크립트의 message 리스너가
+        //    아직 등록되기 전이라 유실된다. 실제 렌더는 'ready' 수신 시 flushPending() 에서.
+    }
+
+    /** 웹뷰 스크립트가 'ready' 를 보내오면 각 탭의 마지막 상태를 한 번 그린다. */
+    private flushPending() {
+        // 블레임
         if (this.last) {
             this.postRender(this.last.ctx, this.last.result, this.last.pinned);
         } else {
             this.postEmpty();
+        }
+        // 타임라인 / 이슈 — 마지막 상태가 있으면 복원
+        if (this.lastTimeline) { this.postTimeline(this.lastTimeline); }
+        if (this.lastIssue) { this.postIssue(this.lastIssue); }
+        // 활성 탭 복원 (블레임이 아니면 전환)
+        if (this.activeTab !== 'blame') {
+            this.view?.webview.postMessage({ type: 'activateTab', payload: { tab: this.activeTab } });
         }
     }
 
     /** Context Blame 분석이 끝났을 때 view.ts 에서 호출. */
     setBlame(ctx: EditorContext, result: BlameResult, pinned: boolean) {
         this.last = { ctx, result, pinned };
+        log('sidebar', 'setBlame', { hasView: !!this.view, ready: this.ready });
         if (!this.view) {
             // 사이드바가 아직 안 열려 있으면 강제로 표시한다 — 첫 분석 시 자연스럽게 펼쳐짐
-            vscode.commands.executeCommand(`${VIEW_ID}.focus`);
+            log('sidebar', `view 없음 → ${VIEW_ID}.focus 실행`);
+            vscode.commands.executeCommand(`${VIEW_ID}.focus`).then(
+                () => log('sidebar', 'focus 명령 완료'),
+                (e) => log('sidebar', 'focus 명령 실패', String(e)),
+            );
+            return;
+        }
+        this.view.show?.(true);
+        if (!this.ready) {
+            // 웹뷰 스크립트가 아직 ready 전 — 지금 postMessage 하면 유실될 수 있으니
+            // this.last 에만 담아 두고, ready 수신 시 flushPending() 이 그린다.
+            log('sidebar', 'view 있으나 아직 ready 전 — flushPending 에 위임');
             return;
         }
         this.postRender(ctx, result, pinned);
-        this.view.show?.(true);
     }
 
     /** 핀 토글 시 그라데이션·아이콘만 갱신. */
@@ -73,35 +127,122 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         this.view.webview.postMessage({ type: 'pinned', pinned });
     }
 
-    /** "AI에게 더 묻기" 답변을 질문 버블과 함께 표시. answer='…' 면 로딩 상태. */
-    showAnswer(question: string, answer: string) {
-        this.view?.webview.postMessage({ type: 'answer', payload: { question, answer } });
+    // ─── 타임라인 탭 (개발자 B) ───────────────────────────────────────────
+    /** 확장 측에서 특정 탭을 띄우고 싶을 때(패널 강제 표시 포함). */
+    activateTab(tab: 'blame' | 'timeline' | 'issue') {
+        this.activeTab = tab;
+        if (!this.view) {
+            vscode.commands.executeCommand(`${VIEW_ID}.focus`);
+            return;
+        }
+        this.view.show?.(true);
+        if (this.ready) {
+            this.view.webview.postMessage({ type: 'activateTab', payload: { tab } });
+        }
+    }
+
+    timelineStreaming(fileName: string) {
+        this.lastTimeline = { kind: 'streaming', fileName, text: '' };
+        this.postTimeline(this.lastTimeline);
+    }
+    timelineDelta(delta: string) {
+        if (this.lastTimeline?.kind === 'streaming') { this.lastTimeline.text += delta; }
+        this.view?.webview.postMessage({ type: 'tlDelta', payload: { delta } });
+    }
+    timelineResult(fileName: string, result: TimelineResult) {
+        this.lastTimeline = { kind: 'result', fileName, result };
+        this.postTimeline(this.lastTimeline);
+    }
+    timelineEmpty(message?: string) {
+        this.lastTimeline = { kind: 'empty', message };
+        this.postTimeline(this.lastTimeline);
+    }
+
+    private postTimeline(s: TimelineState) {
+        const wv = this.view?.webview;
+        if (!wv || !this.ready) { return; }
+        if (s.kind === 'streaming') {
+            wv.postMessage({ type: 'tlStreaming', payload: { fileName: s.fileName, text: s.text } });
+        } else if (s.kind === 'result') {
+            wv.postMessage({ type: 'tlResult', payload: { fileName: s.fileName, summary: s.result.summary, milestones: s.result.milestones } });
+        } else {
+            wv.postMessage({ type: 'tlEmpty', payload: { message: s.message } });
+        }
+    }
+
+    // ─── 이슈 탭 (개발자 C) ───────────────────────────────────────────────
+    issueLoading() {
+        this.lastIssue = { kind: 'loading' };
+        this.postIssue(this.lastIssue);
+    }
+    issueResult(line: number, result: TraceResult) {
+        this.lastIssue = { kind: 'result', line, result };
+        this.postIssue(this.lastIssue);
+    }
+    issueEmpty(message?: string) {
+        this.lastIssue = { kind: 'empty', message };
+        this.postIssue(this.lastIssue);
+    }
+
+    private postIssue(s: IssueState) {
+        const wv = this.view?.webview;
+        if (!wv || !this.ready) { return; }
+        if (s.kind === 'loading') {
+            wv.postMessage({ type: 'isLoading' });
+        } else if (s.kind === 'result') {
+            wv.postMessage({ type: 'isResult', payload: { line: s.line, documents: s.result.documents } });
+        } else {
+            wv.postMessage({ type: 'isEmpty', payload: { message: s.message } });
+        }
     }
 
     // ─── 메시지 라우팅 ────────────────────────────────────────────────────
     private handleMessage(msg: { type: string; payload?: any }) {
+        // 'ready' 는 분석 결과(this.last) 유무와 무관하게 항상 먼저 처리한다.
+        if (msg.type === 'ready') {
+            log('sidebar', 'webview ready 수신 → flushPending', { hasLast: !!this.last });
+            this.ready = true;
+            this.flushPending();
+            return;
+        }
+        if (msg.type === 'webview-error') {
+            log('sidebar', '⚠️ webview 스크립트 오류', msg.payload);
+            return;
+        }
+        // 탭 전환은 분석 결과(this.last) 없이도 동작해야 한다 — 탭바는 항상 떠 있다.
+        if (msg.type === 'switchTab') {
+            const tab = msg.payload?.tab;
+            if (tab === 'blame' || tab === 'timeline' || tab === 'issue') {
+                this.activeTab = tab;
+                this.handlers.onSwitchTab(tab);
+            }
+            return;
+        }
+        // 이슈 항목 클릭도 블레임 결과와 무관하게 동작해야 한다.
+        if (msg.type === 'openIssue') {
+            if (typeof msg.payload?.url === 'string' && msg.payload.url) {
+                this.handlers.onOpenIssue(msg.payload.url);
+            }
+            return;
+        }
+        // 헤더 ⚙ 설정 — 블레임 결과 없이도 동작한다.
+        if (msg.type === 'openSettings') {
+            this.handlers.onOpenSettings();
+            return;
+        }
         if (!this.last) { return; }
         const { ctx, result } = this.last;
         switch (msg.type) {
-            case 'openSpec':
-                this.handlers.onOpenSpec(result.sourceRef ?? result.specRef ?? null);
-                break;
             case 'openCommit':
                 this.handlers.onOpenCommit(result.commitHash, ctx.repoPath);
                 break;
-            case 'openHistory':
-                this.handlers.onOpenHistory();
+            case 'openCommitHash':
+                if (typeof msg.payload?.hash === 'string' && msg.payload.hash) {
+                    this.handlers.onOpenCommit(msg.payload.hash, ctx.repoPath);
+                }
                 break;
             case 'togglePin':
                 this.handlers.onTogglePin(ctx.filePath, ctx.line);
-                break;
-            case 'askAi':
-                if (typeof msg.payload?.question === 'string' && msg.payload.question.trim()) {
-                    this.handlers.onAskAi(msg.payload.question.trim(), ctx, result);
-                }
-                break;
-            case 'copy':
-                this.handlers.onCopy(plainTextOf(ctx, result));
                 break;
         }
     }
@@ -112,23 +253,33 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private postRender(ctx: EditorContext, r: BlameResult, pinned: boolean) {
+        // commitHash 가 비면 분석할 커밋 이력이 없는 경우(미커밋 라인 등) — 백엔드의
+        // uncommitted_response. 메타/관련변경/CTA 는 채울 게 없으므로 안내 문구만 표시한다.
+        if (!r.commitHash) {
+            log('sidebar', 'commitHash 없음 → info 안내 상태로 렌더');
+            this.view?.webview.postMessage({
+                type: 'info',
+                payload: { message: r.explanation || '이 라인의 변경 이력을 찾을 수 없습니다.' },
+            });
+            return;
+        }
+
         const fileName = ctx.filePath.split(/[\\/]/).pop() ?? ctx.filePath;
         const payload = {
             fileName,
             line: ctx.line,
-            narrative: formatNarrative(r),
+            explanation: (r.explanation ?? '').trim(),
             author: r.author,
             team: r.team,
             commitShort: (r.commitHash || '').slice(0, 7),
             ticket: r.ticket,
-            date: formatDisplayDate(r.date),
+            dateShort: formatDisplayDate(r.date),   // "3월 15일" — 콜아웃 문장용
+            dateFull: formatISODate(r.date),         // "2026-03-15" — 메타 표용
             relative: formatRelativeKo(r.date),
             changeStats: r.changeStats,
             prInfo: r.prInfo,
             sourceRef: r.sourceRef ?? r.specRef ?? null,
-            specRef: r.specRef,
-            related: r.relatedChanges ?? [],
-            aiSuggestion: r.aiSuggestion ?? null,
+            lineHistory: r.lineHistory ?? [],
             pinned,
         };
         this.view?.webview.postMessage({ type: 'render', payload });
@@ -199,6 +350,29 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .icon-btn:hover { background: var(--line); color: var(--fg); }
     .icon-btn.active { color: var(--accent-violet); }
 
+    /* ── 공통 탭바 (블레임 / 타임라인 / 이슈) ─────────────────────── */
+    .tabs {
+        display: flex; gap: 4px;
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--line);
+    }
+    .tab {
+        flex: 1;
+        display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+        padding: 6px 8px;
+        background: transparent; border: none; border-radius: 7px;
+        color: var(--fg-mute); font-size: 12px; font-weight: 500;
+        font-family: inherit; cursor: pointer;
+        transition: background 0.12s, color 0.12s;
+    }
+    .tab:hover { background: var(--line); color: var(--fg-dim); }
+    .tab.active {
+        background: var(--surface);
+        color: var(--fg);
+        box-shadow: inset 0 0 0 1px var(--line);
+    }
+    .tab__ico { display: inline-flex; opacity: 0.85; }
+
     /* ── 본문 컨테이너 ───────────────────────────────────────────── */
     .body { padding: 14px; display: flex; flex-direction: column; gap: 14px; }
 
@@ -214,6 +388,18 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         background: var(--line); color: var(--fg-dim);
         padding: 1px 6px; border-radius: 4px; font-size: 11px;
     }
+
+    /* ── 안내 상태: 커밋 이력 없음(미커밋 라인 등) ────────────────── */
+    .info {
+        margin: 14px;
+        padding: 14px 16px;
+        display: flex; gap: 10px; align-items: flex-start;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+    }
+    .info__icon { color: var(--accent-violet); flex-shrink: 0; margin-top: 1px; }
+    .info__text { color: var(--fg-dim); font-size: 12.5px; line-height: 1.6; }
 
     /* ── 콜아웃: 이 라인이 추가된 이유 ───────────────────────────── */
     .callout {
@@ -231,6 +417,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .callout__body {
         color: var(--fg); font-size: 13px; line-height: 1.6;
     }
+    .callout__body .ca-author { color: var(--accent-violet); font-weight: 700; }
     .callout__body code {
         background: var(--code-bg); color: var(--code-fg);
         padding: 1px 5px; border-radius: 4px; font-size: 11.5px;
@@ -265,12 +452,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .meta dd { margin: 0; color: var(--fg-dim); }
     .meta dd strong { color: var(--fg); font-weight: 600; }
     .meta .author { display: inline-flex; align-items: center; gap: 6px; }
-    .meta .avatar {
-        width: 18px; height: 18px; border-radius: 50%;
-        background: #DC2626; color: #fff;
-        display: inline-flex; align-items: center; justify-content: center;
-        font-size: 10px; font-weight: 700;
-    }
     .meta a, .meta .link {
         color: var(--fg-dim); text-decoration: none; cursor: pointer;
     }
@@ -284,115 +465,164 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         margin-bottom: 8px;
     }
     .related__list { display: flex; flex-direction: column; gap: 6px; }
-    .rel-item {
-        display: flex; gap: 10px; align-items: flex-start;
-        padding: 8px 10px;
-        background: var(--surface);
-        border: 1px solid var(--line);
-        border-radius: 8px;
-    }
-    .rel-item__icon {
-        width: 24px; height: 24px; flex-shrink: 0;
-        display: inline-flex; align-items: center; justify-content: center;
-        background: var(--line); border-radius: 6px;
-        color: var(--fg-dim);
-    }
-    .rel-item__text { min-width: 0; }
-    .rel-item__title { color: var(--fg); font-size: 12px; font-weight: 500; }
-    .rel-item__meta { color: var(--fg-mute); font-size: 11px; margin-top: 2px; }
 
-    /* ── AI 에게 더 묻기 ─────────────────────────────────────────── */
-    .ask {
-        display: flex; align-items: center; gap: 8px;
-        padding: 9px 12px;
-        background: var(--surface);
-        border: 1px solid var(--line);
-        border-radius: 9px;
+    /* ── 라인 수정 이력 ──────────────────────────────────────────── */
+    .history__title {
+        color: var(--fg-mute); font-size: 11px; font-weight: 600;
+        margin-bottom: 10px;
     }
-    .ask__icon { color: var(--accent-violet); display: inline-flex; flex-shrink: 0; }
-    .ask__label { color: var(--fg-mute); font-size: 11.5px; flex-shrink: 0; }
-    .ask__input {
-        flex: 1; min-width: 0;
-        background: transparent; border: none; outline: none;
-        color: var(--fg); font-size: 12px;
-        font-family: inherit;
+    .history__list {
+        display: flex; flex-direction: column;
+        position: relative;
     }
-    .ask__input::placeholder { color: var(--fg-mute); font-style: italic; }
-
-    /* ── AI 질문/답변 스레드 ─────────────────────────────────────── */
-    .ask-thread { display: flex; flex-direction: column; gap: 8px; }
-    .qa { display: flex; flex-direction: column; gap: 4px; }
-    .qa__q {
-        align-self: flex-end; max-width: 90%;
-        background: var(--line); color: var(--fg);
-        padding: 6px 10px; border-radius: 9px 9px 2px 9px;
-        font-size: 12px;
-    }
-    .qa__a {
-        align-self: flex-start; max-width: 95%;
-        background: var(--callout-bg); color: var(--fg);
-        border: 1px solid var(--line-soft);
-        padding: 8px 11px; border-radius: 9px 9px 9px 2px;
-        font-size: 12.5px; line-height: 1.55;
-    }
-    .qa__a code {
-        background: var(--code-bg); color: var(--code-fg);
-        padding: 1px 5px; border-radius: 4px; font-size: 11.5px;
-    }
-    .qa__a.loading { color: var(--fg-mute); font-style: italic; }
-
-    /* ── 푸터: CTA + 보조 액션 ───────────────────────────────────── */
-    .footer { display: flex; gap: 6px; align-items: stretch; }
-    .cta {
-        flex: 1;
-        display: inline-flex; align-items: center; gap: 8px; justify-content: flex-start;
-        padding: 10px 12px;
-        background: var(--grad);
-        color: #fff; border: none; border-radius: 9px;
-        font-size: 12.5px; font-weight: 600;
-        cursor: pointer; font-family: inherit;
-        transition: filter 0.12s;
-    }
-    .cta:hover { filter: brightness(1.12); }
-    .ghost-btn {
-        background: var(--surface); border: 1px solid var(--line);
-        color: var(--fg-dim);
-        padding: 0 10px; border-radius: 9px;
+    .hist-item {
+        display: grid;
+        grid-template-columns: 16px 1fr auto;
+        column-gap: 8px;
+        padding: 0 0 14px 0;
         cursor: pointer;
-        display: inline-flex; align-items: center; justify-content: center;
-        transition: background 0.12s, color 0.12s;
+        position: relative;
     }
-    .ghost-btn:hover { background: var(--line); color: var(--fg); }
+    .hist-item:last-child { padding-bottom: 2px; }
+    /* 타임라인 세로선 — 점들을 잇는다 (마지막 항목 아래로는 그리지 않음) */
+    .hist-item:not(:last-child)::before {
+        content: '';
+        position: absolute;
+        left: 4px; top: 12px; bottom: 0;
+        width: 1px; background: var(--line);
+    }
+    .hist-item__dot {
+        width: 9px; height: 9px; margin-top: 3px;
+        border-radius: 50%;
+        background: var(--fg-mute);
+        align-self: start;
+    }
+    .hist-item.current .hist-item__dot {
+        background: var(--accent-violet);
+        box-shadow: 0 0 8px rgba(167,139,250,0.55);
+    }
+    .hist-item__head {
+        display: flex; align-items: baseline; gap: 8px; min-width: 0;
+    }
+    .hist-item__hash {
+        color: var(--accent-violet); font-size: 12px; font-weight: 600;
+    }
+    .hist-item.current .hist-item__hash { color: var(--accent-violet); }
+    .hist-item__date { color: var(--fg-mute); font-size: 11px; }
+    .hist-item__subject {
+        color: var(--fg); font-size: 12.5px; margin-top: 3px;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .hist-item__author { color: var(--fg-mute); font-size: 11px; margin-top: 2px; }
+    .hist-item__issues {
+        align-self: start; margin-top: 1px;
+        display: inline-flex; align-items: center; gap: 4px;
+        padding: 2px 7px; border-radius: 6px;
+        background: var(--surface); border: 1px solid var(--line);
+        color: var(--fg-dim); font-size: 10.5px; white-space: nowrap;
+    }
+    .hist-item__issues .ico { display: inline-flex; opacity: 0.8; }
 
     /* ── 작은 보조 ───────────────────────────────────────────────── */
     .hidden { display: none !important; }
-    .ai-suggest {
-        background: var(--surface-2);
-        border: 1px solid var(--line);
-        border-radius: 9px;
-        padding: 9px 11px;
-        font-size: 11.5px; color: #D4D4D8;
-    }
-    .ai-suggest__title {
+
+    /* ── 탭 페인 ─────────────────────────────────────────────────── */
+    .pane.hidden { display: none !important; }
+
+    /* ── 타임라인 페인 ───────────────────────────────────────────── */
+    .file-chip {
         display: inline-flex; align-items: center; gap: 5px;
-        color: var(--accent-cyan); font-weight: 600;
-        margin-bottom: 4px;
+        font-size: 11px; color: var(--fg-dim);
+        background: var(--surface); border: 1px solid var(--line);
+        border-radius: 6px; padding: 3px 9px;
+        max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
+    .file-chip-name { font-weight: 600; color: var(--fg); }
+    .ai-card {
+        background: var(--callout-bg);
+        border: 1px solid var(--line-soft);
+        border-radius: 12px; padding: 12px 14px;
+    }
+    .ai-card__label {
+        display: inline-flex; align-items: center; gap: 6px;
+        color: var(--accent-violet); font-size: 11.5px; font-weight: 600;
+        margin-bottom: 6px;
+    }
+    .ai-card__text { color: var(--fg); font-size: 12.5px; line-height: 1.7; }
+    .ai-card__text strong { color: #fff; font-weight: 700; }
+    .caret {
+        display: inline-block; width: 2px; height: 1em; margin-left: 2px;
+        vertical-align: text-bottom; background: var(--accent-violet);
+        animation: caret-blink 0.9s steps(1) infinite;
+    }
+    @keyframes caret-blink { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
+    .tl-list { display: flex; flex-direction: column; }
+    .tl-item { display: flex; gap: 11px; }
+    .tl-item__left { display: flex; flex-direction: column; align-items: center; flex-shrink: 0; width: 24px; }
+    .tl-item__badge {
+        width: 22px; height: 22px; border-radius: 50%;
+        display: inline-flex; align-items: center; justify-content: center;
+        font-size: 10.5px; font-weight: 700; color: #fff; flex-shrink: 0;
+    }
+    .tl-item__rail { width: 2px; flex: 1; min-height: 10px; background: var(--line); margin: 4px 0; }
+    .tl-item:last-child .tl-item__rail { display: none; }
+    .tl-item__right { flex: 1; min-width: 0; padding-bottom: 16px; }
+    .tl-item:last-child .tl-item__right { padding-bottom: 0; }
+    .tl-item__date { font-size: 11px; color: var(--fg-mute); margin: 2px 0 4px; }
+    .tl-item__date .mon { color: var(--fg-dim); font-weight: 700; }
+    .tl-item__title { font-size: 12.5px; font-weight: 600; color: var(--fg); line-height: 1.4; }
+    .tl-item__desc { font-size: 11.5px; color: var(--fg-dim); margin-top: 3px; line-height: 1.6; }
+
+    /* ── 이슈 페인 (요구사항 역추적) ─────────────────────────────── */
+    .is-item {
+        display: flex; flex-direction: column; gap: 4px;
+        padding: 10px 12px; cursor: pointer;
+        background: var(--surface); border: 1px solid var(--line);
+        border-radius: 9px;
+    }
+    .is-item:hover { background: var(--line); }
+    .is-item__head { display: flex; align-items: center; gap: 8px; }
+    .is-item__badge {
+        flex-shrink: 0; font-size: 10.5px; padding: 2px 7px; border-radius: 6px;
+        border: 1px solid var(--line);
+    }
+    .is-item__badge.ok { color: var(--accent-cyan); border-color: rgba(103,232,249,0.4); }
+    .is-item__badge.guess { color: var(--fg-mute); }
+    .is-item__title { color: var(--fg); font-size: 12.5px; font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .is-item__excerpt { color: var(--fg-mute); font-size: 11px; line-height: 1.55; }
+
+    /* ── 로딩 스피너 ─────────────────────────────────────────────── */
+    .spinner {
+        display: inline-block; width: 13px; height: 13px; vertical-align: -2px;
+        border: 2px solid var(--line); border-top-color: var(--accent-violet);
+        border-radius: 50%; animation: spin .75s linear infinite; margin-right: 6px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
-    <div class="head">
-        <div class="head__title">
-            <span class="spark" id="ico-spark"></span> CONTEXT BLAME
-        </div>
+    <header class="head">
+        <span class="head__title"><span class="spark" id="ico-head-spark"></span>CONTEXT BLAME</span>
         <div class="head__actions">
             <button class="icon-btn" id="btn-pin" data-action="togglePin" title="이 라인 고정"></button>
-            <button class="icon-btn" id="btn-copy" data-action="copy" title="내용 복사"></button>
+            <button class="icon-btn" id="btn-settings" data-action="openSettings" title="CodeWhy 설정"><span id="ico-settings"></span></button>
         </div>
-    </div>
+    </header>
+    <nav class="tabs">
+        <button class="tab active" data-tab="blame"><span class="tab__ico" id="ico-tab-blame"></span>블레임</button>
+        <button class="tab" data-tab="timeline"><span class="tab__ico" id="ico-tab-timeline"></span>타임라인</button>
+        <button class="tab" data-tab="issue"><span class="tab__ico" id="ico-tab-issue"></span>이슈</button>
+    </nav>
 
+    <!-- ─────────────── 블레임 탭 ─────────────── -->
+    <div id="pane-blame" class="pane">
     <div id="empty" class="empty">
         에디터에서 라인을 선택하고 <span class="kbd">🔍 왜 바꿨어?</span> 렌즈를 클릭하면<br/>이곳에 변경 사유가 나타납니다.
+    </div>
+
+    <div id="info" class="info hidden">
+        <span class="info__icon" id="ico-info"></span>
+        <div class="info__text" id="info-text"></div>
     </div>
 
     <div id="content" class="body hidden">
@@ -412,42 +642,58 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         </div>
 
         <dl class="meta">
-            <dt>작성자</dt><dd class="author"><span class="avatar" id="author-initial"></span><strong id="author-name"></strong><span id="author-team-wrap" class="hidden">&nbsp;·&nbsp;<span id="author-team"></span></span></dd>
+            <dt>작성자</dt><dd class="author"><strong id="author-name"></strong><span id="author-team-wrap" class="hidden">&nbsp;·&nbsp;<span id="author-team"></span></span></dd>
             <dt>커밋</dt><dd><a class="link mono" id="meta-commit" data-action="openCommit"></a><span id="meta-ticket-wrap" class="hidden"> — <span class="ticket" id="meta-ticket"></span></span></dd>
             <dt>날짜</dt><dd><span id="meta-date"></span><span id="meta-relative-wrap" class="hidden"> <span style="color:var(--fg-mute)">(<span id="meta-relative"></span>)</span></span></dd>
             <dt>변경</dt><dd id="meta-change">—</dd>
             <dt>출처</dt><dd id="meta-source">—</dd>
         </dl>
 
-        <section id="related-wrap" class="hidden">
-            <div class="related__title">이 변경과 함께 일어난 일</div>
-            <div class="related__list" id="related-list"></div>
+        <section id="history-wrap" class="hidden">
+            <div class="history__title">라인 수정 이력</div>
+            <div class="history__list" id="history-list"></div>
         </section>
-
-        <div id="ai-suggest" class="ai-suggest hidden">
-            <div class="ai-suggest__title"><span id="ico-ai"></span> AI 추론</div>
-            <div id="ai-suggest-body"></div>
-        </div>
-
-        <div class="ask">
-            <span class="ask__icon" id="ico-ask"></span>
-            <span class="ask__label">AI에게 더 묻기 —</span>
-            <input class="ask__input" id="ask-input" type="text" placeholder='"왜 4%가 아닌 3%일까?"' />
-        </div>
-
-        <div id="ask-thread" class="ask-thread hidden"></div>
-
-        <div class="footer">
-            <button class="cta" data-action="openSpec">
-                <span id="ico-cta"></span><span id="cta-label">기획서 열기</span>
-            </button>
-            <button class="ghost-btn" data-action="openCommit" title="커밋 보기" id="ico-commit-btn"></button>
-            <button class="ghost-btn" data-action="openHistory" title="히스토리">⋯</button>
-        </div>
     </div>
+    </div><!-- /#pane-blame -->
+
+    <!-- ─────────────── 타임라인 탭 ─────────────── -->
+    <div id="pane-timeline" class="pane hidden">
+        <div id="tl-empty" class="empty">파일을 연 뒤 <strong>타임라인</strong> 탭을 누르면<br/>이 파일의 변경 역사를 요약해 드립니다.</div>
+        <div id="tl-body" class="body hidden">
+            <div class="file-chip"><span>📄</span><span class="file-chip-name" id="tl-file"></span></div>
+            <div class="ai-card">
+                <div class="ai-card__label"><span id="ico-tl-spark"></span> AI 요약</div>
+                <div class="ai-card__text" id="tl-summary"></div>
+            </div>
+            <section id="tl-ms-wrap" class="hidden">
+                <div class="related__title">주요 마일스톤 <span id="tl-ms-count"></span></div>
+                <div class="tl-list" id="tl-list"></div>
+            </section>
+        </div>
+    </div><!-- /#pane-timeline -->
+
+    <!-- ─────────────── 이슈 탭 ─────────────── -->
+    <div id="pane-issue" class="pane hidden">
+        <div id="is-empty" class="empty"><strong>이슈</strong> 탭을 누르면 현재 라인과<br/>연관된 GitHub Issue·기획서를 찾아 드립니다.</div>
+        <div id="is-loading" class="empty hidden"><span class="spinner"></span> 연관 이슈 찾는 중…</div>
+        <div id="is-body" class="body hidden">
+            <div class="related__title" id="is-title"></div>
+            <div class="related__list" id="is-list"></div>
+        </div>
+    </div><!-- /#pane-issue -->
 
 <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
+
+    // 웹뷰 스크립트에서 던져진 에러를 확장 Output 채널로 되쏜다(웹뷰 DevTools 없이 진단).
+    window.addEventListener('error', function (e) {
+        try {
+            vscode.postMessage({
+                type: 'webview-error',
+                payload: (e && e.message) + ' @ ' + (e && e.filename) + ':' + (e && e.lineno),
+            });
+        } catch (_) { /* noop */ }
+    });
 
     // ── 아이콘들 (인라인 SVG) ───────────────────────────────────────
     const ICON = {
@@ -459,56 +705,162 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         branch: '<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M5 3a1.5 1.5 0 1 0-2 0v8a1.5 1.5 0 1 0 1 0V8h3a3 3 0 0 0 3-3V4.92a1.5 1.5 0 1 0-1 0V5a2 2 0 0 1-2 2H4V3z"/></svg>',
         shield: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M8 1l6 2v5c0 4-2.8 6.6-6 7-3.2-.4-6-3-6-7V3l6-2z"/></svg>',
         commit: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="2.5"/><path d="M0 8h5M11 8h5"/></svg>',
+        clock:  '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="8" cy="8" r="6.5"/><path d="M8 4.5V8l2.5 1.5"/></svg>',
+        issue:  '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="6.5"/><circle cx="8" cy="8" r="1.6" fill="currentColor" stroke="none"/></svg>',
+        gear:   '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="8" cy="8" r="2.2"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M13 3l-1.5 1.5M4.5 11.5L3 13"/></svg>',
     };
-    document.getElementById('ico-spark').innerHTML = ICON.spark;
-    document.getElementById('ico-callout').innerHTML = ICON.spark;
-    document.getElementById('ico-ai').innerHTML = ICON.spark;
-    document.getElementById('ico-ask').innerHTML = ICON.spark;
-    document.getElementById('ico-cta').innerHTML = ICON.doc;
-    document.getElementById('ico-commit-btn').innerHTML = ICON.branch;
-    setPin(false);
+    // 아이콘 주입은 보조 장식이므로, 한 요소가 없더라도 핸드셰이크(ready)까지 죽지 않게 격리한다.
+    try {
+        const setIcon = (id, svg) => { const el = document.getElementById(id); if (el) { el.innerHTML = svg; } };
+        setIcon('ico-head-spark', ICON.spark);
+        setIcon('ico-settings', ICON.gear);
+        setIcon('ico-callout', ICON.spark);
+        setIcon('ico-info', ICON.spark);
+        setIcon('ico-tab-blame', ICON.doc);
+        setIcon('ico-tab-timeline', ICON.clock);
+        setIcon('ico-tab-issue', ICON.branch);
+        setIcon('ico-tl-spark', ICON.spark);
+        setPin(false);
+    } catch (err) {
+        vscode.postMessage({ type: 'webview-error', payload: '아이콘 초기화 실패: ' + String(err) });
+    }
 
     // ── 메시지 수신 ────────────────────────────────────────────────
     window.addEventListener('message', (e) => {
         const msg = e.data;
-        if (msg.type === 'render') {
-            render(msg.payload);
-        } else if (msg.type === 'empty') {
-            document.getElementById('empty').classList.remove('hidden');
-            document.getElementById('content').classList.add('hidden');
-        } else if (msg.type === 'pinned') {
-            setPin(msg.pinned);
-        } else if (msg.type === 'answer') {
-            renderAnswer(msg.payload);
+        switch (msg.type) {
+            // ── 블레임 ──
+            case 'render': render(msg.payload); break;
+            case 'info': showInfo(msg.payload.message); break;
+            case 'empty':
+                document.getElementById('info').classList.add('hidden');
+                document.getElementById('empty').classList.remove('hidden');
+                document.getElementById('content').classList.add('hidden');
+                break;
+            case 'pinned': setPin(msg.pinned); break;
+            // ── 탭 전환(확장 → 웹뷰) ──
+            case 'activateTab': showTab(msg.payload.tab); break;
+            // ── 타임라인 ──
+            case 'tlStreaming': tlStreaming(msg.payload); break;
+            case 'tlDelta': tlDelta(msg.payload.delta); break;
+            case 'tlResult': tlResult(msg.payload); break;
+            case 'tlEmpty': tlEmpty(msg.payload && msg.payload.message); break;
+            // ── 이슈 ──
+            case 'isLoading': isLoading(); break;
+            case 'isResult': isResult(msg.payload); break;
+            case 'isEmpty': isEmpty(msg.payload && msg.payload.message); break;
         }
     });
 
-    let pendingAnswerEl = null;
-    function renderAnswer(p) {
-        const thread = document.getElementById('ask-thread');
-        thread.classList.remove('hidden');
-        const loading = p.answer === '…';
-        if (loading || !pendingAnswerEl) {
-            // 새 질문 → 질문/답변 버블 한 쌍 추가
-            const qa = document.createElement('div');
-            qa.className = 'qa';
-            const q = document.createElement('div');
-            q.className = 'qa__q';
-            q.textContent = p.question;
-            const a = document.createElement('div');
-            a.className = 'qa__a' + (loading ? ' loading' : '');
-            if (loading) { a.textContent = '답변 작성 중…'; } else { a.innerHTML = decorate(p.answer); }
-            qa.appendChild(q);
-            qa.appendChild(a);
-            thread.appendChild(qa);
-            pendingAnswerEl = loading ? a : null;
+    // ─────────────────── 타임라인 렌더 ───────────────────
+    let tlText = '';
+    function tlShow(which) {
+        document.getElementById('tl-empty').classList.toggle('hidden', which !== 'empty');
+        document.getElementById('tl-body').classList.toggle('hidden', which === 'empty');
+    }
+    function tlStreaming(p) {
+        tlText = p.text || '';
+        document.getElementById('tl-file').textContent = p.fileName || '';
+        document.getElementById('tl-summary').innerHTML = tlText
+            ? renderBold(tlText) + '<span class="caret"></span>'
+            : '<span class="spinner"></span>AI가 소스 코드를 분석 중입니다…';
+        document.getElementById('tl-ms-wrap').classList.add('hidden');
+        tlShow('body');
+    }
+    function tlDelta(delta) {
+        tlText += delta;
+        document.getElementById('tl-summary').innerHTML = renderBold(tlText) + '<span class="caret"></span>';
+    }
+    function tlResult(p) {
+        document.getElementById('tl-file').textContent = p.fileName || '';
+        document.getElementById('tl-summary').innerHTML = renderBold(p.summary || '');
+        const wrap = document.getElementById('tl-ms-wrap');
+        const list = document.getElementById('tl-list');
+        list.innerHTML = '';
+        const ms = (p.milestones || []).slice().sort((a, b) => String(a.date).localeCompare(String(b.date)));
+        if (ms.length) {
+            wrap.classList.remove('hidden');
+            document.getElementById('tl-ms-count').textContent = ms.length + '건';
+            ms.forEach((m, i) => list.appendChild(renderMilestone(m, i)));
         } else {
-            // 직전 로딩 버블을 실제 답변으로 교체
-            pendingAnswerEl.classList.remove('loading');
-            pendingAnswerEl.innerHTML = decorate(p.answer);
-            pendingAnswerEl = null;
+            wrap.classList.add('hidden');
         }
-        thread.lastElementChild.scrollIntoView({ block: 'nearest' });
+        tlShow('body');
+    }
+    function tlEmpty(message) {
+        if (message) { document.getElementById('tl-empty').innerHTML = decorate(message); }
+        tlShow('empty');
+    }
+    const TL_COLORS = ['#e05454','#2cb8b8','#8b5cf6','#d97706','#16a34a','#3b82f6','#ec4899','#f97316'];
+    const KO_MONTHS = ['1월','2월','3월','4월','5월','6월','7월','8월','9월','10월','11월','12월'];
+    function renderMilestone(m, i) {
+        const el = document.createElement('div');
+        el.className = 'tl-item';
+        const color = TL_COLORS[i % TL_COLORS.length];
+        const mon = KO_MONTHS[(parseInt(String(m.date).split('-')[1], 10) || 0) - 1] || '';
+        const s = String(m.description || '').trim();
+        const cut = s.search(/[.。,，\\n]/);
+        const hasSplit = cut > 0 && cut < 30;
+        const title = hasSplit ? s.slice(0, cut).trim() : s;
+        const body = hasSplit ? s.slice(cut + 1).trim() : '';
+        el.innerHTML =
+            '<div class="tl-item__left"><div class="tl-item__badge" style="background:' + color + '">' + (i + 1) + '</div><div class="tl-item__rail"></div></div>' +
+            '<div class="tl-item__right">' +
+                '<div class="tl-item__date">' + (mon ? '<span class="mon">' + mon + '</span> · ' : '') + '<span></span></div>' +
+                '<div class="tl-item__title"></div>' +
+                (body ? '<div class="tl-item__desc"></div>' : '') +
+            '</div>';
+        el.querySelector('.tl-item__date span:last-child').textContent = m.date || '';
+        el.querySelector('.tl-item__title').textContent = title;
+        if (body) { el.querySelector('.tl-item__desc').textContent = body; }
+        return el;
+    }
+    function renderBold(t) {
+        return decorate(t).replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
+    }
+
+    // ─────────────────── 이슈 렌더 ───────────────────
+    function isShow(which) {
+        document.getElementById('is-empty').classList.toggle('hidden', which !== 'empty');
+        document.getElementById('is-loading').classList.toggle('hidden', which !== 'loading');
+        document.getElementById('is-body').classList.toggle('hidden', which !== 'body');
+    }
+    function isLoading() { isShow('loading'); }
+    function isEmpty(message) {
+        if (message) { document.getElementById('is-empty').innerHTML = decorate(message); }
+        isShow('empty');
+    }
+    const IS_BADGE = {
+        issue:    { label: '✓ Issue 연결', cls: 'ok' },
+        ticket:   { label: '✓ 티켓 정확', cls: 'ok' },
+        semantic: { label: '≈ 추정(검색)', cls: 'guess' },
+    };
+    function isResult(p) {
+        const list = document.getElementById('is-list');
+        list.innerHTML = '';
+        const docs = p.documents || [];
+        document.getElementById('is-title').textContent = 'L' + (p.line || '?') + ' 연관 GitHub Issue ' + docs.length + '건';
+        docs.forEach(d => list.appendChild(renderIssueItem(d)));
+        isShow('body');
+    }
+    function renderIssueItem(d) {
+        const type = d.matchType || 'semantic';
+        const badge = IS_BADGE[type] || IS_BADGE.semantic;
+        const pct = (d.confidence != null) ? ' · ' + Math.round(d.confidence * 100) + '%' : '';
+        const el = document.createElement('div');
+        el.className = 'is-item';
+        el.dataset.action = 'openIssue';
+        el.dataset.url = d.url || '';
+        el.innerHTML =
+            '<div class="is-item__head">' +
+                '<span class="is-item__badge ' + badge.cls + '"></span>' +
+                '<span class="is-item__title"></span>' +
+            '</div>' +
+            (d.excerpt ? '<div class="is-item__excerpt"></div>' : '');
+        el.querySelector('.is-item__badge').textContent = badge.label + pct;
+        el.querySelector('.is-item__title').textContent = d.title || '(제목 없음)';
+        if (d.excerpt) { el.querySelector('.is-item__excerpt').textContent = d.excerpt; }
+        return el;
     }
 
     function setPin(pinned) {
@@ -517,17 +869,34 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         btn.classList.toggle('active', !!pinned);
     }
 
+    // 커밋 이력이 없는 라인(미커밋 파일 등) — 깨져 보이는 메타 카드 대신 안내 문구만 깔끔히
+    function showInfo(message) {
+        document.getElementById('empty').classList.add('hidden');
+        document.getElementById('content').classList.add('hidden');
+        const info = document.getElementById('info');
+        info.classList.remove('hidden');
+        document.getElementById('info-text').innerHTML = decorate(message);
+    }
+
     function render(p) {
         document.getElementById('empty').classList.add('hidden');
+        document.getElementById('info').classList.add('hidden');
         document.getElementById('content').classList.remove('hidden');
 
-        document.getElementById('narrative').innerHTML = decorate(p.narrative);
+        // 콜아웃 본문 — "{작성자}님이 {월일}에 {설명}" 한 문장. 작성자만 보라색 강조.
+        // author/dateShort 가 없으면 설명만 노출한다.
+        const calloutEl = document.getElementById('narrative');
+        if (p.author && p.dateShort) {
+            calloutEl.innerHTML = '<span class="ca-author"></span>님이 ' + decorate(p.dateShort) + '에 ' + decorate(p.explanation || '');
+            calloutEl.querySelector('.ca-author').textContent = p.author;
+        } else {
+            calloutEl.innerHTML = decorate(p.explanation || '변경 사유를 분석할 수 없습니다.');
+        }
+
         document.getElementById('file-name').textContent = p.fileName;
         document.getElementById('file-line').textContent = 'L' + p.line;
         document.getElementById('file-kind').textContent = fileKind(p.fileName);
 
-        const initial = (p.author || '?').charAt(0);
-        document.getElementById('author-initial').textContent = initial;
         document.getElementById('author-name').textContent = p.author || '?';
         toggle('author-team-wrap', !!p.team);
         if (p.team) document.getElementById('author-team').textContent = p.team;
@@ -536,7 +905,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         toggle('meta-ticket-wrap', !!p.ticket);
         if (p.ticket) document.getElementById('meta-ticket').textContent = p.ticket;
 
-        document.getElementById('meta-date').textContent = p.date || '—';
+        document.getElementById('meta-date').textContent = p.dateFull || '—';
         toggle('meta-relative-wrap', !!p.relative);
         if (p.relative) document.getElementById('meta-relative').textContent = p.relative;
 
@@ -545,58 +914,67 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
 
         document.getElementById('meta-source').textContent = p.sourceRef || '—';
 
-        // related
-        const wrap = document.getElementById('related-wrap');
-        const list = document.getElementById('related-list');
-        list.innerHTML = '';
-        if (p.related && p.related.length) {
-            wrap.classList.remove('hidden');
-            p.related.forEach(r => list.appendChild(renderRelated(r)));
+        // 라인 수정 이력
+        const histWrap = document.getElementById('history-wrap');
+        const histList = document.getElementById('history-list');
+        histList.innerHTML = '';
+        if (p.lineHistory && p.lineHistory.length) {
+            histWrap.classList.remove('hidden');
+            p.lineHistory.forEach(h => histList.appendChild(renderHistory(h, p.commitShort)));
         } else {
-            wrap.classList.add('hidden');
+            histWrap.classList.add('hidden');
         }
-
-        // ai suggestion
-        const aiWrap = document.getElementById('ai-suggest');
-        if (p.aiSuggestion) {
-            aiWrap.classList.remove('hidden');
-            document.getElementById('ai-suggest-body').textContent = p.aiSuggestion;
-        } else {
-            aiWrap.classList.add('hidden');
-        }
-
-        // cta label
-        document.getElementById('cta-label').textContent = (p.specRef || '기획서') + ' 열기';
-
-        // 라인이 바뀌면 이전 Q&A 스레드는 초기화
-        const thread = document.getElementById('ask-thread');
-        thread.innerHTML = '';
-        thread.classList.add('hidden');
-        pendingAnswerEl = null;
 
         setPin(!!p.pinned);
     }
 
-    function renderRelated(r) {
+    // 라인 수정 이력 한 줄 — 클릭하면 해당 커밋을 git show 로 연다.
+    // currentShort(=블레임 대상 커밋 7자리)와 같은 커밋은 'current' 로 강조한다.
+    function renderHistory(h, currentShort) {
+        const short = (h.hash || '').slice(0, 7);
+        const isCurrent = currentShort && short === currentShort;
         const el = document.createElement('div');
-        el.className = 'rel-item';
-        const icon = r.kind === 'doc' ? ICON.doc : r.kind === 'branch' ? ICON.branch : r.kind === 'security' ? ICON.shield : ICON.commit;
+        el.className = 'hist-item' + (isCurrent ? ' current' : '');
+        el.dataset.action = 'openCommitHash';
+        el.dataset.hash = h.hash || '';
+        const badge = (h.issueCount && h.issueCount > 0)
+            ? '<span class="hist-item__issues"><span class="ico">' + ICON.issue + '</span>이슈 ' + h.issueCount + '</span>'
+            : '<span></span>';
         el.innerHTML =
-            '<span class="rel-item__icon">' + icon + '</span>' +
-            '<div class="rel-item__text">' +
-                '<div class="rel-item__title"></div>' +
-                '<div class="rel-item__meta"></div>' +
-            '</div>';
-        el.querySelector('.rel-item__title').textContent = r.title;
-        el.querySelector('.rel-item__meta').textContent = r.meta;
+            '<span class="hist-item__dot"></span>' +
+            '<div style="min-width:0">' +
+                '<div class="hist-item__head">' +
+                    '<span class="hist-item__hash mono"></span>' +
+                    '<span class="hist-item__date"></span>' +
+                '</div>' +
+                '<div class="hist-item__subject"></div>' +
+                '<div class="hist-item__author"></div>' +
+            '</div>' +
+            badge;
+        el.querySelector('.hist-item__hash').textContent = short;
+        el.querySelector('.hist-item__date').textContent = formatHistDate(h.date);
+        el.querySelector('.hist-item__subject').textContent = h.subject || '';
+        el.querySelector('.hist-item__author').textContent = h.author || '';
         return el;
     }
 
+    // "2026-03-15" → "3월 15일" (파싱 실패 시 원본)
+    function formatHistDate(s) {
+        const m = String(s || '').match(/^(\\d{4})-(\\d{1,2})-(\\d{1,2})/);
+        return m ? (Number(m[2]) + '월 ' + Number(m[3]) + '일') : (s || '');
+    }
+
     function decorate(s) {
-        // "..." 인용은 코드 강조로 변환
+        // "..." 인용은 코드 강조로, 줄바꿈은 <br> 로 변환 (메타/본문 분리 렌더링용)
         const esc = String(s)
             .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        return esc.replace(/"([^"]+)"/g, '<code>$1</code>');
+        return esc
+            .replace(/"([^"]+)"/g, '<code>$1</code>')
+            // ⚠️ 이 함수는 TS 템플릿 리터럴 안의 웹뷰 스크립트다. 개행 메타문자는 반드시
+            // 백슬래시를 이중(아래처럼)으로 써야 한다. 단일로 쓰면 컴파일 시 실제 줄바꿈으로
+            // 치환돼 생성된 HTML 의 정규식이 줄을 넘겨 깨진다(Invalid regular expression).
+            // 주석에도 단일 개행 메타문자를 적지 말 것 — 주석 자체가 두 줄로 쪼개져 깨진다.
+            .replace(/\\n/g, '<br/>');
     }
 
     function formatChange(stats, pr) {
@@ -615,23 +993,42 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         document.getElementById(id).classList.toggle('hidden', !on);
     }
 
-    // ── 인풋: Enter 누르면 AI 질문 발사 ───────────────────────────
-    document.getElementById('ask-input').addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-            const v = e.currentTarget.value;
-            if (v.trim()) {
-                vscode.postMessage({ type: 'askAi', payload: { question: v } });
-                e.currentTarget.value = '';
-            }
-        }
+    // ── 공통 탭바: 클릭 시 해당 페인으로 전환 + 확장에 분석 요청 ─────
+    const PANES = { blame: 'pane-blame', timeline: 'pane-timeline', issue: 'pane-issue' };
+    function showTab(tab) {
+        if (!PANES[tab]) { tab = 'blame'; }
+        document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+        Object.keys(PANES).forEach(k => document.getElementById(PANES[k]).classList.toggle('hidden', k !== tab));
+    }
+    document.querySelector('.tabs').addEventListener('click', (e) => {
+        const tab = e.target.closest('.tab');
+        if (!tab) return;
+        showTab(tab.dataset.tab);
+        // 확장에 알려 현재 커서 라인 기준으로 해당 분석을 자동 실행시킨다.
+        vscode.postMessage({ type: 'switchTab', payload: { tab: tab.dataset.tab } });
     });
 
     // ── 버튼·링크 액션 위임 ───────────────────────────────────────
     document.body.addEventListener('click', (e) => {
         const el = e.target.closest('[data-action]');
         if (!el) return;
+        // 라인 수정 이력 항목은 자기 커밋 해시를 함께 실어 보낸다.
+        if (el.dataset.action === 'openCommitHash') {
+            vscode.postMessage({ type: 'openCommitHash', payload: { hash: el.dataset.hash } });
+            return;
+        }
+        // 이슈 항목은 자기 URL 을 함께 실어 보낸다.
+        if (el.dataset.action === 'openIssue') {
+            vscode.postMessage({ type: 'openIssue', payload: { url: el.dataset.url } });
+            return;
+        }
         vscode.postMessage({ type: el.dataset.action });
     });
+
+    // ── 핸드셰이크: 리스너가 모두 등록된 지금 시점에 extension 으로 'ready' 통지 ──
+    // 이 신호 이전에 온 render 메시지는 유실되므로, extension 은 ready 를 받고 나서
+    // 보류해 둔 마지막 분석 결과를 보내준다.
+    vscode.postMessage({ type: 'ready' });
 </script>
 </body>
 </html>`;
@@ -644,19 +1041,6 @@ function randomNonce(): string {
     let s = '';
     for (let i = 0; i < 32; i++) { s += chars.charAt(Math.floor(Math.random() * chars.length)); }
     return s;
-}
-
-function plainTextOf(ctx: EditorContext, r: BlameResult): string {
-    const file = ctx.filePath.split(/[\\/]/).pop() ?? ctx.filePath;
-    return [
-        `[CodeWhy] ${file} : L${ctx.line}`,
-        formatNarrative(r),
-        r.commitHash ? `commit: ${r.commitHash.slice(0, 7)}` : '',
-        r.ticket ? `ticket: ${r.ticket}` : '',
-        r.specRef ? `spec: ${r.specRef}` : '',
-        r.team ? `team: ${r.team}` : '',
-        r.aiSuggestion ? `AI 추론: ${r.aiSuggestion}` : '',
-    ].filter(Boolean).join('\n');
 }
 
 /**
@@ -676,28 +1060,19 @@ function josa(word: string, withFinal: string, withoutFinal: string): string {
     return (code - 0xac00) % 28 !== 0 ? withFinal : withoutFinal;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 콜아웃 본문 — "홍길동님이 3월 15일에 \"…\" 기획 내용을 반영하기 위해 추가했습니다."
-//
-// 이미 갖춰진 것(중복 작업 불필요):
-//   · 작성자 조사 "님이" 고정 — "님"(받침 ㅁ) 뒤는 항상 "이" 라 분기 불필요.
-//   · 인용 "..." → <code> 강조 : 웹뷰 decorate() 가 처리하므로 따옴표를 그대로 통과시키면 됨.
-//   · 연도 생략 한국식 날짜      : formatDisplayDate() 가 "3월 15일" 형태로 반환.
-//   · josa() 헬퍼는 목적어 조사("을/를" 등) 분기에 필요하면 쓸 수 있게 남겨둠.
-//
-// TODO(개발자 A) — 아래 본문 한 문장을 시안 톤으로 다듬어주세요. 남은 확인 포인트 2가지:
-//   (a) "…에 {explanation}" 연결 톤 — explanation 은 이미 완결된 한 문장이라
-//       "3월 15일에 " 뒤에 그대로 붙으면 어색할 수 있음. 연결 표현/어미를 다듬을 것.
-//   (b) explanation 에 인용 "..." 이 없는 경우에도 한 문장으로 매끄럽게 흐르는지 확인.
-// ─────────────────────────────────────────────────────────────────────────────
-export function formatNarrative(r: BlameResult): string {
-    return `${r.author}님이 ${formatDisplayDate(r.date)}에 ${r.explanation}`;
-}
-
 function formatDisplayDate(s: string): string {
     const d = parseDateLoose(s);
     if (!d) { return s; }
     return `${d.getMonth() + 1}월 ${d.getDate()}일`;
+}
+
+/** 메타 표의 '날짜' 칸용 — "2026-03-15" ISO 형식. 파싱 실패 시 원본 반환. */
+function formatISODate(s: string): string {
+    const d = parseDateLoose(s);
+    if (!d) { return s; }
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${d.getFullYear()}-${mm}-${dd}`;
 }
 
 function formatRelativeKo(s: string): string {

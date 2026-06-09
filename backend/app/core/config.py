@@ -14,24 +14,29 @@ boto3 자격증명 탐색 순서: 환경변수 → ~/.aws/credentials → EC2 In
 import json
 import os
 from functools import lru_cache
+from pathlib import Path
 
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# config.py 기준 상위 3단계(app/core → app → backend)의 .env 를 절대경로로 참조.
+# cwd 에 무관하게 항상 backend/.env 를 읽는다.
+_ENV_FILE = Path(__file__).parent.parent.parent / ".env"
+
 # boto3 는 os.environ 을 직접 읽으므로, pydantic-settings 가 읽기 전에
 # load_dotenv() 로 .env → os.environ 에 먼저 주입해야 한다.
-load_dotenv(override=False)
+load_dotenv(_ENV_FILE, override=True)
 
 
 class Settings(BaseSettings):
     # ── AWS 공통 ──────────────────────────────────────────────────────────────
     AWS_ACCESS_KEY_ID: str = ""
     AWS_SECRET_ACCESS_KEY: str = ""
-    AWS_SESSION_TOKEN: str = ""          # STS/SSO 임시 자격증명 세션 토큰
+    AWS_SESSION_TOKEN: str = ""
     AWS_DEFAULT_REGION: str = "ap-northeast-2"
 
     # ── AWS Bedrock ───────────────────────────────────────────────────────────
-    BEDROCK_MODEL_ID: str = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+    BEDROCK_MODEL_ID: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
 
     # ── PostgreSQL (RDS) ──────────────────────────────────────────────────────
     # 런타임(asyncpg): postgresql+asyncpg://user:pass@host:5432/codewhy
@@ -45,7 +50,7 @@ class Settings(BaseSettings):
     DOCUMENTS_DIR: str = "./uploaded_documents"
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(_ENV_FILE),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -53,7 +58,36 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    """앱 전역 싱글턴. 최초 호출 시 .env 를 한 번만 파싱한다."""
     return Settings()
+
+
+# ── DB URL 헬퍼 ───────────────────────────────────────────────────────────────
+
+def _with_driver(url: str, driver: str) -> str:
+    """DATABASE_URL 의 드라이버를 강제로 교체한다.
+
+    .env 에 `postgresql://`, `postgresql+psycopg2://`, `postgresql+asyncpg://` 중 무엇이 와도
+    런타임(asyncpg)과 alembic(psycopg2)이 각자 필요한 드라이버로 안전하게 접속하도록 정규화한다.
+    """
+    scheme, _, rest = url.partition("://")
+    base = scheme.split("+", 1)[0]
+    return f"{base}+{driver}://{rest}"
+
+
+def get_rds_url_async() -> str:
+    """런타임(FastAPI)용 비동기(asyncpg) 접속 URL."""
+    return _with_driver(get_settings().DATABASE_URL, "asyncpg")
+
+
+def get_rds_url_sync() -> str:
+    """Alembic 마이그레이션용 동기(psycopg2) 접속 URL."""
+    return _with_driver(get_settings().DATABASE_URL, "psycopg2")
+
+
+def get_database_url() -> str:
+    """asyncpg 비동기 URL (FastAPI 앱용)."""
+    return get_rds_url_async()
 
 
 # ── 하위 호환 헬퍼 ────────────────────────────────────────────────────────────
@@ -65,7 +99,7 @@ def get_aws_region() -> str:
     return get_settings().AWS_DEFAULT_REGION
 
 def get_aws_credentials() -> dict:
-    """MFA STS 임시 자격증명. 미설정 시 빈 dict → boto3가 ~/.aws/credentials 폴백."""
+    """STS 임시 자격증명. 미설정 시 빈 dict → boto3가 ~/.aws/credentials 폴백."""
     key = os.getenv("AWS_ACCESS_KEY_ID", "")
     secret = os.getenv("AWS_SECRET_ACCESS_KEY", "")
     token = os.getenv("AWS_SESSION_TOKEN", "")
@@ -77,14 +111,17 @@ def get_aws_credentials() -> dict:
     return {}
 
 
-# ─── AWS Bedrock (Context Blame RAG) ────────────────────────────────
+# ─── AWS Bedrock ────────────────────────────────────────────────────────────
+
+def get_bedrock_model_id() -> str:
+    """Converse API 로 호출할 Bedrock 모델 ID (inference profile ID 권장)."""
+    return get_settings().BEDROCK_MODEL_ID
+
 def get_bedrock_kb_id() -> str:
     """기획서 단락을 조회할 Bedrock Knowledge Base ID. 미설정 시 RAG 생략."""
     return os.getenv("BEDROCK_KNOWLEDGE_BASE_ID", "")
 
-
 def get_bedrock_kb_max_results() -> int:
-    """Knowledge Base 한 번 조회 시 가져올 기획서 단락 수."""
     try:
         return int(os.getenv("BEDROCK_KB_MAX_RESULTS", "4"))
     except ValueError:
@@ -92,6 +129,7 @@ def get_bedrock_kb_max_results() -> int:
 
 
 # ─── 브라운필드 온보딩: 문서 인덱싱 + 커밋 백필 ──────────────────────
+
 def get_doc_index_bucket() -> str:
     """KB 데이터소스가 읽는 S3 버킷. 미설정 시 시맨틱 인덱싱 생략(=no-op)."""
     return os.getenv("DOC_INDEX_S3_BUCKET", "")
@@ -120,37 +158,8 @@ def get_documents_dir() -> str:
     return get_settings().DOCUMENTS_DIR
 
 
-def _with_driver(url: str, driver: str) -> str:
-    """DATABASE_URL 의 드라이버를 강제로 교체한다.
-
-    .env 에 `postgresql://`, `postgresql+psycopg2://`, `postgresql+asyncpg://` 중 무엇이 와도
-    런타임(asyncpg)과 alembic(psycopg2)이 각자 필요한 드라이버로 안전하게 접속하도록 정규화한다.
-    """
-    scheme, _, rest = url.partition("://")
-    base = scheme.split("+", 1)[0]
-    return f"{base}+{driver}://{rest}"
-
-
-def get_rds_url_async() -> str:
-    """런타임(FastAPI)용 비동기(asyncpg) 접속 URL."""
-    return _with_driver(get_settings().DATABASE_URL, "asyncpg")
-
-
-def get_rds_url_sync() -> str:
-    """Alembic 마이그레이션용 동기(psycopg2) 접속 URL.
-
-    접속 정보를 한 곳(.env DATABASE_URL)에서만 관리하기 위해 드라이버만 psycopg2 로 바꾼다.
-    """
-    return _with_driver(get_settings().DATABASE_URL, "psycopg2")
-
-
-# ─── Context Blame: 팀 매핑 / VCS 연동 ──────────────────────────────
 def get_team_map() -> dict[str, str]:
-    """작성자(이름 또는 이메일) → 팀명 매핑.
-
-    CODEWHY_TEAM_MAP 가 가리키는 JSON 파일을 읽는다. 미설정·파일 없음·파싱 실패 시
-    빈 dict 를 돌려주어(=team 칸 생략) 기능이 깨지지 않게 한다.
-    """
+    """작성자 → 팀명 매핑 JSON 파일. 미설정·오류 시 빈 dict."""
     path = os.getenv("CODEWHY_TEAM_MAP", "")
     if not path or not os.path.isfile(path):
         return {}
@@ -161,17 +170,22 @@ def get_team_map() -> dict[str, str]:
     except (OSError, json.JSONDecodeError):
         return {}
 
-
 def get_github_token() -> str:
-    """GitHub PR 조회용 토큰. 미설정 시 PR 연동 생략."""
     return os.getenv("GITHUB_TOKEN", "")
 
-
 def get_gitlab_token() -> str:
-    """GitLab MR 조회용 토큰. 미설정 시 MR 연동 생략."""
     return os.getenv("GITLAB_TOKEN", "")
 
 
-def get_bedrock_model_id() -> str:
-    """Converse API 로 호출할 Bedrock 모델 ID (inference profile ID 권장)."""
-    return get_settings().BEDROCK_MODEL_ID
+def get_attachment_domain_allowlist() -> tuple[str, ...]:
+    """이슈 본문에서 '첨부'로 인정할 외부 도메인 목록.
+
+    GitHub user-attachments 와 흔한 문서 확장자는 vcs.py 가 기본으로 처리한다.
+    Notion·Confluence·Wiki 처럼 확장자 없는 위키 링크를 첨부로 띄우려면 여기에 도메인을 추가한다.
+
+    env: CODEWHY_ATTACHMENT_DOMAINS="notion.so,confluence.atlassian.com,wiki.example.com"
+    """
+    raw = os.getenv("CODEWHY_ATTACHMENT_DOMAINS", "")
+    if not raw.strip():
+        return ()
+    return tuple(d.strip().lower() for d in raw.split(",") if d.strip())

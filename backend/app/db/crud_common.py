@@ -6,7 +6,7 @@
 
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -87,6 +87,50 @@ async def upsert_commit(
         )
     ).scalar_one()
     return commit
+
+
+async def upsert_commits_bulk(
+    db: AsyncSession, repo_id: int, commits: list[dict]
+) -> dict[str, int]:
+    """커밋 목록을 한 번의 SQL로 upsert 하고 commit_hash → commit_id 매핑을 반환한다.
+
+    각 dict 는 {"commit_hash","author","committed_date","message","ticket"} 형식
+    (이미 파싱된 값) — 호출 측이 정규화를 책임진다.
+    빈 값으로 기존 메타데이터를 덮지 않도록 COALESCE 로 보존한다 (upsert_commit 과 동일 정책).
+    """
+    if not commits:
+        return {}
+
+    values = [{**c, "repo_id": repo_id} for c in commits]
+    stmt = pg_insert(Commit).values(values)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["repo_id", "commit_hash"],
+        set_={
+            "author":         func.coalesce(stmt.excluded.author, Commit.author),
+            "message":        func.coalesce(stmt.excluded.message, Commit.message),
+            "ticket":         func.coalesce(stmt.excluded.ticket, Commit.ticket),
+            "committed_date": func.coalesce(stmt.excluded.committed_date, Commit.committed_date),
+        },
+    ).returning(Commit.commit_hash, Commit.id)
+
+    rows = (await db.execute(stmt)).all()
+    return {row.commit_hash: row.id for row in rows}
+
+
+async def link_commits_files_bulk(
+    db: AsyncSession, commit_ids: list[int], file_id: int
+) -> None:
+    """commit_files 링크를 한 번의 SQL로 다중 INSERT 한다 (이미 존재하면 무시)."""
+    if not commit_ids:
+        return
+
+    values = [{"commit_id": cid, "file_id": file_id} for cid in commit_ids]
+    stmt = (
+        pg_insert(CommitFile)
+        .values(values)
+        .on_conflict_do_nothing(index_elements=["commit_id", "file_id"])
+    )
+    await db.execute(stmt)
 
 
 async def link_commit_file(

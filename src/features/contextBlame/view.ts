@@ -1,7 +1,10 @@
+import { execSync } from 'child_process';
 import * as vscode from 'vscode';
-import { EditorContext } from '../../shared/editor';
-import { BlameResult } from '../../shared/types';
-import { askBlame, fetchContextBlame } from './api';
+import { EditorContext, getEditorContext } from '../../shared/editor';
+import { BlameResult, CommitInput } from '../../shared/types';
+import { fetchRequirementTrace } from '../requirementTrace/api';
+import { streamTimelineSummary } from '../timelineSummary/api';
+import { fetchContextBlame } from './api';
 import { ContextBlameSidebarProvider, VIEW_ID } from './sidebar';
 
 /**
@@ -77,17 +80,14 @@ function ensureInitialized(context: vscode.ExtensionContext) {
 
     // ── 사이드바 Provider 등록 ─────────────────────────────────────
     sidebar = new ContextBlameSidebarProvider(context.extensionUri, {
-        onOpenSpec: (sourceRef) => openSpecDocument(sourceRef),
         onOpenCommit: (commitHash, repoPath) =>
             vscode.commands.executeCommand('codewhy.blame.openCommit', { commitHash, repoPath }),
-        onOpenHistory: () => vscode.commands.executeCommand('codewhy.timelineSummary'),
+        onSwitchTab: (tab) => handleSwitchTab(tab),
+        onOpenIssue: (url) => { vscode.env.openExternal(vscode.Uri.parse(url)); },
         onTogglePin: (filePath, line) =>
             vscode.commands.executeCommand('codewhy.blame.pin', { filePath, line }),
-        onAskAi: (question, ctx, result) => handleAskAi(question, ctx, result),
-        onCopy: (text) => {
-            vscode.env.clipboard.writeText(text);
-            vscode.window.setStatusBarMessage('CodeWhy: 카드 내용을 클립보드에 복사했어요.', 2000);
-        },
+        onOpenSettings: () =>
+            vscode.commands.executeCommand('workbench.action.openSettings', 'codewhy'),
     });
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(VIEW_ID, sidebar, {
@@ -139,6 +139,16 @@ function ensureInitialized(context: vscode.ExtensionContext) {
         ),
     );
 
+    // ── 문서 수정 감지 → 해당 파일의 블레임 캐시·핀 무효화
+    //    줄이 밀리면 캐시 키(filePath:line)가 엉뚱한 줄을 가리키므로 통째로 지운다.
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeTextDocument(e => {
+            if (e.contentChanges.length === 0) { return; }
+            const changedPath = e.document.uri.fsPath;
+            invalidateFileCache(changedPath);
+        }),
+    );
+
     // ── 커서 이동 감지 → CodeLens 위치 갱신 + 캐시 있으면 사이드바 자동 갱신
     context.subscriptions.push(
         vscode.window.onDidChangeTextEditorSelection(e => {
@@ -181,7 +191,9 @@ async function handleAnalyzeAndShow(args: { filePath: string; line: number; repo
                 try {
                     const result = await fetchContextBlame(args);
                     entry = { ctx: args, result };
-                    blameCache.set(key, entry);
+                    // degraded(Bedrock 폴백) 응답은 일시적 실패이므로 캐싱하지 않는다.
+                    // 이번엔 사용자에게 보여주되, 다음 분석 때 다시 호출해 자동 회복되게 한다.
+                    if (!result.aiDegraded) { blameCache.set(key, entry); }
                 } catch (err) {
                     vscode.window.showErrorMessage(`Context Blame 실패: ${(err as Error).message}`);
                 }
@@ -192,6 +204,91 @@ async function handleAnalyzeAndShow(args: { filePath: string; line: number; repo
     if (!entry) { return; }
     updateStatusBar(args.line, entry.result);
     pushToSidebar(entry.ctx, entry.result);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 공통 탭바 — 한 패널 안 세 페인. 탭 클릭 시 현재 커서 라인 기준으로 자동 분석한다.
+// 각 탭의 결과는 모두 같은 sidebar provider 의 set*() 메서드로 밀어넣는다.
+// ─────────────────────────────────────────────────────────────────────────────
+function handleSwitchTab(tab: string) {
+    switch (tab) {
+        case 'timeline': runTimelineTab(); break;
+        case 'issue': runIssueTab(); break;
+        case 'blame':
+        default: runBlameTab(); break;
+    }
+}
+
+/** 블레임 탭: 현재 커서 라인을 분석(캐시 적중 시 즉시)해 패널에 표시. */
+export function runBlameTab() {
+    const ctx = getEditorContext();
+    if (!ctx) { return; }
+    handleAnalyzeAndShow({ filePath: ctx.filePath, line: ctx.line, repoPath: ctx.repoPath });
+}
+
+/** 타임라인 탭: 파일 커밋 이력을 모아 AI 요약을 스트리밍으로 패널에 표시. */
+export function runTimelineTab() {
+    if (!sidebar) { return; }
+    sidebar.activateTab('timeline');
+    const ctx = getEditorContext();
+    if (!ctx) { return; }
+
+    const fileName = ctx.filePath.split(/[\\/]/).pop() ?? ctx.filePath;
+    const commits = collectGitLog(ctx.repoPath, ctx.filePath);
+    if (commits.length === 0) {
+        sidebar.timelineEmpty('이 파일의 git 커밋 이력을 찾을 수 없습니다.');
+        return;
+    }
+
+    sidebar.timelineStreaming(fileName);
+    streamTimelineSummary(
+        { filePath: ctx.filePath, repoPath: ctx.repoPath, commits },
+        {
+            onDelta: (delta) => sidebar!.timelineDelta(delta),
+            onDone: (result) => sidebar!.timelineResult(fileName, result),
+            onError: (message) => sidebar!.timelineEmpty(`타임라인 요약 실패: ${message}`),
+        },
+    ).catch((err) => sidebar!.timelineEmpty(`타임라인 요약 실패: ${(err as Error).message}`));
+}
+
+/** 이슈 탭: 현재 라인과 연관된 GitHub Issue 를 역추적해 목록으로 표시. */
+export async function runIssueTab() {
+    if (!sidebar) { return; }
+    sidebar.activateTab('issue');
+    const ctx = getEditorContext();
+    if (!ctx) { return; }
+
+    sidebar.issueLoading();
+    try {
+        const result = await fetchRequirementTrace({
+            filePath: ctx.filePath,
+            line: ctx.line,
+            repoPath: ctx.repoPath,
+        });
+        if (!result.documents || result.documents.length === 0) {
+            sidebar.issueEmpty(`L${ctx.line} 와 연관된 GitHub Issue를 찾지 못했습니다.`);
+            return;
+        }
+        sidebar.issueResult(ctx.line, result);
+    } catch (err) {
+        sidebar.issueEmpty(`요구사항 역추적 실패: ${(err as Error).message}`);
+    }
+}
+
+/** 파일의 git 커밋 이력(타임라인 입력)을 수집한다. */
+function collectGitLog(repoPath: string, filePath: string): CommitInput[] {
+    try {
+        const out = execSync(
+            `git log --follow --format="%H|%an|%ad|%s" --date=short -- "${filePath}"`,
+            { cwd: repoPath, timeout: 10_000 },
+        ).toString().trim();
+        return out.split('\n').filter(Boolean).map(line => {
+            const [hash, author, date, ...rest] = line.split('|');
+            return { hash, author, date, subject: rest.join('|') };
+        });
+    } catch {
+        return [];
+    }
 }
 
 function pushToSidebar(ctx: EditorContext, r: BlameResult) {
@@ -286,65 +383,6 @@ function refreshPinnedDecorations(editor: vscode.TextEditor) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. AI 후속 질문 — 사이드바 인풋에서 Enter 친 경우
-// ─────────────────────────────────────────────────────────────────────────────
-// ─────────────────────────────────────────────────────────────────────────────
-// 5-b. 기획서 열기 — sourceRef("파일명.pdf §4.2")의 문서를 documentPaths 에서 찾아 연다
-// ─────────────────────────────────────────────────────────────────────────────
-async function openSpecDocument(sourceRef: string | null) {
-    const fileName = extractSpecFileName(sourceRef);
-    if (fileName) {
-        const uri = await findDocumentUri(fileName);
-        if (uri) {
-            await vscode.commands.executeCommand('vscode.open', uri);
-            if (/§/.test(sourceRef ?? '')) {
-                vscode.window.setStatusBarMessage(`CodeWhy: ${sourceRef} 로 이동했어요 (섹션은 문서에서 확인).`, 4000);
-            }
-            return;
-        }
-        vscode.window.showWarningMessage(
-            `CodeWhy: "${fileName}" 문서를 documentPaths 설정에서 찾지 못했어요. 요구사항 역추적으로 대신 검색합니다.`,
-        );
-    }
-    // 파일명을 못 뽑았거나 문서를 못 찾으면 기존 요구사항 역추적으로 폴백
-    vscode.commands.executeCommand('codewhy.requirementTrace');
-}
-
-/** "2026_결제_기획서.pdf §4.2" → "2026_결제_기획서.pdf" */
-function extractSpecFileName(sourceRef: string | null): string | null {
-    if (!sourceRef) { return null; }
-    const m = sourceRef.match(/[^\s§]+\.(pdf|docx|xlsx|md|txt)/i);
-    return m ? m[0] : null;
-}
-
-/** documentPaths 설정의 폴더들에서 파일명이 일치하는 문서를 찾는다. */
-async function findDocumentUri(fileName: string): Promise<vscode.Uri | undefined> {
-    const folders = vscode.workspace.getConfiguration('codewhy').get<string[]>('documentPaths') ?? [];
-    for (const folder of folders) {
-        const pattern = new vscode.RelativePattern(folder, `**/${fileName}`);
-        const hits = await vscode.workspace.findFiles(pattern, undefined, 1);
-        if (hits.length) { return hits[0]; }
-    }
-    return undefined;
-}
-
-async function handleAskAi(question: string, ctx: EditorContext, _result: BlameResult) {
-    if (!sidebar) { return; }
-    sidebar.showAnswer(question, '…'); // 즉시 질문 버블 + 로딩 표시
-    try {
-        const { answer } = await askBlame({
-            filePath: ctx.filePath,
-            line: ctx.line,
-            repoPath: ctx.repoPath,
-            question,
-        });
-        sidebar.showAnswer(question, answer);
-    } catch (err) {
-        sidebar.showAnswer(question, `답변을 가져오지 못했어요: ${(err as Error).message}`);
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // 6. 날짜 유틸
 // ─────────────────────────────────────────────────────────────────────────────
 function formatDisplayDate(s: string): string {
@@ -364,3 +402,23 @@ function parseDateLoose(s: string): Date | null {
 }
 
 const truncate = (s: string, n: number) => s.length > n ? `${s.slice(0, n - 1)}…` : s;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. 캐시 무효화 — 파일 편집 시 줄 번호가 밀려 캐시가 stale 해지는 것을 방지
+// ─────────────────────────────────────────────────────────────────────────────
+function invalidateFileCache(filePath: string) {
+    for (const key of [...blameCache.keys()]) {
+        if (key.startsWith(filePath + ':')) {
+            blameCache.delete(key);
+        }
+    }
+    for (const key of [...pinned]) {
+        if (key.startsWith(filePath + ':')) {
+            pinned.delete(key);
+        }
+    }
+    const editor = vscode.window.activeTextEditor;
+    if (editor && editor.document.uri.fsPath === filePath) {
+        refreshPinnedDecorations(editor);
+    }
+}
