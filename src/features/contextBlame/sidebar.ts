@@ -389,6 +389,49 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         padding: 1px 6px; border-radius: 4px; font-size: 11px;
     }
 
+    /* ── 환영(온보딩) 화면 — 설치 직후 첫 화면 ─────────────────────── */
+    .hero {
+        display: flex; flex-direction: column; align-items: center; text-align: center;
+        padding: 40px 24px 28px;
+        gap: 14px;
+    }
+    .hero__badge {
+        width: 64px; height: 64px; border-radius: 18px;
+        display: inline-flex; align-items: center; justify-content: center;
+        background: linear-gradient(135deg, rgba(103,232,249,0.18) 0%, rgba(167,139,250,0.22) 100%);
+        border: 1px solid var(--line-soft);
+        box-shadow: 0 0 28px rgba(167,139,250,0.30);
+        color: var(--accent-violet);
+        margin-bottom: 4px;
+    }
+    .hero__title {
+        margin: 0; font-size: 18px; font-weight: 700; color: var(--fg);
+        letter-spacing: -0.01em;
+    }
+    .hero__desc {
+        margin: 0; max-width: 320px;
+        color: var(--fg-dim); font-size: 13px; line-height: 1.65;
+    }
+    .hero__desc strong { color: var(--fg); font-weight: 700; }
+    .hero__cta {
+        width: 100%; max-width: 340px; margin-top: 6px;
+        display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+        padding: 12px 16px; border: none; border-radius: 12px;
+        background: var(--grad); color: #fff;
+        font-family: inherit; font-size: 14px; font-weight: 700; cursor: pointer;
+        box-shadow: 0 6px 20px rgba(109,40,217,0.35);
+        transition: filter 0.12s, transform 0.06s;
+    }
+    .hero__cta:hover { filter: brightness(1.08); }
+    .hero__cta:active { transform: translateY(1px); }
+    .hero__cta span { display: inline-flex; }
+    .hero__status {
+        display: inline-flex; align-items: center; gap: 6px;
+        margin-top: 4px;
+        color: #4ADE80; font-size: 11.5px;
+    }
+    .hero__status span { display: inline-flex; }
+
     /* ── 안내 상태: 커밋 이력 없음(미커밋 라인 등) ────────────────── */
     .info {
         margin: 14px;
@@ -602,13 +645,13 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
     <header class="head">
-        <span class="head__title"><span class="spark" id="ico-head-spark"></span>CONTEXT BLAME</span>
+        <span class="head__title"></span>
         <div class="head__actions">
-            <button class="icon-btn" id="btn-pin" data-action="togglePin" title="이 라인 고정"></button>
+            <button class="icon-btn hidden" id="btn-pin" data-action="togglePin" title="이 라인 고정"></button>
             <button class="icon-btn" id="btn-settings" data-action="openSettings" title="CodeWhy 설정"><span id="ico-settings"></span></button>
         </div>
     </header>
-    <nav class="tabs">
+    <nav class="tabs hidden">
         <button class="tab active" data-tab="blame"><span class="tab__ico" id="ico-tab-blame"></span>블레임</button>
         <button class="tab" data-tab="timeline"><span class="tab__ico" id="ico-tab-timeline"></span>타임라인</button>
         <button class="tab" data-tab="issue"><span class="tab__ico" id="ico-tab-issue"></span>이슈</button>
@@ -616,8 +659,13 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
 
     <!-- ─────────────── 블레임 탭 ─────────────── -->
     <div id="pane-blame" class="pane">
-    <div id="empty" class="empty">
-        에디터에서 라인을 선택하고 <span class="kbd">🔍 왜 바꿨어?</span> 렌즈를 클릭하면<br/>이곳에 변경 사유가 나타납니다.
+    <!-- 설치 직후 첫 화면(환영/온보딩). 탭 바는 이 상태에서 숨기고, 분석 시작·칩 클릭 시 노출한다. -->
+    <div id="empty" class="hero">
+        <div class="hero__badge"><span id="ico-hero-shield"></span></div>
+        <h1 class="hero__title">이 파일, 왜 이렇게 짰을까?</h1>
+        <p class="hero__desc">CodeWhy가 커밋 히스토리와 기획서를 읽어<br/><strong>모든 결정의 이유</strong>를 이 자리에 정리해 드립니다.</p>
+        <button class="hero__cta" data-action="analyzeFile"><span id="ico-hero-spark"></span> 이 파일 분석하기</button>
+        <div class="hero__status"><span id="ico-hero-check"></span> 저장소 연결됨</div>
     </div>
 
     <div id="info" class="info hidden">
@@ -708,11 +756,13 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         clock:  '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="8" cy="8" r="6.5"/><path d="M8 4.5V8l2.5 1.5"/></svg>',
         issue:  '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="6.5"/><circle cx="8" cy="8" r="1.6" fill="currentColor" stroke="none"/></svg>',
         gear:   '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="8" cy="8" r="2.2"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M13 3l-1.5 1.5M4.5 11.5L3 13"/></svg>',
+        check:  '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 8.5l3.2 3.2L13 4.5"/></svg>',
+        shieldBig: '<svg width="30" height="30" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.1"><path d="M8 1l6 2v5c0 4-2.8 6.6-6 7-3.2-.4-6-3-6-7V3l6-2z"/><path d="M5.5 8l1.8 1.8L11 6" stroke-width="1.3"/></svg>',
+        sparkBig: '<svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l1.5 4.5L14 7l-4.5 1.5L8 13l-1.5-4.5L2 7l4.5-1.5L8 1z"/></svg>',
     };
     // 아이콘 주입은 보조 장식이므로, 한 요소가 없더라도 핸드셰이크(ready)까지 죽지 않게 격리한다.
     try {
         const setIcon = (id, svg) => { const el = document.getElementById(id); if (el) { el.innerHTML = svg; } };
-        setIcon('ico-head-spark', ICON.spark);
         setIcon('ico-settings', ICON.gear);
         setIcon('ico-callout', ICON.spark);
         setIcon('ico-info', ICON.spark);
@@ -720,6 +770,9 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         setIcon('ico-tab-timeline', ICON.clock);
         setIcon('ico-tab-issue', ICON.branch);
         setIcon('ico-tl-spark', ICON.spark);
+        setIcon('ico-hero-shield', ICON.shieldBig);
+        setIcon('ico-hero-spark', ICON.sparkBig);
+        setIcon('ico-hero-check', ICON.check);
         setPin(false);
     } catch (err) {
         vscode.postMessage({ type: 'webview-error', payload: '아이콘 초기화 실패: ' + String(err) });
@@ -736,6 +789,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
                 document.getElementById('info').classList.add('hidden');
                 document.getElementById('empty').classList.remove('hidden');
                 document.getElementById('content').classList.add('hidden');
+                revealTabs(false);   // 환영 화면으로 복귀 — 탭 바 숨김
                 break;
             case 'pinned': setPin(msg.pinned); break;
             // ── 탭 전환(확장 → 웹뷰) ──
@@ -876,12 +930,20 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         const info = document.getElementById('info');
         info.classList.remove('hidden');
         document.getElementById('info-text').innerHTML = decorate(message);
+        revealTabs(true);
+    }
+
+    // 환영 화면에선 탭 바·핀 버튼을 숨기고(헤더엔 ⚙만), 분석을 시작하면 드러낸다.
+    function revealTabs(on) {
+        document.querySelector('.tabs').classList.toggle('hidden', !on);
+        document.getElementById('btn-pin').classList.toggle('hidden', !on);
     }
 
     function render(p) {
         document.getElementById('empty').classList.add('hidden');
         document.getElementById('info').classList.add('hidden');
         document.getElementById('content').classList.remove('hidden');
+        revealTabs(true);
 
         // 콜아웃 본문 — "{작성자}님이 {월일}에 {설명}" 한 문장. 작성자만 보라색 강조.
         // author/dateShort 가 없으면 설명만 노출한다.
@@ -997,6 +1059,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     const PANES = { blame: 'pane-blame', timeline: 'pane-timeline', issue: 'pane-issue' };
     function showTab(tab) {
         if (!PANES[tab]) { tab = 'blame'; }
+        // 타임라인·이슈로 가면 탭 바를 드러낸다(블레임은 환영 화면일 수 있어 건드리지 않음).
+        if (tab !== 'blame') { revealTabs(true); }
         document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
         Object.keys(PANES).forEach(k => document.getElementById(PANES[k]).classList.toggle('hidden', k !== tab));
     }
@@ -1012,6 +1076,13 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     document.body.addEventListener('click', (e) => {
         const el = e.target.closest('[data-action]');
         if (!el) return;
+        // 환영 화면 CTA — 현재 커서 라인 기준으로 블레임 분석을 시작한다.
+        if (el.dataset.action === 'analyzeFile') {
+            revealTabs(true);
+            showTab('blame');
+            vscode.postMessage({ type: 'switchTab', payload: { tab: 'blame' } });
+            return;
+        }
         // 라인 수정 이력 항목은 자기 커밋 해시를 함께 실어 보낸다.
         if (el.dataset.action === 'openCommitHash') {
             vscode.postMessage({ type: 'openCommitHash', payload: { hash: el.dataset.hash } });
