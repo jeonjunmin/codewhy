@@ -84,10 +84,6 @@ function ensureInitialized(context: vscode.ExtensionContext) {
             vscode.commands.executeCommand('codewhy.blame.openCommit', { commitHash, repoPath }),
         onSwitchTab: (tab) => handleSwitchTab(tab),
         onOpenIssue: (url) => { vscode.env.openExternal(vscode.Uri.parse(url)); },
-        onTogglePin: (filePath, line) =>
-            vscode.commands.executeCommand('codewhy.blame.pin', { filePath, line }),
-        onOpenSettings: () =>
-            vscode.commands.executeCommand('workbench.action.openSettings', 'codewhy'),
     });
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(VIEW_ID, sidebar, {
@@ -174,6 +170,9 @@ function ensureInitialized(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('codewhy.blame.analyzeAndShow', handleAnalyzeAndShow),
         vscode.commands.registerCommand('codewhy.blame.openCommit', openCommitInTerminal),
         vscode.commands.registerCommand('codewhy.blame.pin', togglePin),
+        // 제목줄(view/title) ⚙ 설정 버튼 — 'CodeWhy' 패널 제목 오른쪽 끝에 노출된다.
+        vscode.commands.registerCommand('codewhy.openSettings', () =>
+            vscode.commands.executeCommand('workbench.action.openSettings', 'codewhy')),
     );
 }
 
@@ -357,7 +356,6 @@ async function togglePin(args?: { filePath: string; line: number }) {
     }
     pinned.has(key) ? pinned.delete(key) : pinned.add(key);
     if (editor) { refreshPinnedDecorations(editor); }
-    sidebar?.refreshPinned(pinned.has(key));
 }
 
 function refreshPinnedDecorations(editor: vscode.TextEditor) {

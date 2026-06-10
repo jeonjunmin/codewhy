@@ -55,6 +55,11 @@
       {
         "command": "codewhy.blame.pin",
         "title": "CodeWhy: 현재 라인 블레임 고정/해제"
+      },
+      {
+        "command": "codewhy.openSettings",
+        "title": "CodeWhy: 설정 열기",
+        "icon": "$(gear)"
       }
     ],
     "keybindings": [
@@ -66,6 +71,13 @@
       }
     ],
     "menus": {
+      "view/title": [
+        {
+          "command": "codewhy.openSettings",
+          "when": "view == codewhy.contextBlame",
+          "group": "navigation"
+        }
+      ],
       "editor/context": [
         {
           "command": "codewhy.contextBlame",

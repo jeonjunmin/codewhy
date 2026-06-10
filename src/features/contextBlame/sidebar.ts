@@ -52,8 +52,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             onOpenCommit: (commitHash: string, repoPath: string) => void;
             onSwitchTab: (tab: string) => void;
             onOpenIssue: (url: string) => void;
-            onTogglePin: (filePath: string, line: number) => void;
-            onOpenSettings: () => void;
         },
     ) {}
 
@@ -120,12 +118,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         this.postRender(ctx, result, pinned);
     }
 
-    /** 핀 토글 시 그라데이션·아이콘만 갱신. */
-    refreshPinned(pinned: boolean) {
-        if (!this.last || !this.view) { return; }
-        this.last.pinned = pinned;
-        this.view.webview.postMessage({ type: 'pinned', pinned });
-    }
 
     // ─── 타임라인 탭 (개발자 B) ───────────────────────────────────────────
     /** 확장 측에서 특정 탭을 띄우고 싶을 때(패널 강제 표시 포함). */
@@ -225,11 +217,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             }
             return;
         }
-        // 헤더 ⚙ 설정 — 블레임 결과 없이도 동작한다.
-        if (msg.type === 'openSettings') {
-            this.handlers.onOpenSettings();
-            return;
-        }
         if (!this.last) { return; }
         const { ctx, result } = this.last;
         switch (msg.type) {
@@ -240,9 +227,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
                 if (typeof msg.payload?.hash === 'string' && msg.payload.hash) {
                     this.handlers.onOpenCommit(msg.payload.hash, ctx.repoPath);
                 }
-                break;
-            case 'togglePin':
-                this.handlers.onTogglePin(ctx.filePath, ctx.line);
                 break;
         }
     }
@@ -327,28 +311,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         line-height: 1.5;
     }
     code, .mono { font-family: var(--vscode-editor-font-family, ui-monospace, monospace); }
-
-    /* ── 헤더 ────────────────────────────────────────────────────── */
-    .head {
-        display: flex; align-items: center; justify-content: space-between;
-        padding: 12px 14px 8px;
-        border-bottom: 1px solid var(--line);
-    }
-    .head__title {
-        display: inline-flex; align-items: center; gap: 6px;
-        font-size: 11px; font-weight: 700; letter-spacing: 0.12em;
-        color: var(--fg-dim); text-transform: uppercase;
-    }
-    .head__title .spark { color: var(--accent-violet); display: inline-flex; }
-    .head__actions { display: flex; gap: 2px; }
-    .icon-btn {
-        background: transparent; border: none; cursor: pointer;
-        color: var(--fg-mute); padding: 3px; border-radius: 5px;
-        display: inline-flex; align-items: center; justify-content: center;
-        transition: background 0.12s, color 0.12s;
-    }
-    .icon-btn:hover { background: var(--line); color: var(--fg); }
-    .icon-btn.active { color: var(--accent-violet); }
 
     /* ── 공통 탭바 (블레임 / 타임라인 / 이슈) ─────────────────────── */
     .tabs {
@@ -644,13 +606,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
 </style>
 </head>
 <body>
-    <header class="head">
-        <span class="head__title"></span>
-        <div class="head__actions">
-            <button class="icon-btn hidden" id="btn-pin" data-action="togglePin" title="이 라인 고정"></button>
-            <button class="icon-btn" id="btn-settings" data-action="openSettings" title="CodeWhy 설정"><span id="ico-settings"></span></button>
-        </div>
-    </header>
     <nav class="tabs hidden">
         <button class="tab active" data-tab="blame"><span class="tab__ico" id="ico-tab-blame"></span>블레임</button>
         <button class="tab" data-tab="timeline"><span class="tab__ico" id="ico-tab-timeline"></span>타임라인</button>
@@ -746,8 +701,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     // ── 아이콘들 (인라인 SVG) ───────────────────────────────────────
     const ICON = {
         spark:  '<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l1.5 4.5L14 7l-4.5 1.5L8 13l-1.5-4.5L2 7l4.5-1.5L8 1z"/></svg>',
-        pinOff: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M10 1l5 5-2 2-1.5-.5L8 11l-.5 1.5L2 14l1.5-5.5L5 8l3.5-3.5L8 3l2-2z"/></svg>',
-        pinOn:  '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M10 1l5 5-2 2-1.5-.5L8 11l-.5 1.5L2 14l1.5-5.5L5 8l3.5-3.5L8 3l2-2z"/></svg>',
         copy:   '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M2 11V3.5A1.5 1.5 0 0 1 3.5 2H11"/></svg>',
         doc:    '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M3 1h7l3 3v11H3V1z"/><path d="M10 1v4h3M5 8h6M5 10h6M5 12h4"/></svg>',
         branch: '<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M5 3a1.5 1.5 0 1 0-2 0v8a1.5 1.5 0 1 0 1 0V8h3a3 3 0 0 0 3-3V4.92a1.5 1.5 0 1 0-1 0V5a2 2 0 0 1-2 2H4V3z"/></svg>',
@@ -755,15 +708,13 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         commit: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="2.5"/><path d="M0 8h5M11 8h5"/></svg>',
         clock:  '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="8" cy="8" r="6.5"/><path d="M8 4.5V8l2.5 1.5"/></svg>',
         issue:  '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="6.5"/><circle cx="8" cy="8" r="1.6" fill="currentColor" stroke="none"/></svg>',
-        gear:   '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="8" cy="8" r="2.2"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M13 3l-1.5 1.5M4.5 11.5L3 13"/></svg>',
-        check:  '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 8.5l3.2 3.2L13 4.5"/></svg>',
+        check:'<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 8.5l3.2 3.2L13 4.5"/></svg>',
         shieldBig: '<svg width="30" height="30" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.1"><path d="M8 1l6 2v5c0 4-2.8 6.6-6 7-3.2-.4-6-3-6-7V3l6-2z"/><path d="M5.5 8l1.8 1.8L11 6" stroke-width="1.3"/></svg>',
         sparkBig: '<svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l1.5 4.5L14 7l-4.5 1.5L8 13l-1.5-4.5L2 7l4.5-1.5L8 1z"/></svg>',
     };
     // 아이콘 주입은 보조 장식이므로, 한 요소가 없더라도 핸드셰이크(ready)까지 죽지 않게 격리한다.
     try {
         const setIcon = (id, svg) => { const el = document.getElementById(id); if (el) { el.innerHTML = svg; } };
-        setIcon('ico-settings', ICON.gear);
         setIcon('ico-callout', ICON.spark);
         setIcon('ico-info', ICON.spark);
         setIcon('ico-tab-blame', ICON.doc);
@@ -773,7 +724,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         setIcon('ico-hero-shield', ICON.shieldBig);
         setIcon('ico-hero-spark', ICON.sparkBig);
         setIcon('ico-hero-check', ICON.check);
-        setPin(false);
     } catch (err) {
         vscode.postMessage({ type: 'webview-error', payload: '아이콘 초기화 실패: ' + String(err) });
     }
@@ -791,7 +741,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
                 document.getElementById('content').classList.add('hidden');
                 revealTabs(false);   // 환영 화면으로 복귀 — 탭 바 숨김
                 break;
-            case 'pinned': setPin(msg.pinned); break;
             // ── 탭 전환(확장 → 웹뷰) ──
             case 'activateTab': showTab(msg.payload.tab); break;
             // ── 타임라인 ──
@@ -917,12 +866,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         return el;
     }
 
-    function setPin(pinned) {
-        const btn = document.getElementById('btn-pin');
-        btn.innerHTML = pinned ? ICON.pinOn : ICON.pinOff;
-        btn.classList.toggle('active', !!pinned);
-    }
-
     // 커밋 이력이 없는 라인(미커밋 파일 등) — 깨져 보이는 메타 카드 대신 안내 문구만 깔끔히
     function showInfo(message) {
         document.getElementById('empty').classList.add('hidden');
@@ -933,10 +876,9 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         revealTabs(true);
     }
 
-    // 환영 화면에선 탭 바·핀 버튼을 숨기고(헤더엔 ⚙만), 분석을 시작하면 드러낸다.
+    // 환영 화면에선 탭 바를 숨기고, 분석을 시작하면 드러낸다.
     function revealTabs(on) {
         document.querySelector('.tabs').classList.toggle('hidden', !on);
-        document.getElementById('btn-pin').classList.toggle('hidden', !on);
     }
 
     function render(p) {
@@ -986,8 +928,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         } else {
             histWrap.classList.add('hidden');
         }
-
-        setPin(!!p.pinned);
     }
 
     // 라인 수정 이력 한 줄 — 클릭하면 해당 커밋을 git show 로 연다.
