@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { EditorContext } from '../../shared/editor';
 import { log } from '../../shared/log';
 import { BlameResult, TimelineResult, TraceResult } from '../../shared/types';
+import { BlameMeta } from './api';
 
 /**
  * CodeWhy 통합 사이드바 — 하나의 WebviewView 안에서 탭으로 세 기능을 전환한다.
@@ -28,6 +29,12 @@ type TimelineState =
     | { kind: 'result'; fileName: string; result: TimelineResult }
     | { kind: 'empty'; message?: string };
 
+// 블레임 탭 스트리밍 상태 — 타임라인 TimelineState 와 동일한 구조.
+// 'streaming' 은 meta 프레임 수신 후 설명 토큰을 받는 중, 'result' 는 done 수신 후 확정.
+type BlameStreamState =
+    | { kind: 'streaming'; ctx: EditorContext; meta: BlameMeta; text: string }
+    | { kind: 'result'; ctx: EditorContext; result: BlameResult };
+
 type IssueState =
     | { kind: 'loading' }
     | { kind: 'result'; line: number; result: TraceResult }
@@ -36,6 +43,7 @@ type IssueState =
 export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     private view?: vscode.WebviewView;
     private last?: { ctx: EditorContext; result: BlameResult; pinned: boolean };
+    private lastBlameStream?: BlameStreamState;
     private lastTimeline?: TimelineState;
     private lastIssue?: IssueState;
     private activeTab: 'blame' | 'timeline' | 'issue' = 'blame';
@@ -80,8 +88,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
 
     /** 웹뷰 스크립트가 'ready' 를 보내오면 각 탭의 마지막 상태를 한 번 그린다. */
     private flushPending() {
-        // 블레임
-        if (this.last) {
+        // 블레임 — 스트리밍 중이면 그 상태를, 아니면 마지막 확정 결과를 복원.
+        if (this.lastBlameStream?.kind === 'streaming') {
+            this.postBlameStream(this.lastBlameStream);
+        } else if (this.last) {
             this.postRender(this.last.ctx, this.last.result, this.last.pinned);
         } else {
             this.postEmpty();
@@ -115,7 +125,76 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             log('sidebar', 'view 있으나 아직 ready 전 — flushPending 에 위임');
             return;
         }
+        // 확정 렌더가 진행 중이던 스트림을 대체한다(커서 이동/캐시 적중 등).
+        this.lastBlameStream = undefined;
         this.postRender(ctx, result, pinned);
+    }
+
+    // ─── 블레임 탭 스트리밍 (개발자 A) ─────────────────────────────────────
+    // 타임라인 timelineStreaming/Delta/Result 3단 패턴을 그대로 미러링한다.
+
+    /** meta 프레임 수신 — 메타/라인 이력을 즉시 그리고 콜아웃을 캐럿과 함께 연다. */
+    blameStreaming(ctx: EditorContext, meta: BlameMeta) {
+        this.activeTab = 'blame';
+        this.lastBlameStream = { kind: 'streaming', ctx, meta, text: '' };
+        if (!this.view) {
+            // 사이드바가 아직 안 열려 있으면 강제로 표시 — ready 수신 시 flushPending 이 그린다.
+            // 그 사이 도착한 delta 는 lastBlameStream.text 에 누적돼 flush 때 함께 렌더된다.
+            vscode.commands.executeCommand(`${VIEW_ID}.focus`);
+            return;
+        }
+        this.view.show?.(true);
+        if (!this.ready) { return; }  // ready 전 — flushPending 에 위임
+        this.postBlameStream(this.lastBlameStream);
+    }
+    /** 설명 토큰 한 조각 — 콜아웃에 이어 붙인다. */
+    blameDelta(delta: string) {
+        if (this.lastBlameStream?.kind === 'streaming') { this.lastBlameStream.text += delta; }
+        this.view?.webview.postMessage({ type: 'blDelta', payload: { delta } });
+    }
+    /** done 프레임 수신 — 캐럿을 제거하고 출처/PR 등 나머지 필드를 확정한다. */
+    blameResult(ctx: EditorContext, result: BlameResult) {
+        this.lastBlameStream = { kind: 'result', ctx, result };
+        // 확정 결과는 this.last 에도 담아, 웹뷰 재로드 시 postRender 로 깔끔히 복원되게 한다.
+        this.last = { ctx, result, pinned: false };
+        this.postBlameStream(this.lastBlameStream);
+    }
+
+    private postBlameStream(s: BlameStreamState) {
+        const wv = this.view?.webview;
+        if (!wv || !this.ready) { return; }
+        if (s.kind === 'streaming') {
+            const { ctx, meta } = s;
+            const fileName = ctx.filePath.split(/[\\/]/).pop() ?? ctx.filePath;
+            wv.postMessage({
+                type: 'blStreaming',
+                payload: {
+                    fileName,
+                    line: ctx.line,
+                    author: meta.author,
+                    team: meta.team,
+                    commitShort: (meta.commitHash || '').slice(0, 7),
+                    ticket: meta.ticket,
+                    dateShort: formatDisplayDate(meta.date),
+                    dateFull: formatISODate(meta.date),
+                    relative: formatRelativeKo(meta.date),
+                    changeStats: meta.changeStats,
+                    lineHistory: meta.lineHistory ?? [],
+                    text: s.text,
+                },
+            });
+        } else {
+            const r = s.result;
+            wv.postMessage({
+                type: 'blResult',
+                payload: {
+                    explanation: (r.explanation ?? '').trim(),
+                    sourceRef: r.sourceRef ?? r.specRef ?? null,
+                    changeStats: r.changeStats,
+                    prInfo: r.prInfo,
+                },
+            });
+        }
     }
 
 
@@ -734,6 +813,9 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         switch (msg.type) {
             // ── 블레임 ──
             case 'render': render(msg.payload); break;
+            case 'blStreaming': blStreaming(msg.payload); break;
+            case 'blDelta': blDelta(msg.payload.delta); break;
+            case 'blResult': blResult(msg.payload); break;
             case 'info': showInfo(msg.payload.message); break;
             case 'empty':
                 document.getElementById('info').classList.add('hidden');
@@ -879,6 +961,78 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     // 환영 화면에선 탭 바를 숨기고, 분석을 시작하면 드러낸다.
     function revealTabs(on) {
         document.querySelector('.tabs').classList.toggle('hidden', !on);
+    }
+
+    // ─────────────────── 블레임 스트리밍 렌더 ───────────────────
+    // 타임라인 tlStreaming/tlDelta/tlResult 와 동일한 3단 흐름.
+    // blStreaming: meta 로 메타표·이력을 즉시 그리고 콜아웃에 캐럿을 띄운다.
+    // blDelta    : 설명 토큰을 콜아웃(#ca-exp)에 이어 붙인다.
+    // blResult   : 캐럿 제거 + 출처/변경(PR 포함) 확정.
+    let blExp = '';
+    function blStreaming(p) {
+        showTab('blame');
+        document.getElementById('empty').classList.add('hidden');
+        document.getElementById('info').classList.add('hidden');
+        document.getElementById('content').classList.remove('hidden');
+        revealTabs(true);
+
+        // 콜아웃: "{작성자}님이 {월일}에 " 접두 + 타이핑될 설명(#ca-exp) + 깜빡이는 캐럿.
+        blExp = p.text || '';
+        const calloutEl = document.getElementById('narrative');
+        if (p.author && p.dateShort) {
+            calloutEl.innerHTML = '<span class="ca-author"></span>님이 ' + decorate(p.dateShort) + '에 <span id="ca-exp"></span><span class="caret"></span>';
+            calloutEl.querySelector('.ca-author').textContent = p.author;
+        } else {
+            calloutEl.innerHTML = '<span id="ca-exp"></span><span class="caret"></span>';
+        }
+        if (blExp) { document.getElementById('ca-exp').innerHTML = renderBold(blExp); }
+
+        // 메타/브레드크럼/이력 — render() 와 동일하게 채운다(출처/PR 은 done 에서 확정).
+        document.getElementById('file-name').textContent = p.fileName;
+        document.getElementById('file-line').textContent = 'L' + p.line;
+        document.getElementById('file-kind').textContent = fileKind(p.fileName);
+        document.getElementById('author-name').textContent = p.author || '?';
+        toggle('author-team-wrap', !!p.team);
+        if (p.team) document.getElementById('author-team').textContent = p.team;
+        document.getElementById('meta-commit').textContent = p.commitShort || '—';
+        toggle('meta-ticket-wrap', !!p.ticket);
+        if (p.ticket) document.getElementById('meta-ticket').textContent = p.ticket;
+        document.getElementById('meta-date').textContent = p.dateFull || '—';
+        toggle('meta-relative-wrap', !!p.relative);
+        if (p.relative) document.getElementById('meta-relative').textContent = p.relative;
+        document.getElementById('meta-change').textContent = formatChange(p.changeStats, null) || '—';
+        document.getElementById('meta-source').textContent = '…';
+
+        const histWrap = document.getElementById('history-wrap');
+        const histList = document.getElementById('history-list');
+        histList.innerHTML = '';
+        if (p.lineHistory && p.lineHistory.length) {
+            histWrap.classList.remove('hidden');
+            p.lineHistory.forEach(h => histList.appendChild(renderHistory(h, p.commitShort)));
+        } else {
+            histWrap.classList.add('hidden');
+        }
+    }
+    function blDelta(delta) {
+        blExp += delta;
+        const exp = document.getElementById('ca-exp');
+        if (exp) { exp.innerHTML = renderBold(blExp); }
+    }
+    function blResult(p) {
+        blExp = (p.explanation || blExp || '').trim();
+        const calloutEl = document.getElementById('narrative');
+        const exp = document.getElementById('ca-exp');
+        if (exp) {
+            exp.innerHTML = renderBold(blExp);
+            const caret = calloutEl.querySelector('.caret');
+            if (caret) { caret.remove(); }
+        } else {
+            // 안전망: 콜아웃 구조가 없으면 설명만 통째로 그린다.
+            calloutEl.innerHTML = decorate(blExp);
+        }
+        // 출처/변경(PR 라인 포함)을 최종 확정.
+        document.getElementById('meta-source').textContent = p.sourceRef || '—';
+        document.getElementById('meta-change').textContent = formatChange(p.changeStats, p.prInfo) || '—';
     }
 
     function render(p) {

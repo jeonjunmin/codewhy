@@ -4,7 +4,7 @@ import { EditorContext, getEditorContext } from '../../shared/editor';
 import { BlameResult, CommitInput } from '../../shared/types';
 import { fetchRequirementTrace } from '../requirementTrace/api';
 import { streamTimelineSummary } from '../timelineSummary/api';
-import { fetchContextBlame } from './api';
+import { streamContextBlame } from './api';
 import { ContextBlameSidebarProvider, VIEW_ID } from './sidebar';
 
 /**
@@ -180,29 +180,41 @@ function ensureInitialized(context: vscode.ExtensionContext) {
 // 2. CodeLens 클릭 → 분석 → 사이드바 push
 // ─────────────────────────────────────────────────────────────────────────────
 async function handleAnalyzeAndShow(args: { filePath: string; line: number; repoPath: string }) {
-    const key = cacheKey(args.filePath, args.line);
-    let entry = blameCache.get(key);
-
-    if (!entry) {
-        await vscode.window.withProgress(
-            { location: vscode.ProgressLocation.Notification, title: 'CodeWhy: 변경 이유 분석 중...' },
-            async () => {
-                try {
-                    const result = await fetchContextBlame(args);
-                    entry = { ctx: args, result };
-                    // degraded(Bedrock 폴백) 응답은 일시적 실패이므로 캐싱하지 않는다.
-                    // 이번엔 사용자에게 보여주되, 다음 분석 때 다시 호출해 자동 회복되게 한다.
-                    if (!result.aiDegraded) { blameCache.set(key, entry); }
-                } catch (err) {
-                    vscode.window.showErrorMessage(`Context Blame 실패: ${(err as Error).message}`);
-                }
-            },
-        );
+    const entry = blameCache.get(cacheKey(args.filePath, args.line));
+    if (entry) {
+        // 캐시 적중 — 스트리밍 없이 즉시 표시.
+        updateStatusBar(args.line, entry.result);
+        pushToSidebar(entry.ctx, entry.result);
+        return;
     }
+    // 미스 — SSE 스트리밍으로 설명을 토큰 단위로 그린다(타임라인 패턴과 동일).
+    streamBlameInto(args);
+}
 
-    if (!entry) { return; }
-    updateStatusBar(args.line, entry.result);
-    pushToSidebar(entry.ctx, entry.result);
+/**
+ * 캐시 미스 라인을 스트리밍 분석해 사이드바에 점진 렌더한다.
+ * meta(메타·이력 즉시) → delta(설명 타이핑) → done(출처/PR 확정) 3단으로 흐른다.
+ * 알림 스피너 대신 패널 안 캐럿으로 진행을 보여주므로 fire-and-forget 으로 둔다.
+ */
+function streamBlameInto(args: { filePath: string; line: number; repoPath: string }) {
+    if (!sidebar) { return; }
+    const ctx = args as EditorContext;
+    const key = cacheKey(args.filePath, args.line);
+    let metaSeen = false;
+
+    streamContextBlame(args, {
+        onMeta: (meta) => { metaSeen = true; sidebar!.blameStreaming(ctx, meta); },
+        onDelta: (delta) => sidebar!.blameDelta(delta),
+        onDone: (result) => {
+            // degraded(Bedrock 폴백)는 일시적 실패이므로 캐싱하지 않는다(다음 분석 때 자동 회복).
+            if (!result.aiDegraded) { blameCache.set(key, { ctx, result }); }
+            updateStatusBar(args.line, result);
+            // meta 를 본 경우(스트리밍)는 콜아웃 확정만, 아니면(캐시 적중/노이즈 JSON) 전체 렌더.
+            if (metaSeen) { sidebar!.blameResult(ctx, result); }
+            else { pushToSidebar(ctx, result); }
+        },
+        onError: (message) => vscode.window.showErrorMessage(`Context Blame 실패: ${message}`),
+    }).catch((err) => vscode.window.showErrorMessage(`Context Blame 실패: ${(err as Error).message}`));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
