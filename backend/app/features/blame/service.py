@@ -525,8 +525,9 @@ def _safe_count_linked_issues(message: str) -> int:
 # 반환: 이 커밋이 참조하는 이슈 개수(int)
 # ─────────────────────────────────────────────────────────────────────────────
 def _count_linked_issues(message: str) -> int:
-    # TODO(개발자 A): 위 가이드를 참고해 이슈 참조 개수를 세어 반환하세요.
-    raise NotImplementedError("이슈 참조 개수 세는 로직을 구현해 주세요")
+    # 커밋 메시지의 GitHub 이슈 참조(#N)를 뽑아, 같은 이슈 중복은 set 으로 합쳐 개수만 센다.
+    # 지라 티켓(PAY-2041)은 제외 — 이슈(#N) 기준. 매칭 없으면 0(프론트가 배지 숨김).
+    return len(set(re.findall(r"#(\d+)", message or "")))
 
 
 def _explain_blame(

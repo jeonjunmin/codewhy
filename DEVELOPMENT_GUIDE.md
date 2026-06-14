@@ -537,6 +537,13 @@ alembic revision --autogenerate -m "..."  # 스키마 변경 시
 
 #### 🟡 P1 — 품질·기능 공백
 
+- [ ] **'라인 수정 이력' 이슈 배지 → 실제 이슈 이동 링크 연결 (이슈 기능 개발 후)**
+  - 현상: 사이드바 하단 '라인 수정 이력' 각 커밋 행에 '이슈 N' 배지를 표시(커밋 메시지 `#N` 개수 기준, GitHub API 0회). 배지 클릭 시 지금은 임시 안내(`onOpenIssueTodo` → `showInformationMessage`)만 뜨고 실제 이동은 없음 — 이슈 기능이 개발 중이라 이동 대상이 미정.
+  - 진행 시 범위:
+    1. 백엔드: 커밋 메시지의 `#N`을 GitHub/GitLab 이슈 URL 로 해석. 블레임은 이미 `core/vcs.py::find_issues_from_commit_message`로 `Issue`(번호·URL) 객체를 보유하므로 재사용 가능. `schemas.py::LineHistoryEntry`에 `issueUrl`(단건) 또는 `issueRefs:[{number,url}]`(다건) 필드 추가 → `service.py::_build_line_history`에서 채움.
+    2. 프론트: `sidebar.ts::renderHistory`의 배지 `data-action`을 임시 `openIssueTodo` → 기존 `openIssue`(+`payload.url`)로 전환. extension 측은 이미 있는 `onOpenIssue`(→`vscode.env.openExternal`) 재사용 → 임시 `onOpenIssueTodo` 핸들러 제거.
+  - 관련 위치: 프론트 `src/features/contextBlame/sidebar.ts`(renderHistory 배지·`openIssueTodo` 분기·`handleMessage`), `src/features/contextBlame/view.ts`(`onOpenIssueTodo`) / 백엔드 `backend/app/features/blame/service.py::_build_line_history` + `schemas.py::LineHistoryEntry`.
+
 - [x] **ask_followup 매 질문마다 전부 재계산** (이미 적용됨)
   - `service.py`의 `_CONTEXT_CACHE`(LRU 100건)로 `analyze_blame`이 만든 context를 `ask_followup`이 재사용. 캐시 미스 시에만 재빌드.
 

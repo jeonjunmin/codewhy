@@ -88,6 +88,10 @@ function ensureInitialized(context: vscode.ExtensionContext) {
             vscode.commands.executeCommand('codewhy.blame.openCommit', { commitHash, repoPath }),
         onSwitchTab: (tab) => handleSwitchTab(tab),
         onOpenIssue: (url) => { vscode.env.openExternal(vscode.Uri.parse(url)); },
+        // 이슈 기능 개발 전까지 '이슈 N' 배지는 임시 안내만 — 실제 이동은 DEVELOPMENT_GUIDE.md TODO 참고.
+        onOpenIssueTodo: () => {
+            vscode.window.showInformationMessage('연관 이슈 보기는 이슈 기능 연동 후 제공될 예정입니다.');
+        },
     });
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(VIEW_ID, sidebar, {

@@ -60,6 +60,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             onOpenCommit: (commitHash: string, repoPath: string) => void;
             onSwitchTab: (tab: string) => void;
             onOpenIssue: (url: string) => void;
+            // 이슈 기능 개발 전까지 '이슈 N' 배지 클릭의 임시 동작(안내). 실제 이동은 TODO.
+            onOpenIssueTodo: () => void;
         },
     ) {}
 
@@ -294,6 +296,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             if (typeof msg.payload?.url === 'string' && msg.payload.url) {
                 this.handlers.onOpenIssue(msg.payload.url);
             }
+            return;
+        }
+        // '라인 수정 이력' 이슈 배지 클릭 — 이슈 기능 미완이라 실제 URL 이 없어 임시 안내만 한다.
+        if (msg.type === 'openIssueTodo') {
+            this.handlers.onOpenIssueTodo();
             return;
         }
         if (!this.last) { return; }
@@ -606,6 +613,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         color: var(--fg-dim); font-size: 10.5px; white-space: nowrap;
     }
     .hist-item__issues .ico { display: inline-flex; opacity: 0.8; }
+    .hist-item__issues[data-action] { cursor: pointer; }
+    .hist-item__issues[data-action]:hover {
+        border-color: var(--accent-violet);
+        color: var(--fg);
+    }
 
     /* ── 작은 보조 ───────────────────────────────────────────────── */
     .hidden { display: none !important; }
@@ -1093,8 +1105,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         el.className = 'hist-item' + (isCurrent ? ' current' : '');
         el.dataset.action = 'openCommitHash';
         el.dataset.hash = h.hash || '';
+        // 배지는 자체 data-action 을 가져, 클릭 위임의 closest() 가 행(openCommitHash) 대신
+        // 배지(openIssueTodo)를 먼저 잡는다 → 배지=이슈, 나머지 행=커밋 열기로 분기된다.
         const badge = (h.issueCount && h.issueCount > 0)
-            ? '<span class="hist-item__issues"><span class="ico">' + ICON.issue + '</span>이슈 ' + h.issueCount + '</span>'
+            ? '<span class="hist-item__issues" data-action="openIssueTodo" title="연관 이슈 보기 (준비 중)"><span class="ico">' + ICON.issue + '</span>이슈 ' + h.issueCount + '</span>'
             : '<span></span>';
         el.innerHTML =
             '<span class="hist-item__dot"></span>' +
@@ -1185,6 +1199,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         // 이슈 항목은 자기 URL 을 함께 실어 보낸다.
         if (el.dataset.action === 'openIssue') {
             vscode.postMessage({ type: 'openIssue', payload: { url: el.dataset.url } });
+            return;
+        }
+        // 라인 수정 이력의 '이슈 N' 배지 — 이슈 기능 미완이라 임시 안내만(행 클릭으로 번지지 않음).
+        if (el.dataset.action === 'openIssueTodo') {
+            vscode.postMessage({ type: 'openIssueTodo' });
             return;
         }
         vscode.postMessage({ type: el.dataset.action });
