@@ -77,8 +77,9 @@ VSCode 설정(`settings.json` 또는 설정 UI)에서 조정할 수 있습니다
 
 | 설정 키 | 설명 | 기본값 |
 | --- | --- | --- |
-| `codewhy.backendUrl` | CodeWhy 분석 백엔드 서버 주소 | `http://localhost:8000` |
-| `codewhy.documentPaths` | 요구사항 역추적에 사용할 기획서/문서 폴더 경로 목록 | `[]` |
+| `codewhy.codeLens.enabled` | 에디터 라인에 '🔍 왜 바꿨어?' CodeLens 표시 여부 | `true` |
+| `codewhy.hover.enabled` | 분석된 라인 위 마우스 호버 팝업 표시 여부 | `true` |
+| `codewhy.backendUrl` | **[고급]** 분석 백엔드 서버 주소. 자체 호스팅 시에만 변경 | `https://api.codewhy.example.com` |
 
 ---
 

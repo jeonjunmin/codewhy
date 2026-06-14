@@ -40,6 +40,10 @@ let initialized = false;
 
 const cacheKey = (filePath: string, line: number) => `${filePath}:${line}`;
 
+/** `codewhy.*` 설정값을 읽는다(미설정 시 fallback). 토글 게이트용 헬퍼. */
+const cfg = <T>(key: string, fallback: T): T =>
+    vscode.workspace.getConfiguration('codewhy').get<T>(key, fallback);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 공개 API
 // ─────────────────────────────────────────────────────────────────────────────
@@ -95,6 +99,7 @@ function ensureInitialized(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.languages.registerHoverProvider({ scheme: 'file' }, {
             provideHover(document, position) {
+                if (!cfg('hover.enabled', true)) { return null; }
                 const key = cacheKey(document.uri.fsPath, position.line + 1);
                 const entry = blameCache.get(key);
                 if (!entry) { return null; }
@@ -115,6 +120,7 @@ function ensureInitialized(context: vscode.ExtensionContext) {
             {
                 onDidChangeCodeLenses: codeLensEmitter.event,
                 provideCodeLenses(document) {
+                    if (!cfg('codeLens.enabled', true)) { return []; }
                     if (
                         document.uri.fsPath !== currentFilePath ||
                         currentCursorLine < 0 ||
@@ -133,6 +139,14 @@ function ensureInitialized(context: vscode.ExtensionContext) {
                 },
             },
         ),
+    );
+
+    // ── 설정 변경 감지 → CodeLens 토글을 즉시 반영(렌즈 다시 계산)
+    //    Hover 는 다음 호버 때 cfg() 를 다시 읽으므로 별도 처리가 필요 없다.
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration(e => {
+            if (e.affectsConfiguration('codewhy.codeLens')) { codeLensEmitter?.fire(); }
+        }),
     );
 
     // ── 문서 수정 감지 → 해당 파일의 블레임 캐시·핀 무효화

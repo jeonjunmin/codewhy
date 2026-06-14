@@ -96,18 +96,21 @@
     "configuration": {
       "title": "CodeWhy",
       "properties": {
+        "codewhy.codeLens.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "에디터 라인에 '🔍 왜 바꿨어?' CodeLens 표시 여부"
+        },
+        "codewhy.hover.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "분석된 라인 위에 마우스를 올렸을 때 블레임 요약 팝업 표시 여부"
+        },
         "codewhy.backendUrl": {
           "type": "string",
-          "default": "http://localhost:8000",
-          "description": "CodeWhy Python 백엔드 서버 URL"
-        },
-        "codewhy.documentPaths": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "기획서/문서 폴더 경로 목록 (요구사항 역추적에 사용)"
+          "default": "https://api.codewhy.example.com",
+          "markdownDescription": "**[고급]** CodeWhy 백엔드 서버 URL. 일반 사용자는 변경할 필요가 없으며, 자체 호스팅(self-hosted) 백엔드를 사용할 때만 수정합니다.",
+          "order": 100
         }
       }
     }

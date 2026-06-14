@@ -153,16 +153,13 @@ code --list-extensions | findstr codewhy
 
 ### 백엔드 서버 URL 안내
 
-팀원이 확장 설치 후 아래 설정을 VSCode에 추가해야 합니다.
+백엔드는 서버에 배포되어 있으므로 일반 팀원은 별도 설정이 필요 없습니다.
+자체 호스팅 백엔드를 사용하는 경우에만 아래 설정을 VSCode에 추가합니다.
 
 ```json
 // .vscode/settings.json 또는 사용자 설정
 {
-  "codewhy.backendUrl": "http://<백엔드-서버-IP>:8000",
-  "codewhy.documentPaths": [
-    "/path/to/docs",
-    "/path/to/requirements"
-  ]
+  "codewhy.backendUrl": "http://<백엔드-서버-IP>:8000"
 }
 ```
 
