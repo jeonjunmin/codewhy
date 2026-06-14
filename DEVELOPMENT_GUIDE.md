@@ -664,6 +664,9 @@ alembic revision --autogenerate -m "..."  # 스키마 변경 시
 - [ ] **선결**: §10 블로커의 "역추적 아키텍처 갈래 결정" — 선택지 A(GitHub Issue 전환) 시 아래 두 항목은 그 위에서 진행해야 의미가 있음
 - [ ] GitHub Issue 첨부 파일 목록을 UI에 보여주는 Webview 구현 (선택지 A 채택 시)
 - [~] matchType별 신뢰도 표시 UI — `src/features/requirementTrace/view.ts`의 QuickPick에 배지+% 부분 구현. Webview 상세 뷰로의 확장만 남음
+- [ ] **`backendUrl` 설정이 역추적 패널에 즉시 반영되지 않음**
+  - 현상: `command.ts`가 `codewhy.backendUrl`을 읽어 webview HTML에 문자열로 구워 넣음(`const BACKEND = '${backendUrl}'`, [command.ts:149]). 블레임·타임라인은 매 요청마다 `createHttpClient()`로 다시 읽어 즉시 반영되는 반면, 역추적은 **이미 열린 패널이 옛 URL을 그대로 사용**하고 명령을 다시 실행해 패널을 새로 열어야 새 값이 적용됨.
+  - 개선: backendUrl을 HTML에 굽지 말고 `panel.webview.postMessage`로 전달하거나, fetch를 확장(extension) 측에서 대행(`createHttpClient` 경유)하도록 변경 → 다른 두 기능과 "항상 최신 설정값" 동작 통일.
 
 ---
 

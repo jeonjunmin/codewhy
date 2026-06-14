@@ -79,7 +79,7 @@ VSCode 설정(`settings.json` 또는 설정 UI)에서 조정할 수 있습니다
 | --- | --- | --- |
 | `codewhy.codeLens.enabled` | 에디터 라인에 '🔍 왜 바꿨어?' CodeLens 표시 여부 | `true` |
 | `codewhy.hover.enabled` | 분석된 라인 위 마우스 호버 팝업 표시 여부 | `true` |
-| `codewhy.backendUrl` | **[고급]** 분석 백엔드 서버 주소. 자체 호스팅 시에만 변경 | `https://api.codewhy.example.com` |
+| `codewhy.backendUrl` | **[고급]** 분석 백엔드 서버 주소. 자체 호스팅 시에만 변경 | `http://localhost:8000` |
 
 ---
 

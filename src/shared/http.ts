@@ -6,7 +6,7 @@ import axios, { AxiosInstance } from 'axios';
  * 설치형 배포에서는 서버에 올라간 백엔드를 가리키며, 자체 호스팅 시에만
  * `codewhy.backendUrl` 설정으로 덮어쓴다. package.json 의 default 와 항상 일치시킨다.
  */
-export const DEFAULT_BACKEND_URL = 'https://api.codewhy.example.com';
+export const DEFAULT_BACKEND_URL = 'http://localhost:8000';
 
 /**
  * 백엔드(FastAPI) 호출용 axios 인스턴스를 생성한다.
