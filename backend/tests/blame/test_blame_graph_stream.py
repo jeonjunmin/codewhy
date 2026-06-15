@@ -68,6 +68,37 @@ def test_stream_emits_meta_delta_done(monkeypatch):
     assert done["aiDegraded"] is False
 
 
+def test_explain_retries_transient_throttle_then_succeeds(monkeypatch):
+    # ThrottlingException(일시적)은 explain 노드의 RetryPolicy 가 자동 재시도 → 복구
+    from botocore.exceptions import ClientError
+
+    _patch_no_external(monkeypatch)
+    calls = {"n": 0}
+
+    class _FlakyLLM:
+        def with_config(self, *_, **__):
+            return self
+
+        async def ainvoke(self, _messages):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ClientError(
+                    {"Error": {"Code": "ThrottlingException", "Message": "slow down"}}, "Converse"
+                )
+            return AIMessage(content="복구된 설명")
+
+    monkeypatch.setattr(bg, "get_bedrock_llm", lambda *a, **k: _FlakyLLM())
+
+    # 비스트리밍 경로(run_blame_graph)로 재시도 동작만 격리 검증
+    result = asyncio.run(bg.run_blame_graph(
+        "/repo", "pay.py", 10, info=_info(), branch="main", ticket="PAY-1",
+    ))
+
+    assert calls["n"] == 2                 # 1회 throttle → RetryPolicy 재시도 → 2회차 성공
+    assert result["aiDegraded"] is False
+    assert result["explanation"] == "복구된 설명"
+
+
 class _BoomLLM:
     def with_config(self, *_, **__):
         return self

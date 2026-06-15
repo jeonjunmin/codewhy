@@ -14,7 +14,6 @@ POST /api/blame/context — 한 라인의 변경 사유를 분석해 반환한�
 👤 담당: 개발자 A
 """
 
-import asyncio
 import logging
 from datetime import date, datetime
 
@@ -22,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.blame_graph import stream_blame_graph
+from app.ai.blame_graph import run_blame_graph, stream_blame_graph
 from app.core import git
 from app.core.tickets import extract_ticket
 from app.db import crud_common
@@ -86,8 +85,9 @@ async def context_blame(req: BlameRequest, db: AsyncSession = Depends(get_db)):
     #    프런트는 응답 Content-Type 으로 두 경로를 구분한다(application/json vs text/event-stream).
     if service.is_noise_commit(info.message):
         try:
-            result = await asyncio.to_thread(
-                service.analyze_blame,
+            # 노이즈 커밋도 동일한 blame_graph 를 ainvoke 로 통과시킨다(단일 파이프라인).
+            # classify → noise_response → END 로 끝나 Bedrock·GitHub 호출이 없다.
+            result = await run_blame_graph(
                 req.repoPath, req.filePath, req.line,
                 info=info, branch=branch, ticket=ticket,
             )

@@ -225,7 +225,7 @@ codewhy/
     │
     └─ 미스 ──▶  분기:
             ├─ 노이즈 커밋(test/chore/docs)  →  application/json
-            │     service.analyze_blame → _noise_response (Bedrock·GitHub 0회)
+            │     run_blame_graph(ainvoke) → classify → noise_response 노드 (Bedrock·GitHub 0회)
             │
             └─ 의미있는 커밋  →  text/event-stream(SSE)
                   ai/blame_graph.stream_blame_graph 가 LangGraph StateGraph 를
@@ -367,11 +367,11 @@ codewhy/
 | # | 원칙 | 블레임 | 타임라인 |
 |---|------|-------|---------|
 | 1 | **Lazy on-demand** — 사용자 액션 시점에만 분석, 일괄 prefetch 금지 | ✅ (라인 클릭 1회) | ✅ (`/initialize`는 ACK만, `/summary`에서 lazy 분석) |
-| 2 | **노이즈 커밋 우회** — test/chore/docs는 LLM 호출·캐시 무효화에서 제외 | ✅ (`analyze_blame` 진입 분기) | ✅ (`compute_commit_set_hash`의 `filter_meaningful`) |
+| 2 | **노이즈 커밋 우회** — test/chore/docs는 LLM 호출·캐시 무효화에서 제외 | ✅ (`blame_graph` classify 분기) | ✅ (`compute_commit_set_hash`의 `filter_meaningful`) |
 | 3 | **공유 커밋 분류기** — 노이즈 판정은 `core/commit_classifier.py` 단일 소스 | ✅ import | ✅ import |
 | 4 | **공유 백본** — repo/commit/file upsert는 항상 `db/crud_common.py` 경유 | ✅ | ✅ |
 | 5 | **외부 API 메모이즈** — GitHub PR·Issue 조회는 `vcs.py` `lru_cache(128)` | ✅ | — (외부 API 미사용) |
-| 6 | **SSE 듀얼 모드** — 캐시 적중/노이즈는 JSON, 의미있는 미스는 스트림 | ✅ `stream_blame` | ✅ `stream_summary` |
+| 6 | **SSE 듀얼 모드** — 캐시 적중/노이즈는 JSON, 의미있는 미스는 스트림 | ✅ `stream_blame_graph` | ✅ `stream_summary` |
 | 7 | **폴백 일관** — 외부 의존성 미설정·실패 시 예외 대신 동등 형식의 폴백 응답 | ✅ `_degraded_explanation` | ✅ `parse_ai_response` raw 폴백 |
 
 #### LLM 호출 방식 비교 (Bedrock + LangChain)
@@ -385,7 +385,7 @@ codewhy/
 | 호출 방식 | `converse(messages=[...])` 동기 | `.astream([HumanMessage])` async 토큰 스트림 |
 | 메시지 구성 | `[context, cachePoint, prompt]` 3파트 | `SystemMessage` + `HumanMessage(context+instruction)` |
 | **프롬프트 캐싱** | ✅ 활용 — `cachePoint`로 context 블록 캐시 적중 | ❌ 미활용 — 스트리밍은 1회성 본문이라 공유 프리픽스 없음 |
-| 쓰임 | 후속 질문(`ask_followup`) 등 비스트리밍 호출 | 블레임 설명 스트리밍(`_stream_explain_blame`), 타임라인(`stream_file_summary`) |
+| 쓰임 | 후속 질문(`ask_followup`) 등 비스트리밍 호출 | 블레임 설명 스트리밍(`blame_graph` explain 노드), 타임라인(`stream_file_summary`) |
 
 **왜 두 진입점인가**: boto3 직접 호출은 `cachePoint`를 메시지 중간에 삽입해 **프롬프트 캐싱**을
 세밀하게 제어할 수 있고(비스트리밍 반복 호출에 유리), LangChain `ChatBedrock`은 `astream`으로
@@ -540,13 +540,18 @@ alembic revision --autogenerate -m "..."  # 스키마 변경 시
 - [x] **fan-in 중복 실행 버그 수정** — PR/이슈를 별도 노드로 두면 `build_context`/`explain`이 2회 실행돼 Bedrock이
   중복 호출되던 문제를, GitHub 조회를 한 노드(`fetch_github`)로 묶어 해결. `test_blame_graph_stream`가 `explain` 1회 실행을 회귀 검증.
 - [x] **Mermaid 시각화** — `python -m app.ai.blame_graph` / `trace_graph`. README에 다이어그램 게재.
-- [x] **테스트** — `tests/blame/test_blame_graph_{routing,stream}.py`, `tests/trace/test_trace_graph_fallback.py` (전부 통과).
-- [ ] **`service.stream_blame` / `_stream_explain_blame` 정리** — `stream_blame_graph`로 대체돼 더 이상 호출되지 않음(사문화).
-  헬퍼 재사용 안전 확인 후 제거. `analyze_blame`(노이즈·캐시 히트 경로)은 여전히 사용 중이므로 유지.
-- [ ] **(선택) `analyze_blame`도 그래프 경유로 통합** — 노이즈/비스트림 경로를 `blame_graph.ainvoke`로 돌려 단일 파이프라인화
-  (`run_blame_graph` 이미 존재). 라우터 노이즈 분기를 `to_thread(analyze_blame)` → `await run_blame_graph(...)`로.
-- [ ] **(선택) `explain` 노드 `RetryPolicy`** — `langgraph.types.RetryPolicy(retry_on=(BotoCoreError, ClientError))`로
-  `ThrottlingException` 자동 재시도 후 degraded.
+- [x] **테스트** — `tests/blame/test_blame_graph_{routing,stream}.py`, `tests/trace/test_trace_graph_fallback.py` (47건 전부 통과).
+- [x] **단일 파이프라인 통합** — 라우터 노이즈 경로를 `run_blame_graph`(=`blame_graph.ainvoke`)로 전환.
+  스트리밍/비스트리밍이 같은 그래프를 공유한다. 사문화된 `service.{analyze_blame,stream_blame,_explain_blame,
+  _stream_explain_blame}` 제거(헬퍼는 그래프 노드가 재사용). `service.py`는 헬퍼 + `/ask`·`is_noise_commit`·`extract_keywords` 진입점만 유지.
+- [x] **`explain` 노드 `RetryPolicy`** — `RetryPolicy(max_attempts=3, retry_on=_is_retryable_bedrock)`로
+  일시적 오류(Throttling/timeout/5xx)만 자동 재시도. 권한·검증 오류는 즉시 degraded. 재시도까지 소진된 하드 실패는
+  호출 경계(`stream_blame_graph`/`run_blame_graph`)가 degraded 응답으로 마감(캐시 미저장). `test_explain_retries_transient_throttle_then_succeeds`로 검증.
+- [ ] **(선택) `_suggest_improvement` 처리** — 여전히 미사용(사이드바 미렌더). "추후 UI 도입 시 재사용" 주석과 함께 잔존.
+
+> ℹ️ **degraded 동작 차이**: explain이 예외를 그대로 올리도록 바꿔 RetryPolicy가 작동하므로, 하드 실패 시 degraded 응답은
+> 메타(commit/author/date/ticket/team/changeStats/lineHistory)만 담고 `relatedChanges`는 비운다(과거 in-node 폴백은
+> assemble까지 거쳐 relatedChanges를 포함했음). 오류 응답에서의 사소한 차이로, 정상 응답은 동일.
 
 ---
 

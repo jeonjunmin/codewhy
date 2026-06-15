@@ -22,8 +22,10 @@ import logging
 import os
 from typing import Any, TypedDict
 
+from botocore.exceptions import BotoCoreError, ClientError
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import RetryPolicy
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import git
@@ -39,6 +41,22 @@ logger = logging.getLogger(__name__)
 # explain 노드의 LLM 호출에만 붙이는 태그 — astream_events 에서 이 태그로 토큰을 골라낸다.
 # (향후 다른 LLM 호출이 그래프에 추가돼도 블레임 설명 토큰만 스트리밍으로 새지 않게 격리)
 _EXPLAIN_TAG = "blame_explain"
+
+# explain 노드 일시적 Bedrock 오류 자동 재시도 — RetryPolicy 가 이 코드들만 재시도한다.
+_RETRYABLE_BEDROCK_CODES = frozenset({
+    "ThrottlingException", "TooManyRequestsException", "ServiceUnavailableException",
+    "ModelTimeoutException", "InternalServerException", "ServiceQuotaExceededException",
+})
+
+
+def _is_retryable_bedrock(exc: Exception) -> bool:
+    """일시적(throttle/timeout/5xx) Bedrock 오류만 재시도 대상으로 본다.
+
+    권한·자격증명·모델 ID 오류(AccessDenied/Expired/Validation 등)는 재시도해도 무의미하므로 제외.
+    """
+    if isinstance(exc, ClientError):
+        return exc.response.get("Error", {}).get("Code", "") in _RETRYABLE_BEDROCK_CODES
+    return isinstance(exc, BotoCoreError)  # 연결/타임아웃 등 네트워크성 일시 오류
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -70,17 +88,17 @@ class BlameState(TypedDict, total=False):
 
 # ── 노드 ───────────────────────────────────────────────────────────────────────
 
-async def resolve_commit(state: BlameState) -> dict:
-    """team / 변경 통계 / 라인 이력 — git·config 만으로 즉시 구하는 메타."""
+def resolve_commit(state: BlameState) -> dict:
+    """team / 변경 통계 — git subprocess 없이 즉시 구하는 메타.
+
+    라인 이력(line_history)은 여기서 구하지 않는다 — 노이즈 커밋은 assemble 을 거치지 않으므로
+    불필요하고, 스트리밍 경로는 generator 가 meta 용으로 이미 인라인 계산해 state 로 넘긴다.
+    assemble 이 state 에 없을 때만 lazily 계산한다(중복 git 호출 방지).
+    """
     info = state["info"]
-    team = get_team_map().get(info.author)
-    line_history = await asyncio.to_thread(
-        svc._build_line_history, state["repo_path"], state["file_path"], state["line"]
-    )
     return {
-        "team": team,
+        "team": get_team_map().get(info.author),
         "change_stats": {"added": info.added, "removed": info.removed},
-        "line_history": line_history,
     }
 
 
@@ -144,32 +162,34 @@ async def explain(state: BlameState) -> dict:
     """Bedrock(ChatBedrock)으로 변경 사유를 추론한다.
 
     astream_events 로 그래프를 돌리면 여기 LLM 토큰이 on_chat_model_stream 으로 새어 나와
-    실시간 delta 가 된다. 실패 시 degraded 폴백 문구로 합류(캐시 미저장 신호).
+    실시간 delta 가 된다.
+
+    예외를 잡지 않고 그대로 올린다 — 일시적 오류(throttle/timeout)는 노드의 RetryPolicy 가
+    자동 재시도하고, 재시도까지 소진된 하드 실패는 호출 경계(stream_blame_graph/run_blame_graph)가
+    degraded 응답으로 처리한다(캐시 미저장).
     """
-    info = state["info"]
     context = state["context"]
     llm = get_bedrock_llm(max_tokens=300).with_config(tags=[_EXPLAIN_TAG])
     messages = [
         SystemMessage(content=svc._SYSTEM_PROMPT),
         HumanMessage(content=f"{context}\n\n{svc._EXPLAIN_INSTRUCTION}"),
     ]
-    try:
-        resp = await llm.ainvoke(messages)
-        text = (resp.content if isinstance(resp.content, str) else str(resp.content)).strip()
-        return {"explanation": text, "degraded": False}
-    except Exception as e:
-        logger.exception(
-            "Bedrock 변경 사유 추론 실패(graph) — commit=%s",
-            info.commit_hash[:8] if info.commit_hash else "?",
-        )
-        return {"explanation": svc._degraded_explanation(info, e), "degraded": True}
+    resp = await llm.ainvoke(messages)
+    text = (resp.content if isinstance(resp.content, str) else str(resp.content)).strip()
+    return {"explanation": text, "degraded": False}
 
 
-def assemble(state: BlameState) -> dict:
-    """사이드바 응답 dict 조립 — stream_blame 의 done 페이로드와 동일 스키마."""
+async def assemble(state: BlameState) -> dict:
+    """사이드바 응답 dict 조립 — 기존 블레임 응답과 동일 스키마."""
     info = state["info"]
     issues = state.get("issues", [])
     pr = state.get("pr")
+    # 라인 이력: 스트리밍 경로는 state 로 받고(중복 git 호출 방지), 없으면(비스트림) 여기서 계산
+    line_history = state.get("line_history")
+    if line_history is None:
+        line_history = await asyncio.to_thread(
+            svc._build_line_history, state["repo_path"], state["file_path"], state["line"]
+        )
     related = svc._build_related_changes(issues, pr, state.get("followups", []), state["file_path"])
     source_ref = svc._format_source_ref(issues)
     primary_issue = issues[0] if issues else None
@@ -191,10 +211,38 @@ def assemble(state: BlameState) -> dict:
         "changeStats": state.get("change_stats"),
         "prInfo": ({"url": pr.url, "lines": pr.added + pr.removed} if pr else None),
         "relatedChanges": related,
-        "lineHistory": state.get("line_history", []),
+        "lineHistory": line_history,
         "aiSuggestion": None,
     }
     return {"result": result}
+
+
+def _degraded_result(
+    info: git.BlameInfo, ticket: str | None, team: str | None,
+    change_stats: dict, line_history: list | None, explanation: str,
+) -> dict:
+    """explain 재시도까지 실패했을 때의 degraded 응답(메타만, LLM/관련변경 없음).
+
+    aiDegraded=True 라 호출 경계가 캐시에 저장하지 않는다(원인 해소 후 다음 요청에서 자동 회복).
+    """
+    return {
+        "explanation": explanation,
+        "aiDegraded": True,
+        "commitHash": info.commit_hash,
+        "author": info.author,
+        "date": info.date,
+        "ticket": ticket,
+        "team": team,
+        "sourceRef": None,
+        "specRef": None,
+        "issueUrl": None,
+        "attachments": [],
+        "changeStats": change_stats,
+        "prInfo": None,
+        "relatedChanges": [],
+        "lineHistory": line_history or [],
+        "aiSuggestion": None,
+    }
 
 
 # ── 그래프 빌드/컴파일 ──────────────────────────────────────────────────────────
@@ -207,7 +255,11 @@ def _build_graph():
     builder.add_node("fetch_github", fetch_github)
     builder.add_node("fetch_followups", fetch_followups)
     builder.add_node("build_context", build_context)
-    builder.add_node("explain", explain)
+    # explain 노드: 일시적 Bedrock 오류는 RetryPolicy 가 자동 재시도(권한/검증 오류는 제외)
+    builder.add_node(
+        "explain", explain,
+        retry=RetryPolicy(max_attempts=3, retry_on=_is_retryable_bedrock),
+    )
     builder.add_node("assemble", assemble)
 
     builder.add_edge(START, "resolve_commit")
@@ -248,10 +300,7 @@ async def stream_blame_graph(
     commit: Commit | None,
     file: File | None,
 ):
-    """blame_graph 를 SSE(meta/delta/done) 프레임으로 흘려보낸다.
-
-    service.stream_blame 과 시그니처·프레이밍 호환 — 라우터는 호출 대상만 바꾸면 된다.
-    """
+    """blame_graph 를 SSE(meta/delta/done) 프레임으로 흘려보낸다(라우터의 의미있는-커밋 미스 경로)."""
     team = get_team_map().get(info.author)
     change_stats = {"added": info.added, "removed": info.removed}
 
@@ -270,29 +319,39 @@ async def stream_blame_graph(
     state: BlameState = {
         "repo_path": repo_path, "file_path": file_path, "line": line,
         "info": info, "branch": branch, "ticket": ticket,
-        # 메타는 이미 계산했으니 그래프에도 넘겨 resolve_commit 의 재계산을 줄인다.
+        # 메타는 이미 계산했으니 그래프에도 넘겨 assemble 의 재계산을 줄인다.
         "team": team, "change_stats": change_stats, "line_history": line_history,
     }
 
-    # ② 그래프 실행 — explain 노드의 LLM 토큰을 delta 로, 그래프 종료 시 final state 를 회수
+    # ② 그래프 실행 — explain 노드의 LLM 토큰을 delta 로, 그래프 종료 시 final state 를 회수.
+    #    explain 의 재시도까지 소진된 하드 실패는 여기서 degraded 응답으로 마감한다.
     root_run_id = None
     final_state: dict | None = None
     full_text = ""
-    async for ev in blame_graph.astream_events(state, version="v2"):
-        if root_run_id is None and ev["event"] == "on_chain_start":
-            root_run_id = ev["run_id"]
-        et = ev["event"]
-        if et == "on_chat_model_stream" and _EXPLAIN_TAG in ev.get("tags", []):
-            chunk = ev["data"]["chunk"]
-            piece = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
-            if piece:
-                full_text += piece
-                yield _sse({"delta": piece})
-        elif et == "on_chain_end" and ev.get("run_id") == root_run_id:
-            final_state = ev["data"]["output"]
-
-    result = (final_state or {}).get("result", {})
-    degraded = bool(result.get("aiDegraded"))
+    try:
+        async for ev in blame_graph.astream_events(state, version="v2"):
+            if root_run_id is None and ev["event"] == "on_chain_start":
+                root_run_id = ev["run_id"]
+            et = ev["event"]
+            if et == "on_chat_model_stream" and _EXPLAIN_TAG in ev.get("tags", []):
+                chunk = ev["data"]["chunk"]
+                piece = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+                if piece:
+                    full_text += piece
+                    yield _sse({"delta": piece})
+            elif et == "on_chain_end" and ev.get("run_id") == root_run_id:
+                final_state = ev["data"]["output"]
+        result = (final_state or {}).get("result", {})
+        degraded = bool(result.get("aiDegraded"))
+    except Exception as e:
+        logger.exception(
+            "blame 그래프 스트리밍 실패 — commit=%s",
+            info.commit_hash[:8] if info.commit_hash else "?",
+        )
+        result = _degraded_result(
+            info, ticket, team, change_stats, line_history, svc._degraded_explanation(info, e)
+        )
+        degraded = True
 
     # ③ degraded/노이즈는 토큰 스트림이 없으므로 본문을 delta 로 한 번 내보낸다.
     if not full_text and result.get("explanation"):
@@ -320,12 +379,26 @@ async def run_blame_graph(
     branch: str | None,
     ticket: str | None,
 ) -> dict:
-    """그래프를 한 번 끝까지 돌려 result dict 를 반환한다(analyze_blame 동등)."""
-    out = await blame_graph.ainvoke({
-        "repo_path": repo_path, "file_path": file_path, "line": line,
-        "info": info, "branch": branch, "ticket": ticket,
-    })
-    return out["result"]
+    """그래프를 한 번 끝까지 돌려 result dict 를 반환한다(비스트리밍 — 노이즈/캐시 히트/테스트).
+
+    explain 하드 실패(노이즈 경로는 도달하지 않음)는 degraded 응답으로 마감한다.
+    """
+    try:
+        out = await blame_graph.ainvoke({
+            "repo_path": repo_path, "file_path": file_path, "line": line,
+            "info": info, "branch": branch, "ticket": ticket,
+        })
+        return out["result"]
+    except Exception as e:
+        logger.exception(
+            "blame 그래프 실행 실패 — commit=%s", info.commit_hash[:8] if info.commit_hash else "?"
+        )
+        line_history = await asyncio.to_thread(svc._build_line_history, repo_path, file_path, line)
+        return _degraded_result(
+            info, ticket, get_team_map().get(info.author),
+            {"added": info.added, "removed": info.removed}, line_history,
+            svc._degraded_explanation(info, e),
+        )
 
 
 if __name__ == "__main__":  # python -m app.ai.blame_graph  → Mermaid 다이어그램
