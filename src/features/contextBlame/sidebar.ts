@@ -62,6 +62,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             onOpenIssue: (url: string) => void;
             // 이슈 기능 개발 전까지 '이슈 N' 배지 클릭의 임시 동작(안내). 실제 이동은 TODO.
             onOpenIssueTodo: () => void;
+            // 라인 수정 이력 항목 펼침 — 그 커밋의 변경 사유를 지연 생성한다.
+            onExpandHistory: (hash: string, filePath: string, repoPath: string) => void;
         },
     ) {}
 
@@ -162,6 +164,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         this.postBlameStream(this.lastBlameStream);
     }
 
+    /** 펼친 라인 이력 항목에 그 커밋의 변경 사유를 주입한다(지연 로드 응답). */
+    setHistoryReason(hash: string, reason: string) {
+        this.view?.webview.postMessage({ type: 'historyReason', payload: { hash, reason } });
+    }
+
     private postBlameStream(s: BlameStreamState) {
         const wv = this.view?.webview;
         if (!wv || !this.ready) { return; }
@@ -182,6 +189,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
                     relative: formatRelativeKo(meta.date),
                     changeStats: meta.changeStats,
                     lineHistory: meta.lineHistory ?? [],
+                    lineIssues: meta.lineIssues ?? [],
                     text: s.text,
                 },
             });
@@ -303,6 +311,15 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             this.handlers.onOpenIssueTodo();
             return;
         }
+        // 라인 수정 이력 항목 펼침 — 현재 표시 중인 블레임 파일/레포 맥락으로 그 커밋 사유를 요청.
+        if (msg.type === 'expandHistory') {
+            const hash = msg.payload?.hash;
+            const ctx = this.last?.ctx ?? this.lastBlameStream?.ctx;
+            if (typeof hash === 'string' && hash && ctx) {
+                this.handlers.onExpandHistory(hash, ctx.filePath, ctx.repoPath);
+            }
+            return;
+        }
         if (!this.last) { return; }
         const { ctx, result } = this.last;
         switch (msg.type) {
@@ -350,6 +367,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             prInfo: r.prInfo,
             sourceRef: r.sourceRef ?? r.specRef ?? null,
             lineHistory: r.lineHistory ?? [],
+            lineIssues: r.lineIssues ?? [],
             pinned,
         };
         this.view?.webview.postMessage({ type: 'render', payload });
@@ -618,6 +636,44 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         border-color: var(--accent-violet);
         color: var(--fg);
     }
+    /* 펼침 캐럿 — 클릭 시 이 커밋의 변경 사유를 지연 로드 */
+    .hist-item__caret {
+        margin-left: auto; cursor: pointer; color: var(--fg-mute);
+        display: inline-flex; align-items: center; flex-shrink: 0;
+        transition: transform .15s ease; user-select: none;
+    }
+    .hist-item__caret:hover { color: var(--accent-violet); }
+    .hist-item.expanded .hist-item__caret { transform: rotate(90deg); }
+    /* 펼친 커밋의 변경 사유 카드 */
+    .hist-item__reason {
+        margin-top: 7px; padding: 8px 10px;
+        background: var(--callout-bg); border: 1px solid var(--line-soft);
+        border-radius: 8px; color: var(--fg-dim);
+        font-size: 11.5px; line-height: 1.65; cursor: default;
+    }
+    .hist-item__reason.loading { color: var(--fg-mute); font-style: italic; }
+    .hist-item__reason code { color: var(--fg); background: var(--surface); padding: 0 4px; border-radius: 4px; }
+
+    /* ── 연관 이슈 롤업 (라인 전체 dedup + 상태) ─────────────────── */
+    .lineissues { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+    .li-chip {
+        display: inline-flex; align-items: center; gap: 5px;
+        padding: 3px 9px; border-radius: 7px; font-size: 11px; white-space: nowrap;
+        background: var(--surface); border: 1px solid var(--line); color: var(--fg-dim);
+        cursor: pointer;
+    }
+    .li-chip .ico { display: inline-flex; opacity: 0.8; }
+    .li-chip__num { font-weight: 600; color: var(--fg); }
+    .li-chip__status { color: var(--fg-mute); font-size: 10px; }
+    .li-chip:hover { border-color: var(--accent-violet); color: var(--fg); }
+    /* 현재 = 지금의 변경 동인 */
+    .li-chip--current { border-color: var(--line-soft); }
+    .li-chip--current .li-chip__num,
+    .li-chip--current .li-chip__status { color: var(--accent-violet); }
+    /* 되돌림 = revert 커밋이 참조(휴리스틱) */
+    .li-chip--reverted { border-color: rgba(248,113,113,0.40); }
+    .li-chip--reverted .li-chip__status { color: #F87171; }
+    .li-chip--reverted .li-chip__num { text-decoration: line-through; opacity: 0.85; }
 
     /* ── 작은 보조 ───────────────────────────────────────────────── */
     .hidden { display: none !important; }
@@ -743,6 +799,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             <dt>출처</dt><dd id="meta-source">—</dd>
         </dl>
 
+        <section id="lineissues-wrap" class="hidden">
+            <div class="history__title">연관 이슈</div>
+            <div class="lineissues" id="lineissues-list"></div>
+        </section>
+
         <section id="history-wrap" class="hidden">
             <div class="history__title">라인 수정 이력</div>
             <div class="history__list" id="history-list"></div>
@@ -799,6 +860,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         commit: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="2.5"/><path d="M0 8h5M11 8h5"/></svg>',
         clock:  '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="8" cy="8" r="6.5"/><path d="M8 4.5V8l2.5 1.5"/></svg>',
         issue:  '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="6.5"/><circle cx="8" cy="8" r="1.6" fill="currentColor" stroke="none"/></svg>',
+        caret:  '<svg width="9" height="9" viewBox="0 0 16 16" fill="currentColor"><path d="M6 3.5l5.5 4.5L6 12.5z"/></svg>',
         check:'<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 8.5l3.2 3.2L13 4.5"/></svg>',
         shieldBig: '<svg width="30" height="30" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.1"><path d="M8 1l6 2v5c0 4-2.8 6.6-6 7-3.2-.4-6-3-6-7V3l6-2z"/><path d="M5.5 8l1.8 1.8L11 6" stroke-width="1.3"/></svg>',
         sparkBig: '<svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l1.5 4.5L14 7l-4.5 1.5L8 13l-1.5-4.5L2 7l4.5-1.5L8 1z"/></svg>',
@@ -828,6 +890,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             case 'blStreaming': blStreaming(msg.payload); break;
             case 'blDelta': blDelta(msg.payload.delta); break;
             case 'blResult': blResult(msg.payload); break;
+            case 'historyReason': fillHistoryReason(msg.payload.hash, msg.payload.reason); break;
             case 'info': showInfo(msg.payload.message); break;
             case 'empty':
                 document.getElementById('info').classList.add('hidden');
@@ -1024,6 +1087,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         } else {
             histWrap.classList.add('hidden');
         }
+        renderLineIssues(p.lineIssues);
     }
     function blDelta(delta) {
         blExp += delta;
@@ -1094,6 +1158,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         } else {
             histWrap.classList.add('hidden');
         }
+        renderLineIssues(p.lineIssues);
     }
 
     // 라인 수정 이력 한 줄 — 클릭하면 해당 커밋을 git show 로 연다.
@@ -1110,22 +1175,69 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         const badge = (h.issueCount && h.issueCount > 0)
             ? '<span class="hist-item__issues" data-action="openIssueTodo" title="연관 이슈 보기 (준비 중)"><span class="ico">' + ICON.issue + '</span>이슈 ' + h.issueCount + '</span>'
             : '<span></span>';
+        // 캐럿/이유 박스는 자체 data-action(expandHistory)을 가져, 클릭 위임의 closest() 가
+        // 행(openCommitHash)보다 먼저 잡는다 → 캐럿=펼침, 배지=이슈, 나머지 행=커밋 열기로 분기.
         el.innerHTML =
             '<span class="hist-item__dot"></span>' +
             '<div style="min-width:0">' +
                 '<div class="hist-item__head">' +
                     '<span class="hist-item__hash mono"></span>' +
                     '<span class="hist-item__date"></span>' +
+                    '<span class="hist-item__caret" data-action="expandHistory" title="이 커밋의 변경 사유 보기">' + ICON.caret + '</span>' +
                 '</div>' +
                 '<div class="hist-item__subject"></div>' +
                 '<div class="hist-item__author"></div>' +
+                '<div class="hist-item__reason hidden" data-action="expandHistory"></div>' +
             '</div>' +
             badge;
         el.querySelector('.hist-item__hash').textContent = short;
         el.querySelector('.hist-item__date').textContent = formatHistDate(h.date);
         el.querySelector('.hist-item__subject').textContent = h.subject || '';
         el.querySelector('.hist-item__author').textContent = h.author || '';
+        // 펼침/이유 요청이 자기 커밋 해시를 싣도록 캐럿·이유 박스에도 해시를 단다.
+        el.querySelector('.hist-item__caret').dataset.hash = h.hash || '';
+        el.querySelector('.hist-item__reason').dataset.hash = h.hash || '';
         return el;
+    }
+
+    // 상태 라벨 — 이슈 롤업 칩에 붙는다(현재/과거/되돌림).
+    const LI_STATUS = { current: '현재', past: '과거', reverted: '되돌림' };
+
+    // 연관 이슈 롤업 — 라인 전체에서 dedup 된 이슈 칩을 상태별 색으로 그린다.
+    function renderLineIssues(list) {
+        const wrap = document.getElementById('lineissues-wrap');
+        const box = document.getElementById('lineissues-list');
+        box.innerHTML = '';
+        if (!list || !list.length) { wrap.classList.add('hidden'); return; }
+        wrap.classList.remove('hidden');
+        list.forEach(it => box.appendChild(renderLineIssue(it)));
+    }
+    function renderLineIssue(it) {
+        const status = it.status || 'past';
+        const el = document.createElement('span');
+        el.className = 'li-chip li-chip--' + status;
+        // URL 이 해석돼 있으면 외부 열기, 아니면 임시 안내(이슈 기능 연동 전).
+        el.dataset.action = it.url ? 'openIssue' : 'openIssueTodo';
+        if (it.url) { el.dataset.url = it.url; }
+        const count = (it.changeCount && it.changeCount > 1) ? (' · ' + it.changeCount + '회') : '';
+        el.innerHTML =
+            '<span class="ico">' + ICON.issue + '</span>' +
+            '<span class="li-chip__num"></span>' +
+            '<span class="li-chip__status"></span>';
+        el.querySelector('.li-chip__num').textContent = '#' + it.number;
+        el.querySelector('.li-chip__status').textContent = (LI_STATUS[status] || '') + count;
+        el.title = it.title ? ('#' + it.number + ' ' + it.title) : ('이슈 #' + it.number);
+        return el;
+    }
+
+    // 펼친 라인 이력 항목에 그 커밋의 변경 사유를 채운다(지연 로드 응답).
+    function fillHistoryReason(hash, reason) {
+        const box = document.querySelector('.hist-item__reason[data-hash="' + hash + '"]');
+        if (!box) { return; }
+        box.classList.remove('loading');
+        box.innerHTML = decorate(reason || '(변경 사유 없음)');
+        box.dataset.loaded = '1';
+        delete box.dataset.loading;
     }
 
     // "2026-03-15" → "3월 15일" (파싱 실패 시 원본)
@@ -1189,6 +1301,22 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             revealTabs(true);
             showTab('blame');
             vscode.postMessage({ type: 'switchTab', payload: { tab: 'blame' } });
+            return;
+        }
+        // 라인 수정 이력 캐럿/이유 박스 클릭 — 행을 펼치고(토글) 그 커밋 사유를 지연 로드한다.
+        if (el.dataset.action === 'expandHistory') {
+            const item = el.closest('.hist-item');
+            if (!item) { return; }
+            const box = item.querySelector('.hist-item__reason');
+            const expanded = item.classList.toggle('expanded');
+            if (box) { box.classList.toggle('hidden', !expanded); }
+            // 처음 펼칠 때만 요청 — loaded/loading 가드로 중복 호출을 막는다.
+            if (expanded && box && !box.dataset.loaded && !box.dataset.loading) {
+                box.dataset.loading = '1';
+                box.classList.add('loading');
+                box.textContent = '변경 사유 불러오는 중…';
+                vscode.postMessage({ type: 'expandHistory', payload: { hash: el.dataset.hash } });
+            }
             return;
         }
         // 라인 수정 이력 항목은 자기 커밋 해시를 함께 실어 보낸다.

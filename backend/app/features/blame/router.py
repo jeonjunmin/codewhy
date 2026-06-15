@@ -27,7 +27,14 @@ from app.core.tickets import extract_ticket
 from app.db import crud_common
 from app.db.postgres import get_db
 from app.features.blame import crud, service
-from app.features.blame.schemas import AskRequest, AskResponse, BlameRequest, BlameResponse
+from app.features.blame.schemas import (
+    AskRequest,
+    AskResponse,
+    BlameRequest,
+    BlameResponse,
+    ReasonRequest,
+    ReasonResponse,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -76,6 +83,9 @@ async def context_blame(req: BlameRequest, db: AsyncSession = Depends(get_db)):
     if commit is not None and file is not None:
         cached = await crud.get_cached_blame(db, file.id, commit)
         if cached:
+            # 라인 스코프 필드(이력 + 이슈 롤업)는 캐시되지 않으므로 git 으로 다시 조립해 덧붙인다.
+            # (캐시는 커밋×파일 단위라 줄 번호가 빠져 있다 — 같은 커밋의 다른 줄에도 적중하므로)
+            cached.update(service.build_line_fields(req.repoPath, req.filePath, req.line, info.commit_hash))
             return BlameResponse(**cached)
 
     # 3. 미스 → 분기:
@@ -113,6 +123,66 @@ async def context_blame(req: BlameRequest, db: AsyncSession = Depends(get_db)):
             "Connection": "keep-alive",
         },
     )
+
+
+@router.post("/reason", response_model=ReasonResponse)
+async def commit_reason(req: ReasonRequest, db: AsyncSession = Depends(get_db)):
+    """라인 수정 이력 항목 펼침 — 그 커밋의 변경 사유를 지연 생성한다.
+
+    /context 와 같은 (file_id, commit_id) 캐시를 공유한다. 같은 커밋이면 어느 경로로
+    먼저 분석됐든 적중하므로, 같은 라인을 다시 펼칠 때는 Bedrock 재호출 없이 즉시 답한다.
+    """
+    # 0. 임의 커밋 해석 — 잘린 이력/리베이스 등으로 해시가 사라졌으면 안내로 단락.
+    try:
+        info = git.get_commit_info(req.repoPath, req.filePath, req.hash)
+    except git.BlameUnavailable as e:
+        logger.info("reason 불가 — %s (reason=%s)", e, e.reason)
+        return ReasonResponse(reason=service.uncommitted_response(e.reason)["explanation"])
+
+    branch = git.get_current_branch(req.repoPath)
+    ticket = extract_ticket(info.message, branch)
+
+    # 1. 백본 행 확보 (캐시 키에 commit_id 포함) — /context 와 동일 패턴
+    try:
+        repo = await crud_common.get_or_create_repository(db, req.repoPath)
+        file = await crud_common.get_or_create_file(db, repo.id, req.filePath)
+        commit = await crud_common.upsert_commit(
+            db,
+            repo.id,
+            info.commit_hash,
+            author=info.author,
+            committed_date=_parse_date(info.date),
+            message=info.message,
+            ticket=ticket,
+        )
+        await crud_common.link_commit_file(db, commit.id, file.id, info.added, info.removed)
+        await db.commit()
+    except Exception:
+        logger.warning("reason 백본 준비 실패 — 캐시 없이 분석만 진행", exc_info=True)
+        commit = file = None
+
+    # 2. 캐시 조회 — 적중 시 저장된 설명을 그대로 반환(Bedrock 미호출)
+    if commit is not None and file is not None:
+        cached = await crud.get_cached_blame(db, file.id, commit)
+        if cached:
+            return ReasonResponse(reason=cached.get("explanation", ""))
+
+    # 3. 미스 → 분석(Bedrock). degraded 폴백이 아니면 캐시에 저장.
+    try:
+        result = await asyncio.to_thread(
+            service.explain_commit_reason, req.repoPath, req.filePath, info
+        )
+    except Exception as e:
+        logger.exception("commit reason 분석 실패 — repo=%s file=%s hash=%s", req.repoPath, req.filePath, req.hash)
+        raise HTTPException(status_code=500, detail=f"commit reason 실패: {e}")
+
+    if commit is not None and file is not None and not result.get("aiDegraded"):
+        try:
+            await crud.save_blame(db, file.id, commit.id, result)
+        except Exception:
+            logger.warning("reason 캐시 저장 실패 (응답에는 영향 없음)", exc_info=True)
+
+    return ReasonResponse(reason=result.get("explanation", ""), aiDegraded=bool(result.get("aiDegraded")))
 
 
 @router.post("/ask", response_model=AskResponse)

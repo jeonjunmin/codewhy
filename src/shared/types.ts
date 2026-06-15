@@ -41,6 +41,8 @@ export interface BlameResult {
     relatedChanges?: RelatedChange[];
     /** 사이드바 하단 "라인 수정 이력" — 이 라인이 실제로 바뀐 커밋들(최신순). */
     lineHistory?: LineHistoryEntry[];
+    /** 라인 전체에서 dedup 된 연관 이슈 롤업(현재/과거/되돌림). */
+    lineIssues?: LineIssue[];
 }
 
 /**
@@ -53,6 +55,35 @@ export interface LineHistoryEntry {
     date: string;        // YYYY-MM-DD
     subject: string;     // 커밋 제목
     issueCount: number;  // 참조 이슈 수 — 0 이면 배지 숨김
+    /** 항목을 펼칠 때 /api/blame/reason 으로 지연 채워지는 그 커밋의 AI 변경 사유. */
+    reason?: string | null;
+}
+
+/** 라인 관점 이슈 상태 — 현재 driver / 과거 / 되돌림(휴리스틱). */
+export type LineIssueStatus = 'current' | 'past' | 'reverted';
+
+/**
+ * "라인 수정 이력" 전체에서 dedup 된 연관 이슈 한 건(이슈 롤업 칩).
+ * 백엔드 schemas.py 의 LineIssue 와 키가 일치해야 한다.
+ */
+export interface LineIssue {
+    number: number;          // 이슈 번호 (#N 의 N)
+    status: LineIssueStatus;
+    changeCount: number;     // 이 이슈가 등장한 라인-이력 커밋 수
+    url?: string | null;     // 해석되면 GitHub 이슈 URL (담당: 개발자 C)
+    title?: string | null;   // 해석되면 이슈 제목 (담당: 개발자 C)
+}
+
+/** POST /api/blame/reason — 라인 이력 항목 펼침 시 그 커밋의 변경 사유 요청. */
+export interface ReasonRequest {
+    filePath: string;
+    repoPath: string;
+    hash: string;
+}
+
+export interface ReasonResult {
+    reason: string;
+    aiDegraded?: boolean;
 }
 
 /** 연관 이슈에 첨부된 요구사항 문서 한 건. */
