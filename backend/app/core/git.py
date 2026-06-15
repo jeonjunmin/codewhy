@@ -97,6 +97,48 @@ def get_blame_info(repo_path: str, file_path: str, line: int) -> BlameInfo:
     )
 
 
+def get_commit_info(repo_path: str, file_path: str, commit_hash: str) -> BlameInfo:
+    """임의 커밋 하나의 메타 + 해당 파일 diff 를 BlameInfo 로 조립한다.
+
+    get_blame_info(특정 '라인'의 현재 blame)와 달리, '라인 수정 이력'에서 고른 과거 커밋
+    해시로 직접 BlameInfo 를 만든다. 사이드바 이력 항목을 펼칠 때 그 커밋의 변경 사유를
+    지연 생성(/api/blame/reason)하는 데 쓴다.
+
+    해시가 유효하지 않으면(잘린 이력/리베이스 등) BlameUnavailable 로 변환한다.
+    """
+    try:
+        meta = subprocess.check_output(
+            ["git", "show", "-s", "--format=%H|%an|%ad", "--date=short", commit_hash],
+            cwd=repo_path,
+            text=True,
+            encoding="utf-8",
+            stderr=subprocess.PIPE,
+        ).strip()
+    except subprocess.CalledProcessError as e:
+        raise BlameUnavailable(
+            (e.stderr or "").strip() or f"커밋을 찾을 수 없습니다: {commit_hash}",
+            reason="no_history",
+        ) from e
+
+    parts = meta.split("|", 2)
+    commit_full = parts[0] if parts and parts[0] else commit_hash
+    author = parts[1] if len(parts) > 1 else ""
+    date = parts[2] if len(parts) > 2 else ""
+    message = _get_commit_message(repo_path, commit_hash)
+    diff = _get_commit_diff(repo_path, commit_hash, file_path)
+    added, removed = _get_commit_numstat(repo_path, commit_hash, file_path)
+
+    return BlameInfo(
+        commit_hash=commit_full,
+        author=author,
+        date=date,
+        message=message,
+        diff=diff,
+        added=added,
+        removed=removed,
+    )
+
+
 def get_current_branch(repo_path: str) -> str:
     """현재 체크아웃된 브랜치명. detached HEAD 등 실패 시 빈 문자열."""
     try:

@@ -4,7 +4,7 @@ import { EditorContext, getEditorContext } from '../../shared/editor';
 import { BlameResult, CommitInput } from '../../shared/types';
 import { fetchRequirementTrace } from '../requirementTrace/api';
 import { streamTimelineSummary } from '../timelineSummary/api';
-import { fetchContextBlame } from './api';
+import { fetchCommitReason, streamContextBlame } from './api';
 import { ContextBlameSidebarProvider, VIEW_ID } from './sidebar';
 
 /**
@@ -39,6 +39,10 @@ let currentCursorLine = -1;
 let initialized = false;
 
 const cacheKey = (filePath: string, line: number) => `${filePath}:${line}`;
+
+/** `codewhy.*` 설정값을 읽는다(미설정 시 fallback). 토글 게이트용 헬퍼. */
+const cfg = <T>(key: string, fallback: T): T =>
+    vscode.workspace.getConfiguration('codewhy').get<T>(key, fallback);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 공개 API
@@ -84,10 +88,12 @@ function ensureInitialized(context: vscode.ExtensionContext) {
             vscode.commands.executeCommand('codewhy.blame.openCommit', { commitHash, repoPath }),
         onSwitchTab: (tab) => handleSwitchTab(tab),
         onOpenIssue: (url) => { vscode.env.openExternal(vscode.Uri.parse(url)); },
-        onTogglePin: (filePath, line) =>
-            vscode.commands.executeCommand('codewhy.blame.pin', { filePath, line }),
-        onOpenSettings: () =>
-            vscode.commands.executeCommand('workbench.action.openSettings', 'codewhy'),
+        // 이슈 기능 개발 전까지 '이슈 N' 배지는 임시 안내만 — 실제 이동은 DEVELOPMENT_GUIDE.md TODO 참고.
+        onOpenIssueTodo: () => {
+            vscode.window.showInformationMessage('연관 이슈 보기는 이슈 기능 연동 후 제공될 예정입니다.');
+        },
+        // 라인 수정 이력 항목 펼침 → 그 커밋의 변경 사유를 지연 생성해 사이드바에 주입.
+        onExpandHistory: (hash, filePath, repoPath) => handleExpandHistory(hash, filePath, repoPath),
     });
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(VIEW_ID, sidebar, {
@@ -99,6 +105,7 @@ function ensureInitialized(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.languages.registerHoverProvider({ scheme: 'file' }, {
             provideHover(document, position) {
+                if (!cfg('hover.enabled', true)) { return null; }
                 const key = cacheKey(document.uri.fsPath, position.line + 1);
                 const entry = blameCache.get(key);
                 if (!entry) { return null; }
@@ -119,6 +126,7 @@ function ensureInitialized(context: vscode.ExtensionContext) {
             {
                 onDidChangeCodeLenses: codeLensEmitter.event,
                 provideCodeLenses(document) {
+                    if (!cfg('codeLens.enabled', true)) { return []; }
                     if (
                         document.uri.fsPath !== currentFilePath ||
                         currentCursorLine < 0 ||
@@ -137,6 +145,14 @@ function ensureInitialized(context: vscode.ExtensionContext) {
                 },
             },
         ),
+    );
+
+    // ── 설정 변경 감지 → CodeLens 토글을 즉시 반영(렌즈 다시 계산)
+    //    Hover 는 다음 호버 때 cfg() 를 다시 읽으므로 별도 처리가 필요 없다.
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration(e => {
+            if (e.affectsConfiguration('codewhy.codeLens')) { codeLensEmitter?.fire(); }
+        }),
     );
 
     // ── 문서 수정 감지 → 해당 파일의 블레임 캐시·핀 무효화
@@ -174,6 +190,9 @@ function ensureInitialized(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('codewhy.blame.analyzeAndShow', handleAnalyzeAndShow),
         vscode.commands.registerCommand('codewhy.blame.openCommit', openCommitInTerminal),
         vscode.commands.registerCommand('codewhy.blame.pin', togglePin),
+        // 제목줄(view/title) ⚙ 설정 버튼 — 'CodeWhy' 패널 제목 오른쪽 끝에 노출된다.
+        vscode.commands.registerCommand('codewhy.openSettings', () =>
+            vscode.commands.executeCommand('workbench.action.openSettings', 'codewhy')),
     );
 }
 
@@ -181,29 +200,41 @@ function ensureInitialized(context: vscode.ExtensionContext) {
 // 2. CodeLens 클릭 → 분석 → 사이드바 push
 // ─────────────────────────────────────────────────────────────────────────────
 async function handleAnalyzeAndShow(args: { filePath: string; line: number; repoPath: string }) {
-    const key = cacheKey(args.filePath, args.line);
-    let entry = blameCache.get(key);
-
-    if (!entry) {
-        await vscode.window.withProgress(
-            { location: vscode.ProgressLocation.Notification, title: 'CodeWhy: 변경 이유 분석 중...' },
-            async () => {
-                try {
-                    const result = await fetchContextBlame(args);
-                    entry = { ctx: args, result };
-                    // degraded(Bedrock 폴백) 응답은 일시적 실패이므로 캐싱하지 않는다.
-                    // 이번엔 사용자에게 보여주되, 다음 분석 때 다시 호출해 자동 회복되게 한다.
-                    if (!result.aiDegraded) { blameCache.set(key, entry); }
-                } catch (err) {
-                    vscode.window.showErrorMessage(`Context Blame 실패: ${(err as Error).message}`);
-                }
-            },
-        );
+    const entry = blameCache.get(cacheKey(args.filePath, args.line));
+    if (entry) {
+        // 캐시 적중 — 스트리밍 없이 즉시 표시.
+        updateStatusBar(args.line, entry.result);
+        pushToSidebar(entry.ctx, entry.result);
+        return;
     }
+    // 미스 — SSE 스트리밍으로 설명을 토큰 단위로 그린다(타임라인 패턴과 동일).
+    streamBlameInto(args);
+}
 
-    if (!entry) { return; }
-    updateStatusBar(args.line, entry.result);
-    pushToSidebar(entry.ctx, entry.result);
+/**
+ * 캐시 미스 라인을 스트리밍 분석해 사이드바에 점진 렌더한다.
+ * meta(메타·이력 즉시) → delta(설명 타이핑) → done(출처/PR 확정) 3단으로 흐른다.
+ * 알림 스피너 대신 패널 안 캐럿으로 진행을 보여주므로 fire-and-forget 으로 둔다.
+ */
+function streamBlameInto(args: { filePath: string; line: number; repoPath: string }) {
+    if (!sidebar) { return; }
+    const ctx = args as EditorContext;
+    const key = cacheKey(args.filePath, args.line);
+    let metaSeen = false;
+
+    streamContextBlame(args, {
+        onMeta: (meta) => { metaSeen = true; sidebar!.blameStreaming(ctx, meta); },
+        onDelta: (delta) => sidebar!.blameDelta(delta),
+        onDone: (result) => {
+            // degraded(Bedrock 폴백)는 일시적 실패이므로 캐싱하지 않는다(다음 분석 때 자동 회복).
+            if (!result.aiDegraded) { blameCache.set(key, { ctx, result }); }
+            updateStatusBar(args.line, result);
+            // meta 를 본 경우(스트리밍)는 콜아웃 확정만, 아니면(캐시 적중/노이즈 JSON) 전체 렌더.
+            if (metaSeen) { sidebar!.blameResult(ctx, result); }
+            else { pushToSidebar(ctx, result); }
+        },
+        onError: (message) => vscode.window.showErrorMessage(`Context Blame 실패: ${message}`),
+    }).catch((err) => vscode.window.showErrorMessage(`Context Blame 실패: ${(err as Error).message}`));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -291,6 +322,21 @@ function collectGitLog(repoPath: string, filePath: string): CommitInput[] {
     }
 }
 
+/**
+ * 라인 수정 이력 항목을 펼칠 때, 그 커밋의 변경 사유를 백엔드에서 받아 사이드바에 채운다.
+ * 백엔드가 (file_id, commit_id) 캐시를 공유하므로 같은 커밋 재펼침은 빠르게 응답한다.
+ * 알림 스피너 대신 펼친 행 안에 로딩 문구를 두므로 fire-and-forget 으로 둔다.
+ */
+async function handleExpandHistory(hash: string, filePath: string, repoPath: string) {
+    if (!sidebar) { return; }
+    try {
+        const { reason } = await fetchCommitReason({ repoPath, filePath, hash });
+        sidebar.setHistoryReason(hash, reason || '(변경 사유를 찾지 못했습니다.)');
+    } catch (err) {
+        sidebar.setHistoryReason(hash, `변경 사유를 불러오지 못했습니다: ${(err as Error).message}`);
+    }
+}
+
 function pushToSidebar(ctx: EditorContext, r: BlameResult) {
     if (!sidebar) { return; }
     const isPinned = pinned.has(cacheKey(ctx.filePath, ctx.line));
@@ -357,7 +403,6 @@ async function togglePin(args?: { filePath: string; line: number }) {
     }
     pinned.has(key) ? pinned.delete(key) : pinned.add(key);
     if (editor) { refreshPinnedDecorations(editor); }
-    sidebar?.refreshPinned(pinned.has(key));
 }
 
 function refreshPinnedDecorations(editor: vscode.TextEditor) {
