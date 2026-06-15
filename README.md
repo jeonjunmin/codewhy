@@ -92,6 +92,51 @@ VSCode 설정(`settings.json` 또는 설정 UI)에서 조정할 수 있습니다
 
 ---
 
+## 🧩 AI 오케스트레이션 (LangGraph)
+
+블레임·역추적의 다단계 파이프라인은 **LangGraph `StateGraph`** 로 선언적으로 구성됩니다 —
+조건 분기, 병렬 fan-out/fan-in, 폴백을 한 그래프에서 표현하고, **토큰 스트리밍은 그대로 유지**합니다
+(`astream_events`). 그래프 정의: `backend/app/ai/blame_graph.py`, `backend/app/ai/trace_graph.py`.
+
+### 컨텍스트 블레임 — 병렬 조회 + 조건 분기 + 스트리밍
+
+```mermaid
+graph TD
+    START([시작]) --> resolve_commit
+    resolve_commit --> classify
+    classify -->|노이즈 커밋 test/chore/docs| noise_response --> E([끝])
+    classify -->|의미있는 커밋| fetch_github
+    classify -->|의미있는 커밋| fetch_followups
+    fetch_github -->|PR→이슈| build_context
+    fetch_followups -->|같은 티켓 후속커밋| build_context
+    build_context --> explain
+    explain -->|Bedrock 토큰 스트리밍 / 실패 시 degraded| assemble --> E
+```
+
+> `fetch_github`(PR+이슈)와 `fetch_followups`는 **병렬**로 실행돼 `build_context`에서 만난다(fan-in 1회).
+> 노이즈 커밋은 LLM·GitHub 호출 없이 즉시 응답. `explain` 노드의 LLM 토큰은 SSE `delta`로 실시간 전달.
+
+### 요구사항 역추적 — issue → ticket → semantic 폴백 체인
+
+```mermaid
+graph TD
+    START([시작]) --> resolve_commit
+    resolve_commit -->|커밋/원격 없음| E([끝])
+    resolve_commit --> try_issue
+    try_issue -->|이슈 발견 ✓ 확정| format_results
+    try_issue -->|없음| try_ticket
+    try_ticket -->|이슈 발견 ✓ 0.8| format_results
+    try_ticket -->|없음| try_semantic
+    try_semantic -->|키워드 검색 ~0.5| format_results
+    format_results --> E
+```
+
+> 각 폴백 단계가 명명된 노드 + 조건 엣지라 "왜 이 matchType이 나왔는가"가 한눈에 보입니다.
+
+> 그래프 다이어그램은 `python -m app.ai.blame_graph` / `python -m app.ai.trace_graph` 로 직접 출력할 수 있습니다.
+
+---
+
 ## 📚 더 보기
 
 | 문서 | 내용 |

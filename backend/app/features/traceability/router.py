@@ -7,12 +7,11 @@ DB 의존 없음 — GitHub API 실시간 조회로 동작.
 👤 담당: 개발자 C
 """
 
-import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException
 
-from app.features.traceability import service
+from app.ai.trace_graph import atrace
 from app.features.traceability.schemas import (
     DocumentMatch,
     TraceRequest,
@@ -26,10 +25,9 @@ logger = logging.getLogger(__name__)
 @router.post("/requirement", response_model=TraceResponse)
 async def requirement_trace(req: TraceRequest):
     try:
-        # git + GitHub API 는 모두 동기 블로킹 → 이벤트 루프 보호
-        matches = await asyncio.to_thread(
-            service.trace, req.repoPath, req.filePath, req.line
-        )
+        # 폴백 체인을 trace_graph(LangGraph)로 실행. 노드 내부에서 git/GitHub 블로킹 호출을
+        # asyncio.to_thread 로 위임하므로 이벤트 루프를 점유하지 않는다.
+        matches = await atrace(req.repoPath, req.filePath, req.line)
     except Exception as e:
         logger.exception(
             "requirement trace 실패 — repo=%s file=%s line=%s",

@@ -9,7 +9,7 @@ POST /api/blame/context — 한 라인의 변경 사유를 분석해 반환한�
   3. 미스 시 분기(타임라인 /summary 와 동일한 듀얼 모드):
      - 노이즈 커밋(test/chore/docs) → Bedrock 없이 즉시 JSON
      - 의미있는 커밋 → SSE(text/event-stream) 스트림으로 설명 토큰을 실시간 전달
-       (스트림 종료 시점에 service.stream_blame 이 캐시에 저장)
+       (ai/blame_graph.stream_blame_graph 가 LangGraph StateGraph 를 구동, 스트림 종료 시점에 캐시 저장)
 
 👤 담당: 개발자 A
 """
@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.blame_graph import stream_blame_graph
 from app.core import git
 from app.core.tickets import extract_ticket
 from app.db import crud_common
@@ -81,7 +82,7 @@ async def context_blame(req: BlameRequest, db: AsyncSession = Depends(get_db)):
     # 3. 미스 → 분기:
     #    - 노이즈 커밋(test/chore/docs): Bedrock·GitHub 호출이 없어 즉시 끝나므로 JSON 으로 응답.
     #    - 의미있는 커밋: SSE(text/event-stream) 스트림으로 설명 토큰을 실시간 전달하고,
-    #      스트림 종료 시점에 service.stream_blame 이 캐시에 저장한다(타임라인 /summary 와 동일 패턴).
+    #      스트림 종료 시점에 stream_blame_graph(LangGraph)가 캐시에 저장한다(타임라인 /summary 와 동일 패턴).
     #    프런트는 응답 Content-Type 으로 두 경로를 구분한다(application/json vs text/event-stream).
     if service.is_noise_commit(info.message):
         try:
@@ -101,7 +102,7 @@ async def context_blame(req: BlameRequest, db: AsyncSession = Depends(get_db)):
         return BlameResponse(**result)
 
     return StreamingResponse(
-        service.stream_blame(
+        stream_blame_graph(
             db, req.repoPath, req.filePath, req.line,
             info=info, branch=branch, ticket=ticket, commit=commit, file=file,
         ),
