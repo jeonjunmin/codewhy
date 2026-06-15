@@ -6,10 +6,42 @@
  */
 
 // --- Context Blame (담당: 개발자 A) ---------------------------------
+
+/**
+ * 확장이 로컬 git 으로 뽑아 백엔드에 전달하는 커밋 메타 + diff.
+ * 백엔드 schemas.py 의 GitCommitMeta 와 키가 일치해야 한다.
+ * (백엔드를 원격에 올리면 로컬 저장소에 접근할 수 없어 git 실행을 클라이언트로 옮겼다.)
+ */
+export interface GitCommitMeta {
+    commitHash: string;
+    author: string;
+    date: string;     // YYYY-MM-DD
+    message: string;
+    diff: string;
+    added: number;
+    removed: number;
+}
+
+/** blame 을 낼 수 없는 정상 상황 — 미커밋(uncommitted) / 이력 없음(no_history). */
+export type BlameUnavailableReason = 'uncommitted' | 'no_history';
+
 export interface BlameRequest {
     filePath: string;
     line: number;
     repoPath: string;
+    // ── 확장이 로컬 git 으로 수집해 전송하는 데이터 ──────────────────────
+    /** blamed 커밋 메타. unavailable 이 있으면 null. */
+    blame: GitCommitMeta | null;
+    /** blame 불가 사유(미커밋 등). 정상이면 null. */
+    unavailable: BlameUnavailableReason | null;
+    /** 현재 브랜치명 — 백엔드 티켓 추출(메시지+브랜치)에 쓴다. */
+    branch: string;
+    /** 이 라인이 실제로 바뀐 커밋들(최신순) — 백엔드가 이슈 롤업을 덧붙인다. */
+    lineHistory: CommitInput[];
+    /** 같은 티켓 후속 커밋 — '함께 일어난 일' 재료. */
+    followups: CommitInput[];
+    /** origin remote URL 원문 — 백엔드가 파싱해 PR/이슈 API 조회에 쓴다. */
+    remoteUrl: string | null;
 }
 
 export interface BlameResult {
@@ -79,6 +111,15 @@ export interface ReasonRequest {
     filePath: string;
     repoPath: string;
     hash: string;
+    // ── 확장이 로컬 git 으로 수집해 전송하는 데이터 ──────────────────────
+    /** 해당 커밋의 메타 + diff. 해시가 유효하지 않으면 null. */
+    commit: GitCommitMeta | null;
+    /** 현재 브랜치명(티켓 추출용). */
+    branch: string;
+    /** 같은 티켓 후속 커밋. */
+    followups: CommitInput[];
+    /** origin remote URL 원문. */
+    remoteUrl: string | null;
 }
 
 export interface ReasonResult {
@@ -108,6 +149,13 @@ export interface AskRequest {
     line: number;
     repoPath: string;
     question: string;
+    // ── 확장이 로컬 git 으로 수집해 전송하는 데이터 ──────────────────────
+    /** 현재 라인 blamed 커밋 메타. 미커밋이면 null. */
+    blame: GitCommitMeta | null;
+    /** blame 불가 사유. 정상이면 null. */
+    unavailable: BlameUnavailableReason | null;
+    /** origin remote URL 원문. */
+    remoteUrl: string | null;
 }
 
 export interface AskResult {
@@ -143,6 +191,13 @@ export interface TraceRequest {
     filePath: string;
     line: number;
     repoPath: string;
+    // ── 확장이 로컬 git 으로 수집해 전송 (원격 백엔드는 로컬 저장소 접근 불가) ──────
+    /** blamed 커밋 메타. 미커밋 라인 등으로 없으면 null. */
+    blame: GitCommitMeta | null;
+    /** 현재 브랜치명(티켓 추출용). */
+    branch: string;
+    /** origin remote URL 원문 — 백엔드가 파싱해 GitHub/GitLab API 조회에 쓴다. */
+    remoteUrl: string | null;
 }
 
 /**

@@ -92,12 +92,22 @@ def detect_remote(repo_path: str) -> Remote | None:
     return _parse_remote_url(url)
 
 
-def find_pr_for_commit(repo_path: str, commit_hash: str) -> PullRequest | None:
-    """커밋이 속한 PR/MR 을 찾아 변경 통계까지 채워 반환한다.
+def parse_remote(url: str | None) -> Remote | None:
+    """remote URL 원문(확장이 `git remote get-url origin` 으로 보낸 것)을 파싱한다.
+
+    원격 백엔드에는 로컬 저장소가 없어 detect_remote(=git 호출)를 쓸 수 없으므로,
+    확장이 보낸 URL 문자열에서 host/owner/repo 를 뽑는다.
+    """
+    if not url:
+        return None
+    return _parse_remote_url(url)
+
+
+def find_pr_for_remote(remote: Remote | None, commit_hash: str) -> PullRequest | None:
+    """이미 파싱된 remote 로 커밋의 PR/MR 을 찾는다(git 호출 없음 — 원격 백엔드용).
 
     어느 단계든 실패하면 None — 호출 측이 PR 정보 없이 진행한다.
     """
-    remote = detect_remote(repo_path)
     if not remote or not commit_hash:
         return None
     try:
@@ -108,6 +118,14 @@ def find_pr_for_commit(repo_path: str, commit_hash: str) -> PullRequest | None:
     except (urllib.error.URLError, KeyError, ValueError, TimeoutError):
         return None
     return None
+
+
+def find_pr_for_commit(repo_path: str, commit_hash: str) -> PullRequest | None:
+    """커밋이 속한 PR/MR 을 찾아 변경 통계까지 채워 반환한다(로컬 git 으로 remote 감지).
+
+    어느 단계든 실패하면 None — 호출 측이 PR 정보 없이 진행한다.
+    """
+    return find_pr_for_remote(detect_remote(repo_path), commit_hash)
 
 
 # ─── URL 파싱 ───────────────────────────────────────────────────────
@@ -502,24 +520,20 @@ def search_github_issues(remote: Remote, query: str, per_page: int = 5) -> list[
         return []
 
 
-def find_issues_for_commit(repo_path: str, commit_hash: str, commit_message: str) -> tuple[list[Issue], str]:
-    """커밋에서 연관 Issue를 최선으로 찾아 반환한다.
+def find_issues_for_remote(
+    remote: "Remote | None", commit_hash: str, commit_message: str, branch: str = "",
+) -> tuple[list[Issue], str]:
+    """이미 파싱된 remote 로 커밋의 연관 Issue 를 찾는다(git 호출 없음 — 원격 백엔드용).
 
-    반환: (issues, matchType)
-      - ("issue", issues): PR 본문 → Issue 직접 연결
-      - ("ticket", issues): 커밋 메시지 티켓 번호 → Issue 검색
-      - ("semantic", issues): 키워드로 관련 Issue 검색
-      - ("", []): 아무것도 없음
-
-    traceability/service.py 에서만 사용한다.
+    remote/branch 는 확장이 로컬 git 으로 수집해 보낸 데이터에서 비롯한다.
+    반환 규약은 find_issues_for_commit 과 동일하다.
     """
-    remote = detect_remote(repo_path)
     if not remote:
         return [], ""
 
     # 1. PR → Issue 직접 연결
     try:
-        pr = find_pr_for_commit(repo_path, commit_hash)
+        pr = find_pr_for_remote(remote, commit_hash)
         if pr and pr.body:
             issues = find_issues_from_pr_body(remote, pr.body)
             if issues:
@@ -529,11 +543,6 @@ def find_issues_for_commit(repo_path: str, commit_hash: str, commit_message: str
 
     # 2. 커밋 메시지 티켓 번호로 Issue 검색
     from app.core.tickets import extract_ticket
-    from app.core import git as _git
-    try:
-        branch = _git.get_current_branch(repo_path)
-    except Exception:
-        branch = ""
     ticket = extract_ticket(commit_message, branch)
     if ticket:
         issues = search_github_issues(remote, ticket)
@@ -550,3 +559,22 @@ def find_issues_for_commit(repo_path: str, commit_hash: str, commit_message: str
             return issues, "semantic"
 
     return [], ""
+
+
+def find_issues_for_commit(repo_path: str, commit_hash: str, commit_message: str) -> tuple[list[Issue], str]:
+    """커밋에서 연관 Issue를 최선으로 찾아 반환한다(로컬 git 으로 remote/branch 감지).
+
+    반환: (issues, matchType)
+      - ("issue", issues): PR 본문 → Issue 직접 연결
+      - ("ticket", issues): 커밋 메시지 티켓 번호 → Issue 검색
+      - ("semantic", issues): 키워드로 관련 Issue 검색
+      - ("", []): 아무것도 없음
+    """
+    from app.core import git as _git
+    try:
+        branch = _git.get_current_branch(repo_path)
+    except Exception:
+        branch = ""
+    return find_issues_for_remote(detect_remote(repo_path), commit_hash, commit_message, branch)
+
+

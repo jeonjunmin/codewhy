@@ -69,35 +69,36 @@ _SECURITY_TERMS = ("KYC", "감사", "audit", "보안", "security", "권한", "au
 def analyze_blame(
     repo_path: str,
     file_path: str,
-    line: int,
-    info: git.BlameInfo | None = None,
-    branch: str | None = None,
-    ticket: str | None = None,
+    info: git.BlameInfo,
+    *,
+    branch: str,
+    ticket: str | None,
+    followups: list[dict],
+    remote,
+    line_history: list[dict],
 ) -> dict:
-    # 라우터가 캐시 키 해석용으로 이미 구한 info/branch/ticket 을 넘기면 재사용
-    if info is None:
-        info = git.get_blame_info(repo_path, file_path, line)
-
     # 커밋 단위 캐시 가능 필드(설명/출처/관련변경 등) 조립 — explain_commit_reason 과 공유.
-    result, context = _compose_commit_result(repo_path, file_path, info, branch, ticket)
+    # git 실행은 확장이 끝냈고, 여기서는 받은 데이터(info/followups/line_history/remote)만 쓴다.
+    result, context = _compose_commit_result(repo_path, file_path, info, branch, ticket, followups, remote)
     if context is not None:  # 노이즈 커밋(context=None)은 ask 재사용 맥락이 없다
         _remember_context(repo_path, file_path, info.commit_hash, context)
 
-    # 라인 스코프 필드(이력 + 이슈 롤업)는 커밋 캐시와 분리해 매번 git 으로 새로 조립한다.
-    result.update(build_line_fields(repo_path, file_path, line, info.commit_hash))
+    # 라인 스코프 필드(이력 + 이슈 롤업)는 확장이 보낸 라인 이력으로 조립한다.
+    result.update(build_line_fields(line_history, info.commit_hash))
     return result
 
 
-def build_line_fields(repo_path: str, file_path: str, line: int, current_hash: str) -> dict:
+def build_line_fields(line_history: list[dict], current_hash: str) -> dict:
     """라인 스코프 응답 필드(수정 이력 + 이슈 롤업)를 한 번에 조립한다.
 
-    (file_id, commit_id) 커밋 캐시와 분리된 git-only 필드라, /context 캐시 적중·미스 양쪽과
+    (file_id, commit_id) 커밋 캐시와 분리된 라인 스코프 필드라, /context 캐시 적중·미스 양쪽과
     analyze_blame 이 모두 같은 결과를 재사용하도록 한곳에 모은다.
+    입력 line_history 는 확장이 보낸 raw 라인 이력(hash/author/date/subject).
     """
-    line_history = _build_line_history(repo_path, file_path, line)
+    decorated = _decorate_line_history(line_history)
     return {
-        "lineHistory": line_history,
-        "lineIssues": _build_line_issues(line_history, current_hash),
+        "lineHistory": decorated,
+        "lineIssues": _build_line_issues(decorated, current_hash),
     }
 
 
@@ -105,17 +106,19 @@ def _compose_commit_result(
     repo_path: str,
     file_path: str,
     info: git.BlameInfo,
-    branch: str | None,
+    branch: str,
     ticket: str | None,
+    followups: list[dict],
+    remote,
 ) -> tuple[dict, str | None]:
     """info(라인 blame 이든 임의 과거 커밋이든) 하나의 '캐시 가능한' BlameResponse 필드를 조립한다.
 
     라인 스코프 필드(lineHistory/lineIssues)는 호출부가 덧붙인다 — 그래야 (file_id, commit_id)
     캐시가 /context 와 /reason 양쪽에서 동일하게 재사용된다.
     반환: (result, context). context 는 _remember_context 재사용용이며 노이즈 커밋이면 None.
+
+    followups/remote 는 확장이 수집한 git 데이터에서 비롯한다(서버는 git 을 돌리지 않는다).
     """
-    if branch is None:
-        branch = git.get_current_branch(repo_path)
     if ticket is None:
         ticket = extract_ticket(info.message, branch)
     team = get_team_map().get(info.author)
@@ -126,9 +129,8 @@ def _compose_commit_result(
     if commit_type in SKIP_TYPES:
         return _noise_response(info, ticket, team, commit_type), None
 
-    pr = _safe_find_pr(repo_path, info.commit_hash)
-    issues = _safe_find_issues(repo_path, pr, commit_message=info.message)
-    followups = git.find_followup_commits(repo_path, ticket, exclude_hash=info.commit_hash)
+    pr = _safe_find_pr(remote, info.commit_hash)
+    issues = _safe_find_issues(remote, pr, commit_message=info.message)
 
     context = _build_context(info, issues)
     explanation, ai_degraded = _explain_blame(info, issues, context=context)
@@ -163,14 +165,22 @@ def _compose_commit_result(
     return result, context
 
 
-def explain_commit_reason(repo_path: str, file_path: str, info: git.BlameInfo) -> dict:
+def explain_commit_reason(
+    repo_path: str,
+    file_path: str,
+    info: git.BlameInfo,
+    *,
+    branch: str,
+    followups: list[dict],
+    remote,
+) -> dict:
     """라인 수정 이력의 한 항목(임의 과거 커밋)을 펼칠 때, 그 커밋의 변경 사유를 생성한다.
 
     /api/blame/reason 의 본체. analyze_blame 과 같은 _compose_commit_result 를 공유하되
     라인 스코프 필드는 빼서 (file_id, commit_id) 캐시와 그대로 호환되게 한다.
     반환: BlameResponse 호환 dict (explanation/aiDegraded + 캐시 가능 필드).
     """
-    result, _ = _compose_commit_result(repo_path, file_path, info, None, None)
+    result, _ = _compose_commit_result(repo_path, file_path, info, branch, None, followups, remote)
     return result
 
 
@@ -178,13 +188,15 @@ async def stream_blame(
     db: AsyncSession,
     repo_path: str,
     file_path: str,
-    line: int,
     *,
     info: git.BlameInfo,
-    branch: str | None,
+    branch: str,
     ticket: str | None,
     commit: Commit | None,
     file: File | None,
+    followups: list[dict],
+    remote,
+    line_history: list[dict],
 ) -> AsyncGenerator[str, None]:
     """캐시 미스 시 변경 사유 분석을 SSE(`data: ...\\n\\n`) 프레임으로 실시간 전달한다.
 
@@ -199,10 +211,10 @@ async def stream_blame(
     team = get_team_map().get(info.author)
     change_stats = {"added": info.added, "removed": info.removed}
 
-    # ① meta 프레임 — 라인 이력(git log)은 가벼우므로 GitHub/Bedrock 대기 전에 먼저 보낸다.
-    #    이슈 롤업도 git 만으로(이력 + commit_hash) 즉시 조립되므로 meta 에 함께 실어 보낸다.
-    line_history = await asyncio.to_thread(_build_line_history, repo_path, file_path, line)
-    line_issues = _build_line_issues(line_history, info.commit_hash)
+    # ① meta 프레임 — 라인 이력(확장이 보낸 것)을 GitHub/Bedrock 대기 전에 먼저 보낸다.
+    #    이슈 롤업도 이력 + commit_hash 만으로 즉시 조립되므로 meta 에 함께 실어 보낸다.
+    decorated_history = _decorate_line_history(line_history)
+    line_issues = _build_line_issues(decorated_history, info.commit_hash)
     meta = {
         "commitHash": info.commit_hash,
         "author": info.author,
@@ -210,18 +222,15 @@ async def stream_blame(
         "ticket": ticket,
         "team": team,
         "changeStats": change_stats,
-        "lineHistory": line_history,
+        "lineHistory": decorated_history,
         "lineIssues": line_issues,
     }
     yield f"data: {json.dumps({'meta': meta}, ensure_ascii=False)}\n\n"
 
-    # ② PR 조회(GitHub)와 후속 커밋 조회(git)를 병렬로 겹쳐 실행한다(현재는 순차).
+    # ② PR 조회(GitHub) — 확장이 보낸 remote 로 조회한다. followups 는 확장이 이미 수집했다.
     #    issues 는 pr 본문에 의존하므로 pr 확정 후 조회한다.
-    pr, followups = await asyncio.gather(
-        asyncio.to_thread(_safe_find_pr, repo_path, info.commit_hash),
-        asyncio.to_thread(git.find_followup_commits, repo_path, ticket, exclude_hash=info.commit_hash),
-    )
-    issues = await asyncio.to_thread(_safe_find_issues, repo_path, pr, info.message)
+    pr = await asyncio.to_thread(_safe_find_pr, remote, info.commit_hash)
+    issues = await asyncio.to_thread(_safe_find_issues, remote, pr, info.message)
 
     context = _build_context(info, issues)
     _remember_context(repo_path, file_path, info.commit_hash, context)
@@ -266,7 +275,7 @@ async def stream_blame(
         "changeStats": change_stats,
         "prInfo": ({"url": pr.url, "lines": pr.added + pr.removed} if pr else None),
         "relatedChanges": related,
-        "lineHistory": line_history,
+        "lineHistory": decorated_history,
         "lineIssues": line_issues,
         "aiSuggestion": None,
     }
@@ -387,17 +396,17 @@ def _build_noise_explanation(info: git.BlameInfo, commit_type: str) -> str:
     return f'[자동 분류] {label} 정비 커밋입니다 — "{quote}"'
 
 
-def ask_followup(repo_path: str, file_path: str, line: int, question: str) -> str:
+def ask_followup(repo_path: str, file_path: str, info: git.BlameInfo, question: str, *, remote) -> str:
     """현재 라인 블레임 맥락 위에서 들어온 후속 질문에 답한다.
 
-    analyze_blame 이 캐시해 둔 맥락을 재사용해 git/PR/Issue 재조회를 막는다.
+    analyze_blame 이 캐시해 둔 맥락을 재사용해 PR/Issue 재조회를 막는다.
     캐시가 없는 경우(첫 질문이 analyze_blame 없이 들어온 경우)에만 재빌드한다.
+    info 는 라우터가 확장이 보낸 blame 데이터로 만든 것이며, 서버는 git 을 돌리지 않는다.
     """
-    info = git.get_blame_info(repo_path, file_path, line)
     context = _CONTEXT_CACHE.get((repo_path, file_path, info.commit_hash))
     if context is None:
-        pr = _safe_find_pr(repo_path, info.commit_hash)
-        issues = _safe_find_issues(repo_path, pr, commit_message=info.message)
+        pr = _safe_find_pr(remote, info.commit_hash)
+        issues = _safe_find_issues(remote, pr, commit_message=info.message)
         context = _build_context(info, issues)
 
     instruction = f"""위 변경 맥락에 근거해 사용자의 질문에 한국어로 1~2문장으로 답하세요.
@@ -415,24 +424,27 @@ def ask_followup(repo_path: str, file_path: str, line: int, question: str) -> st
         return _degraded_explanation(info, e)
 
 
-def _safe_find_pr(repo_path: str, commit_hash: str) -> PullRequest | None:
-    """PR 조회 — 어떤 이유로든 실패하면 None (로컬 결과는 그대로 유지)."""
+def _safe_find_pr(remote, commit_hash: str) -> PullRequest | None:
+    """PR 조회 — 어떤 이유로든 실패하면 None (로컬 결과는 그대로 유지).
+
+    remote 는 확장이 보낸 URL 을 파싱한 것(vcs.parse_remote). 서버는 git 을 돌리지 않는다.
+    """
     try:
-        return vcs.find_pr_for_commit(repo_path, commit_hash)
+        return vcs.find_pr_for_remote(remote, commit_hash)
     except Exception:
         return None
 
 
 def _safe_find_issues(
-    repo_path: str, pr: PullRequest | None, commit_message: str = ""
+    remote, pr: PullRequest | None, commit_message: str = ""
 ) -> list[Issue]:
     """PR 본문에서 연결 이슈를 파싱 — 호스트/토큰/API 어느 단계든 실패 시 빈 리스트.
 
     PR 본문이 비거나 매칭이 없으면 커밋 메시지의 #N 패턴으로 2차 폴백
     (Squash/Rebase 후 PR 본문이 사라지는 케이스 대비).
+    remote 는 확장이 보낸 URL 을 파싱한 것 — None 이면 빈 리스트.
     """
     try:
-        remote = vcs.detect_remote(repo_path)
         if remote is None:
             return []
         if pr is not None and pr.body:
@@ -525,16 +537,14 @@ def _build_related_changes(
     return related
 
 
-def _build_line_history(repo_path: str, file_path: str, line: int) -> list[dict]:
+def _decorate_line_history(history: list[dict]) -> list[dict]:
     """사이드바 '라인 수정 이력' 목록을 조립한다.
 
-    git.get_line_history 로 '이 한 줄이 실제로 바뀐' 커밋들을 받아,
+    확장이 보낸 '이 한 줄이 실제로 바뀐' 커밋들(hash/author/date/subject)에,
     각 커밋이 참조하는 이슈 수(_count_linked_issues)를 '이슈 N' 배지용으로 덧붙인다.
 
-    git 조회 자체는 가볍지만(한 줄 로그), 커밋별 이슈 수는 GitHub API 를 부르지 않고
-    커밋 메시지의 #N 참조만 세어 비용 0 으로 추정한다.
+    커밋별 이슈 수는 GitHub API 를 부르지 않고 커밋 메시지의 #N 참조만 세어 비용 0 으로 추정한다.
     """
-    history = git.get_line_history(repo_path, file_path, line)
     return [
         {
             "hash": c["hash"],
@@ -600,7 +610,7 @@ def _build_line_issues(history: list[dict], current_hash: str) -> list[dict]:
       · past     — 과거 커밋에만 나오고 최신엔 없는 이슈
     URL·title 은 None 으로 둔다 — GitHub 메타 해석은 개발자 C(resolve_issues)가 채운다.
 
-    입력은 _build_line_history 결과(최신순). #N 추출은 커밋 subject 기준(공통 헬퍼).
+    입력은 _decorate_line_history 결과(최신순). #N 추출은 커밋 subject 기준(공통 헬퍼).
     """
     slots: dict[int, dict] = {}
     for c in history:

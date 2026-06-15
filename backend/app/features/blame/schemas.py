@@ -8,10 +8,40 @@
 from pydantic import BaseModel, Field
 
 
+class GitCommitMeta(BaseModel):
+    """확장이 로컬 git 으로 뽑아 보내는 커밋 메타 + diff.
+
+    백엔드가 원격(AWS)에 있으면 사용자 로컬 저장소에 접근할 수 없으므로, git 실행은
+    저장소가 있는 확장에서 하고 그 결과만 받는다. core/git.py BlameInfo 와 키가 일치한다.
+    """
+    commitHash: str
+    author: str
+    date: str
+    message: str
+    diff: str = ""
+    added: int = 0
+    removed: int = 0
+
+
+class CommitRef(BaseModel):
+    """라인 이력·후속 커밋 한 행(확장이 git log 로 수집)."""
+    hash: str
+    author: str
+    date: str
+    subject: str
+
+
 class BlameRequest(BaseModel):
     filePath: str
     line: int
     repoPath: str
+    # ── 확장이 로컬 git 으로 수집해 전송 ──────────────────────────────────
+    blame: GitCommitMeta | None = None
+    unavailable: str | None = None        # 'uncommitted' | 'no_history' | None
+    branch: str = ""
+    lineHistory: list[CommitRef] = Field(default_factory=list)
+    followups: list[CommitRef] = Field(default_factory=list)
+    remoteUrl: str | None = None
 
 
 class ChangeStats(BaseModel):
@@ -101,6 +131,11 @@ class ReasonRequest(BaseModel):
     filePath: str
     repoPath: str
     hash: str
+    # ── 확장이 로컬 git 으로 수집해 전송 ──────────────────────────────────
+    commit: GitCommitMeta | None = None
+    branch: str = ""
+    followups: list[CommitRef] = Field(default_factory=list)
+    remoteUrl: str | None = None
 
 
 class ReasonResponse(BaseModel):
@@ -116,6 +151,10 @@ class AskRequest(BaseModel):
     line: int
     repoPath: str
     question: str
+    # ── 확장이 로컬 git 으로 수집해 전송 ──────────────────────────────────
+    blame: GitCommitMeta | None = None
+    unavailable: str | None = None        # 'uncommitted' | 'no_history' | None
+    remoteUrl: str | None = None
 
 
 class AskResponse(BaseModel):
