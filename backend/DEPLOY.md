@@ -74,7 +74,7 @@ sudo dnf -y install docker-compose-plugin || \
 ## 4. 코드 배포 & 실행
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/jeonjunmin/codewhy.git
 cd codewhy/backend
 
 # .env 작성 — AWS_ACCESS_KEY_ID / SECRET 는 비워둔다(IAM Role이 처리)

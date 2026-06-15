@@ -14,24 +14,20 @@
 👤 담당: 개발자 C
 """
 
-from app.core import git, vcs
+from app.core import vcs
 from app.core.vcs import Issue
 
 
 _MAX_EXCERPT_CHARS = 300
 
 
-def trace(repo_path: str, file_path: str, line: int) -> list[dict]:
-    """라인을 기준으로 연관 기획 문서(GitHub Issue) 목록을 반환한다."""
-    try:
-        info = git.get_blame_info(repo_path, file_path, line)
-    except Exception:
-        return []
+def trace(commit_hash: str, commit_message: str, *, branch: str, remote) -> list[dict]:
+    """blamed 커밋을 기준으로 연관 기획 문서(GitHub Issue) 목록을 반환한다.
 
-    issues, match_type = vcs.find_issues_for_commit(
-        repo_path, info.commit_hash, info.message
-    )
-
+    git 실행은 확장이 끝냈고, 여기서는 받은 데이터(커밋 해시/메시지/브랜치)와
+    파싱된 remote 로 GitHub API 만 조회한다.
+    """
+    issues, match_type = vcs.find_issues_for_remote(remote, commit_hash, commit_message, branch)
     if not issues:
         return []
 

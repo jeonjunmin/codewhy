@@ -1,7 +1,8 @@
 import { execSync } from 'child_process';
 import * as vscode from 'vscode';
 import { EditorContext, getEditorContext } from '../../shared/editor';
-import { BlameResult, CommitInput } from '../../shared/types';
+import * as localGit from '../../shared/git';
+import { BlameRequest, BlameResult, CommitInput, ReasonRequest, TraceRequest } from '../../shared/types';
 import { fetchRequirementTrace } from '../requirementTrace/api';
 import { streamTimelineSummary } from '../timelineSummary/api';
 import { fetchCommitReason, streamContextBlame } from './api';
@@ -222,7 +223,7 @@ function streamBlameInto(args: { filePath: string; line: number; repoPath: strin
     const key = cacheKey(args.filePath, args.line);
     let metaSeen = false;
 
-    streamContextBlame(args, {
+    streamContextBlame(buildBlameRequest(args), {
         onMeta: (meta) => { metaSeen = true; sidebar!.blameStreaming(ctx, meta); },
         onDelta: (delta) => sidebar!.blameDelta(delta),
         onDone: (result) => {
@@ -291,11 +292,7 @@ export async function runIssueTab() {
 
     sidebar.issueLoading();
     try {
-        const result = await fetchRequirementTrace({
-            filePath: ctx.filePath,
-            line: ctx.line,
-            repoPath: ctx.repoPath,
-        });
+        const result = await fetchRequirementTrace(buildTraceRequest(ctx));
         if (!result.documents || result.documents.length === 0) {
             sidebar.issueEmpty(`L${ctx.line} 와 연관된 GitHub Issue를 찾지 못했습니다.`);
             return;
@@ -304,6 +301,58 @@ export async function runIssueTab() {
     } catch (err) {
         sidebar.issueEmpty(`요구사항 역추적 실패: ${(err as Error).message}`);
     }
+}
+
+/**
+ * 현재 라인의 blame 요청 본문을 로컬 git 으로 조립한다.
+ *
+ * 백엔드가 원격(AWS)에 있으면 사용자 로컬 저장소에 접근할 수 없어 서버에서 git 을 돌릴 수 없다.
+ * 그래서 저장소가 있는 이곳에서 blame/브랜치/라인 이력/후속 커밋/remote 를 모아 보낸다.
+ */
+function buildBlameRequest(ctx: { filePath: string; line: number; repoPath: string }): BlameRequest {
+    const { meta, unavailable } = localGit.getBlameInfo(ctx.repoPath, ctx.filePath, ctx.line);
+    const branch = localGit.getCurrentBranch(ctx.repoPath);
+    const ticket = meta ? localGit.extractTicket(meta.message, branch) : null;
+    return {
+        filePath: ctx.filePath,
+        line: ctx.line,
+        repoPath: ctx.repoPath,
+        blame: meta,
+        unavailable,
+        branch,
+        lineHistory: localGit.getLineHistory(ctx.repoPath, ctx.filePath, ctx.line),
+        followups: localGit.getFollowupCommits(ctx.repoPath, ticket, meta?.commitHash ?? ''),
+        remoteUrl: localGit.getRemoteUrl(ctx.repoPath),
+    };
+}
+
+/** 라인 이력 항목 펼침(/reason)의 요청 본문을 로컬 git 으로 조립한다. */
+function buildReasonRequest(hash: string, filePath: string, repoPath: string): ReasonRequest {
+    const { meta } = localGit.getCommitInfo(repoPath, filePath, hash);
+    const branch = localGit.getCurrentBranch(repoPath);
+    const ticket = meta ? localGit.extractTicket(meta.message, branch) : null;
+    return {
+        filePath,
+        repoPath,
+        hash,
+        commit: meta,
+        branch,
+        followups: localGit.getFollowupCommits(repoPath, ticket, hash),
+        remoteUrl: localGit.getRemoteUrl(repoPath),
+    };
+}
+
+/** 이슈 역추적(/trace)의 요청 본문을 로컬 git 으로 조립한다. */
+function buildTraceRequest(ctx: { filePath: string; line: number; repoPath: string }): TraceRequest {
+    const { meta } = localGit.getBlameInfo(ctx.repoPath, ctx.filePath, ctx.line);
+    return {
+        filePath: ctx.filePath,
+        line: ctx.line,
+        repoPath: ctx.repoPath,
+        blame: meta,
+        branch: localGit.getCurrentBranch(ctx.repoPath),
+        remoteUrl: localGit.getRemoteUrl(ctx.repoPath),
+    };
 }
 
 /** 파일의 git 커밋 이력(타임라인 입력)을 수집한다. */
@@ -330,7 +379,7 @@ function collectGitLog(repoPath: string, filePath: string): CommitInput[] {
 async function handleExpandHistory(hash: string, filePath: string, repoPath: string) {
     if (!sidebar) { return; }
     try {
-        const { reason } = await fetchCommitReason({ repoPath, filePath, hash });
+        const { reason } = await fetchCommitReason(buildReasonRequest(hash, filePath, repoPath));
         sidebar.setHistoryReason(hash, reason || '(변경 사유를 찾지 못했습니다.)');
     } catch (err) {
         sidebar.setHistoryReason(hash, `변경 사유를 불러오지 못했습니다: ${(err as Error).message}`);

@@ -15,11 +15,17 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from app.features.blame.schemas import GitCommitMeta
+
 
 class TraceRequest(BaseModel):
     filePath: str
     line: int
     repoPath: str
+    # ── 확장이 로컬 git 으로 수집해 전송 (원격 백엔드는 로컬 저장소 접근 불가) ──────
+    blame: GitCommitMeta | None = None
+    branch: str = ""
+    remoteUrl: str | None = None
 
 
 class DocumentMatch(BaseModel):

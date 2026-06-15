@@ -12,6 +12,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 
+from app.core import vcs
 from app.features.traceability import service
 from app.features.traceability.schemas import (
     DocumentMatch,
@@ -25,10 +26,16 @@ logger = logging.getLogger(__name__)
 
 @router.post("/requirement", response_model=TraceResponse)
 async def requirement_trace(req: TraceRequest):
+    # blamed 커밋이 없으면(미커밋 라인 등) 연관 문서를 찾을 대상이 없다.
+    if req.blame is None:
+        return TraceResponse(documents=[])
+
+    remote = vcs.parse_remote(req.remoteUrl)
     try:
-        # git + GitHub API 는 모두 동기 블로킹 → 이벤트 루프 보호
+        # GitHub API 동기 블로킹 → 이벤트 루프 보호
         matches = await asyncio.to_thread(
-            service.trace, req.repoPath, req.filePath, req.line
+            service.trace, req.blame.commitHash, req.blame.message,
+            branch=req.branch, remote=remote,
         )
     except Exception as e:
         logger.exception(
