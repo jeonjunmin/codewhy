@@ -1,0 +1,29 @@
+# ══════════════════════════════════════════════════════════════════════════════
+#  CodeWhy 백엔드 — EC2 배포용 Compose
+#  사용법:
+#    1) 최초/스키마 변경 시:  docker compose run --rm migrate
+#    2) 앱 기동:              docker compose up -d --build
+#  AWS 자격증명은 .env 에 넣지 말고 EC2 IAM Instance Profile 로 주입한다.
+# ══════════════════════════════════════════════════════════════════════════════
+services:
+  api:
+    build: .
+    image: codewhy-backend:latest
+    env_file: .env
+    ports:
+      - "8000:8000"          # Nginx 뒤에 둘 경우 "127.0.0.1:8000:8000" 으로 좁히세요
+    restart: always
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:8000/docs'); sys.exit(0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # Alembic 마이그레이션 — 일회성 실행 (docker compose run --rm migrate)
+  migrate:
+    image: codewhy-backend:latest
+    build: .
+    env_file: .env
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
