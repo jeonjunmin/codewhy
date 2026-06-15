@@ -31,7 +31,7 @@ from app.core.ai_client import call_bedrock
 from app.core.bedrock import get_bedrock_llm
 from app.core.commit_classifier import SKIP_TYPES, classify_commit
 from app.core.config import get_team_map
-from app.core.tickets import extract_ticket
+from app.core.tickets import extract_issue_numbers, extract_ticket
 from app.core.vcs import Issue, PullRequest
 from app.db.models import Commit, File
 from app.features.blame import crud
@@ -77,6 +77,43 @@ def analyze_blame(
     # 라우터가 캐시 키 해석용으로 이미 구한 info/branch/ticket 을 넘기면 재사용
     if info is None:
         info = git.get_blame_info(repo_path, file_path, line)
+
+    # 커밋 단위 캐시 가능 필드(설명/출처/관련변경 등) 조립 — explain_commit_reason 과 공유.
+    result, context = _compose_commit_result(repo_path, file_path, info, branch, ticket)
+    if context is not None:  # 노이즈 커밋(context=None)은 ask 재사용 맥락이 없다
+        _remember_context(repo_path, file_path, info.commit_hash, context)
+
+    # 라인 스코프 필드(이력 + 이슈 롤업)는 커밋 캐시와 분리해 매번 git 으로 새로 조립한다.
+    result.update(build_line_fields(repo_path, file_path, line, info.commit_hash))
+    return result
+
+
+def build_line_fields(repo_path: str, file_path: str, line: int, current_hash: str) -> dict:
+    """라인 스코프 응답 필드(수정 이력 + 이슈 롤업)를 한 번에 조립한다.
+
+    (file_id, commit_id) 커밋 캐시와 분리된 git-only 필드라, /context 캐시 적중·미스 양쪽과
+    analyze_blame 이 모두 같은 결과를 재사용하도록 한곳에 모은다.
+    """
+    line_history = _build_line_history(repo_path, file_path, line)
+    return {
+        "lineHistory": line_history,
+        "lineIssues": _build_line_issues(line_history, current_hash),
+    }
+
+
+def _compose_commit_result(
+    repo_path: str,
+    file_path: str,
+    info: git.BlameInfo,
+    branch: str | None,
+    ticket: str | None,
+) -> tuple[dict, str | None]:
+    """info(라인 blame 이든 임의 과거 커밋이든) 하나의 '캐시 가능한' BlameResponse 필드를 조립한다.
+
+    라인 스코프 필드(lineHistory/lineIssues)는 호출부가 덧붙인다 — 그래야 (file_id, commit_id)
+    캐시가 /context 와 /reason 양쪽에서 동일하게 재사용된다.
+    반환: (result, context). context 는 _remember_context 재사용용이며 노이즈 커밋이면 None.
+    """
     if branch is None:
         branch = git.get_current_branch(repo_path)
     if ticket is None:
@@ -87,15 +124,13 @@ def analyze_blame(
     # 분류는 commit_classifier(타임라인과 공유). 우회 시 Bedrock·GitHub API 모두 호출하지 않는다.
     commit_type = _classify_type(info.message)
     if commit_type in SKIP_TYPES:
-        return _noise_response(info, ticket, team, commit_type)
+        return _noise_response(info, ticket, team, commit_type), None
 
     pr = _safe_find_pr(repo_path, info.commit_hash)
     issues = _safe_find_issues(repo_path, pr, commit_message=info.message)
     followups = git.find_followup_commits(repo_path, ticket, exclude_hash=info.commit_hash)
 
     context = _build_context(info, issues)
-    _remember_context(repo_path, file_path, info.commit_hash, context)
-
     explanation, ai_degraded = _explain_blame(info, issues, context=context)
     source_ref = _format_source_ref(issues)
     primary_issue = issues[0] if issues else None
@@ -104,11 +139,9 @@ def analyze_blame(
         for issue in issues
         for a in issue.attachments
     ]
-
     related = _build_related_changes(issues, pr, followups, file_path)
-    line_history = _build_line_history(repo_path, file_path, line)
 
-    return {
+    result = {
         "explanation": explanation,
         "aiDegraded": ai_degraded,
         "commitHash": info.commit_hash,
@@ -123,11 +156,22 @@ def analyze_blame(
         "changeStats": {"added": info.added, "removed": info.removed},
         "prInfo": ({"url": pr.url, "lines": pr.added + pr.removed} if pr else None),
         "relatedChanges": related,
-        "lineHistory": line_history,
         # aiSuggestion 은 현재 사이드바에 렌더링되지 않아 크리티컬 패스에서 제외한다(지연만 유발).
         # _suggest_improvement 함수는 추후 UI 도입 시 재사용하도록 남겨 둔다.
         "aiSuggestion": None,
     }
+    return result, context
+
+
+def explain_commit_reason(repo_path: str, file_path: str, info: git.BlameInfo) -> dict:
+    """라인 수정 이력의 한 항목(임의 과거 커밋)을 펼칠 때, 그 커밋의 변경 사유를 생성한다.
+
+    /api/blame/reason 의 본체. analyze_blame 과 같은 _compose_commit_result 를 공유하되
+    라인 스코프 필드는 빼서 (file_id, commit_id) 캐시와 그대로 호환되게 한다.
+    반환: BlameResponse 호환 dict (explanation/aiDegraded + 캐시 가능 필드).
+    """
+    result, _ = _compose_commit_result(repo_path, file_path, info, None, None)
+    return result
 
 
 async def stream_blame(
@@ -156,7 +200,9 @@ async def stream_blame(
     change_stats = {"added": info.added, "removed": info.removed}
 
     # ① meta 프레임 — 라인 이력(git log)은 가벼우므로 GitHub/Bedrock 대기 전에 먼저 보낸다.
+    #    이슈 롤업도 git 만으로(이력 + commit_hash) 즉시 조립되므로 meta 에 함께 실어 보낸다.
     line_history = await asyncio.to_thread(_build_line_history, repo_path, file_path, line)
+    line_issues = _build_line_issues(line_history, info.commit_hash)
     meta = {
         "commitHash": info.commit_hash,
         "author": info.author,
@@ -165,6 +211,7 @@ async def stream_blame(
         "team": team,
         "changeStats": change_stats,
         "lineHistory": line_history,
+        "lineIssues": line_issues,
     }
     yield f"data: {json.dumps({'meta': meta}, ensure_ascii=False)}\n\n"
 
@@ -220,6 +267,7 @@ async def stream_blame(
         "prInfo": ({"url": pr.url, "lines": pr.added + pr.removed} if pr else None),
         "relatedChanges": related,
         "lineHistory": line_history,
+        "lineIssues": line_issues,
         "aiSuggestion": None,
     }
     yield f"data: {json.dumps({'done': True, **result}, ensure_ascii=False)}\n\n"
@@ -528,6 +576,62 @@ def _count_linked_issues(message: str) -> int:
     # 커밋 메시지의 GitHub 이슈 참조(#N)를 뽑아, 같은 이슈 중복은 set 으로 합쳐 개수만 센다.
     # 지라 티켓(PAY-2041)은 제외 — 이슈(#N) 기준. 매칭 없으면 0(프론트가 배지 숨김).
     return len(set(re.findall(r"#(\d+)", message or "")))
+
+
+# revert 커밋을 알아보는 신호어 — 커밋 메시지만으로 판단(GitHub API 무호출 휴리스틱).
+_REVERT_RE = re.compile(r"^\s*revert\b|되돌림|롤백|roll\s*back", re.IGNORECASE)
+
+
+def _is_revert_subject(subject: str) -> bool:
+    """커밋 제목이 revert(되돌림)인지 — 메시지 텍스트만으로 추정한다.
+
+    정확한 revert 판정은 diff 의미 분석이 필요하지만, 비용 0 의 1차 신호로 충분하다.
+    오탐이 있어도 롤업의 '되돌림' 배지에만 영향을 줄 뿐 핵심 흐름을 깨지 않는다.
+    """
+    return bool(_REVERT_RE.search(subject or ""))
+
+
+def _build_line_issues(history: list[dict], current_hash: str) -> list[dict]:
+    """'라인 수정 이력' 전체에서 연관 이슈(#N)를 dedup 해 상태와 함께 롤업한다.
+
+    한 라인이 여러 커밋에 걸쳐 같은 이슈를 참조해도 한 칩으로 합치고, 라인 관점 상태를 매긴다:
+      · current  — 최신(blame 대상) 커밋이 참조한 이슈 = '지금의 변경 동인'
+      · reverted — revert 커밋이 참조한 이슈(_is_revert_subject, 휴리스틱)
+      · past     — 과거 커밋에만 나오고 최신엔 없는 이슈
+    URL·title 은 None 으로 둔다 — GitHub 메타 해석은 개발자 C(resolve_issues)가 채운다.
+
+    입력은 _build_line_history 결과(최신순). #N 추출은 커밋 subject 기준(공통 헬퍼).
+    """
+    slots: dict[int, dict] = {}
+    for c in history:
+        numbers = extract_issue_numbers(c.get("subject", ""))
+        if not numbers:
+            continue
+        h = c.get("hash", "")
+        is_current = bool(h) and (h.startswith(current_hash) or current_hash.startswith(h))
+        is_revert = _is_revert_subject(c.get("subject", ""))
+        for n in numbers:
+            slot = slots.setdefault(n, {"changeCount": 0, "current": False, "reverted": False})
+            slot["changeCount"] += 1
+            slot["current"] = slot["current"] or is_current
+            slot["reverted"] = slot["reverted"] or is_revert
+
+    issues: list[dict] = []
+    for number, slot in slots.items():
+        # 우선순위: 최신 커밋이 참조했으면 current(되돌림보다 우선) → revert → past
+        status = "current" if slot["current"] else ("reverted" if slot["reverted"] else "past")
+        issues.append({
+            "number": number,
+            "status": status,
+            "changeCount": slot["changeCount"],
+            "url": None,
+            "title": None,
+        })
+
+    # 현재 → 등장 횟수 많은 순 → 번호 순. 사용자가 '지금 유효한' 이슈를 먼저 보게.
+    _status_rank = {"current": 0, "reverted": 1, "past": 2}
+    issues.sort(key=lambda x: (_status_rank.get(x["status"], 3), -x["changeCount"], x["number"]))
+    return issues
 
 
 def _explain_blame(

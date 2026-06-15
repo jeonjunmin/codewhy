@@ -1,5 +1,5 @@
 import { createHttpClient } from '../../shared/http';
-import { AskRequest, AskResult, BlameRequest, BlameResult, LineHistoryEntry } from '../../shared/types';
+import { AskRequest, AskResult, BlameRequest, BlameResult, LineHistoryEntry, LineIssue, ReasonRequest, ReasonResult } from '../../shared/types';
 
 /**
  * POST /api/blame/context — 라인 단위 변경 사유 분석(비스트리밍, 폴백용).
@@ -20,6 +20,7 @@ export interface BlameMeta {
     team?: string | null;
     changeStats?: { added: number; removed: number };
     lineHistory?: LineHistoryEntry[];
+    lineIssues?: LineIssue[];
 }
 
 export interface BlameStreamHandlers {
@@ -102,6 +103,18 @@ export async function streamContextBlame(
             }
         }
     }
+}
+
+/**
+ * POST /api/blame/reason — 라인 수정 이력 항목을 펼칠 때 그 커밋의 변경 사유를 받아온다.
+ *
+ * /context 와 같은 (file_id, commit_id) 캐시를 공유하므로, 같은 커밋을 다시 펼치면 즉시 응답한다.
+ *
+ * 👤 담당: 개발자 A
+ */
+export async function fetchCommitReason(req: ReasonRequest): Promise<ReasonResult> {
+    const { data } = await createHttpClient().post<ReasonResult>('/api/blame/reason', req);
+    return data;
 }
 
 /**

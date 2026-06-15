@@ -52,6 +52,22 @@ class LineHistoryEntry(BaseModel):
     date: str          # YYYY-MM-DD
     subject: str       # 커밋 제목 한 줄
     issueCount: int = 0  # 이 커밋이 참조하는 이슈 수 ('이슈 N' 배지)
+    # 항목을 펼칠 때 /api/blame/reason 으로 지연 생성되는 그 커밋의 AI 변경 사유.
+    # 초기 응답에는 비어 있고, 펼침 요청 시 프론트가 별도로 채운다.
+    reason: str | None = None
+
+
+class LineIssue(BaseModel):
+    """'라인 수정 이력' 전체에서 dedup 된 연관 이슈 한 건 (이슈 롤업 칩).
+
+    같은 #N 이 여러 커밋에 나와도 한 칩으로 합치고, 라인 관점의 상태를 함께 준다.
+    프론트 src/shared/types.ts 의 LineIssue 와 키가 일치해야 한다.
+    """
+    number: int                # 이슈 번호 (#N 의 N)
+    status: str                # 'current' | 'past' | 'reverted'
+    changeCount: int = 1       # 이 이슈가 등장한 라인-이력 커밋 수
+    url: str | None = None     # 해석되면 GitHub 이슈 URL (담당: 개발자 C)
+    title: str | None = None   # 해석되면 이슈 제목 (담당: 개발자 C)
 
 
 class BlameResponse(BaseModel):
@@ -76,6 +92,22 @@ class BlameResponse(BaseModel):
     prInfo: PrInfo | None = None
     relatedChanges: list[RelatedChange] = Field(default_factory=list)
     lineHistory: list[LineHistoryEntry] = Field(default_factory=list)
+    # 라인 전체에서 dedup 된 연관 이슈 롤업(현재/과거/되돌림). 라인 스코프라 캐시하지 않고 매번 조립.
+    lineIssues: list[LineIssue] = Field(default_factory=list)
+
+
+class ReasonRequest(BaseModel):
+    """라인 수정 이력 항목 펼침 — 임의 커밋 하나의 변경 사유를 요청한다."""
+    filePath: str
+    repoPath: str
+    hash: str
+
+
+class ReasonResponse(BaseModel):
+    """펼침 응답 — 그 커밋의 AI 변경 사유 한 단락."""
+    reason: str
+    # explanation 이 Bedrock 추론이 아니라 폴백이면 True (프론트가 캐싱하지 않도록).
+    aiDegraded: bool = False
 
 
 class AskRequest(BaseModel):

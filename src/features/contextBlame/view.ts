@@ -4,7 +4,7 @@ import { EditorContext, getEditorContext } from '../../shared/editor';
 import { BlameResult, CommitInput } from '../../shared/types';
 import { fetchRequirementTrace } from '../requirementTrace/api';
 import { streamTimelineSummary } from '../timelineSummary/api';
-import { streamContextBlame } from './api';
+import { fetchCommitReason, streamContextBlame } from './api';
 import { ContextBlameSidebarProvider, VIEW_ID } from './sidebar';
 
 /**
@@ -92,6 +92,8 @@ function ensureInitialized(context: vscode.ExtensionContext) {
         onOpenIssueTodo: () => {
             vscode.window.showInformationMessage('연관 이슈 보기는 이슈 기능 연동 후 제공될 예정입니다.');
         },
+        // 라인 수정 이력 항목 펼침 → 그 커밋의 변경 사유를 지연 생성해 사이드바에 주입.
+        onExpandHistory: (hash, filePath, repoPath) => handleExpandHistory(hash, filePath, repoPath),
     });
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(VIEW_ID, sidebar, {
@@ -317,6 +319,21 @@ function collectGitLog(repoPath: string, filePath: string): CommitInput[] {
         });
     } catch {
         return [];
+    }
+}
+
+/**
+ * 라인 수정 이력 항목을 펼칠 때, 그 커밋의 변경 사유를 백엔드에서 받아 사이드바에 채운다.
+ * 백엔드가 (file_id, commit_id) 캐시를 공유하므로 같은 커밋 재펼침은 빠르게 응답한다.
+ * 알림 스피너 대신 펼친 행 안에 로딩 문구를 두므로 fire-and-forget 으로 둔다.
+ */
+async function handleExpandHistory(hash: string, filePath: string, repoPath: string) {
+    if (!sidebar) { return; }
+    try {
+        const { reason } = await fetchCommitReason({ repoPath, filePath, hash });
+        sidebar.setHistoryReason(hash, reason || '(변경 사유를 찾지 못했습니다.)');
+    } catch (err) {
+        sidebar.setHistoryReason(hash, `변경 사유를 불러오지 못했습니다: ${(err as Error).message}`);
     }
 }
 
