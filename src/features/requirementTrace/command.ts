@@ -2,7 +2,7 @@ import { execSync } from 'child_process';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { getEditorContext } from '../../shared/editor';
-import { DEFAULT_BACKEND_URL } from '../../shared/http';
+import { getBackendUrl } from '../../shared/http';
 
 /**
  * `codewhy.requirementTrace` 명령 핸들러.
@@ -13,9 +13,7 @@ export async function runRequirementTrace(_context: vscode.ExtensionContext) {
     const ctx = getEditorContext();
     if (!ctx) { return; }
 
-    const backendUrl = vscode.workspace
-        .getConfiguration('codewhy')
-        .get<string>('backendUrl', DEFAULT_BACKEND_URL);
+    const backendUrl = getBackendUrl();
 
     let commits: CommitEntry[] = [];
     await vscode.window.withProgress(
