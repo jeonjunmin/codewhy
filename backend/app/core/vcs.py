@@ -66,6 +66,9 @@ class Attachment:
     """이슈 본문에 첨부된 문서/파일 한 건."""
     label: str  # 표시명 (마크다운 링크 텍스트 또는 파일명)
     url: str
+    # 페이지 수 — PDF 등에서만. 첨부 바이너리를 매 trace 마다 내려받지는 않으므로
+    # 보통 None(미상). 추후 지연 추출을 붙이면 채운다.
+    page_count: int | None = None
 
 
 @dataclass
@@ -76,6 +79,13 @@ class Issue:
     url: str
     body: str = ""
     attachments: list[Attachment] = field(default_factory=list)
+    # ── 상세 화면(이슈 탭)용 메타 — GitHub/GitLab payload 에서 채운다 ──────────
+    state: str = ""                              # open / closed
+    labels: list[str] = field(default_factory=list)
+    assignee: str = ""                           # 담당자 로그인/표시명 (없으면 "")
+    created_at: str = ""                         # ISO8601 (개설일)
+    updated_at: str = ""                         # ISO8601 (최근 수정)
+    comment_count: int = 0                       # 코멘트 수(본문은 미페치)
 
 
 def detect_remote(repo_path: str) -> Remote | None:
@@ -372,6 +382,48 @@ def find_issues_from_commit_message(remote: Remote, commit_message: str) -> list
     return _fetch_issues(remote, numbers)
 
 
+def _issue_from_github(payload: dict, number: int) -> Issue:
+    """GitHub Issue/Search payload → Issue. 상세 화면 메타까지 채운다."""
+    body = payload.get("body") or ""
+    labels = [
+        (lab.get("name") if isinstance(lab, dict) else str(lab))
+        for lab in (payload.get("labels") or [])
+    ]
+    assignee = payload.get("assignee") or {}
+    return Issue(
+        number=number,
+        title=payload.get("title", ""),
+        url=payload.get("html_url", ""),
+        body=body,
+        attachments=_extract_attachments(body),
+        state=payload.get("state", ""),
+        labels=[l for l in labels if l],
+        assignee=assignee.get("login", "") if isinstance(assignee, dict) else "",
+        created_at=payload.get("created_at", ""),
+        updated_at=payload.get("updated_at", ""),
+        comment_count=int(payload.get("comments") or 0),
+    )
+
+
+def _issue_from_gitlab(payload: dict, iid: int) -> Issue:
+    """GitLab Issue payload → Issue. 상세 화면 메타까지 채운다."""
+    body = payload.get("description") or ""
+    assignee = payload.get("assignee") or {}
+    return Issue(
+        number=iid,
+        title=payload.get("title", ""),
+        url=payload.get("web_url", ""),
+        body=body,
+        attachments=_extract_attachments(body),
+        state=payload.get("state", ""),
+        labels=[str(l) for l in (payload.get("labels") or []) if l],
+        assignee=assignee.get("username", "") if isinstance(assignee, dict) else "",
+        created_at=payload.get("created_at", ""),
+        updated_at=payload.get("updated_at", ""),
+        comment_count=int(payload.get("user_notes_count") or 0),
+    )
+
+
 def _fetch_issues(remote: Remote, numbers: list[int]) -> list[Issue]:
     """이슈 번호 목록으로 GitHub/GitLab 에서 본문·첨부를 채워 Issue 객체로 반환."""
     issues: list[Issue] = []
@@ -381,26 +433,12 @@ def _fetch_issues(remote: Remote, numbers: list[int]) -> list[Issue]:
                 payload = _github_issue(remote.base, remote.owner, remote.repo, n)
                 if not payload:
                     continue
-                body = payload.get("body") or ""
-                issues.append(Issue(
-                    number=n,
-                    title=payload.get("title", ""),
-                    url=payload.get("html_url", ""),
-                    body=body,
-                    attachments=_extract_attachments(body),
-                ))
+                issues.append(_issue_from_github(payload, n))
             elif remote.host == "gitlab":
                 payload = _gitlab_issue(remote.base, remote.owner, remote.repo, n)
                 if not payload:
                     continue
-                body = payload.get("description") or ""
-                issues.append(Issue(
-                    number=n,
-                    title=payload.get("title", ""),
-                    url=payload.get("web_url", ""),
-                    body=body,
-                    attachments=_extract_attachments(body),
-                ))
+                issues.append(_issue_from_gitlab(payload, n))
         except (urllib.error.URLError, KeyError, ValueError, TimeoutError):
             continue
     return issues
@@ -505,16 +543,7 @@ def search_github_issues(remote: Remote, query: str, per_page: int = 5) -> list[
             return []
         results: list[Issue] = []
         for item in items.get("items", []):
-            body = item.get("body") or ""
-            results.append(
-                Issue(
-                    number=item["number"],
-                    title=item.get("title", ""),
-                    url=item.get("html_url", ""),
-                    body=body,
-                    attachments=_extract_attachments(body),
-                )
-            )
+            results.append(_issue_from_github(item, item["number"]))
         return results
     except (urllib.error.URLError, KeyError, ValueError, TimeoutError):
         return []

@@ -208,12 +208,30 @@ export interface TraceRequest {
  */
 export type TraceMatchType = 'issue' | 'ticket' | 'semantic';
 
+/** 이슈에 첨부된 요구사항 문서 한 건 (이슈 상세 화면의 첨부 목록). */
+export interface IssueAttachment {
+    label: string;
+    url: string;
+    pageCount?: number | null;   // PDF 등 페이지 수(미상이면 null)
+}
+
 export interface DocumentMatch {
-    title: string;           // Issue 제목 또는 첨부 파일명
-    url: string;             // Issue URL 또는 첨부 파일 직접 링크
+    title: string;           // Issue 제목
+    url: string;             // Issue URL
     matchType?: TraceMatchType;
     confidence?: number;     // 0~1 (issue 확정 매칭은 없음)
-    excerpt?: string;        // Issue 본문 일부 발췌
+    excerpt?: string;        // Issue 본문 일부 발췌(인용 블록)
+
+    // ── 상세 화면 메타 (모두 옵셔널, 백엔드 점진 도입) ──────────────────────
+    issueNumber?: number | null;   // 이슈 번호(#N)
+    state?: string | null;         // open / closed
+    labels?: string[];             // 라벨명(#spec 등)
+    assignee?: string | null;      // 담당자
+    createdAt?: string | null;     // 개설 ISO8601
+    updatedAt?: string | null;     // 최근 수정 ISO8601
+    commentCount?: number | null;  // 코멘트 수
+    body?: string | null;          // 이슈 본문 전문
+    attachments?: IssueAttachment[];
 }
 
 export interface TraceResult {
