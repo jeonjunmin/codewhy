@@ -108,7 +108,7 @@
         },
         "codewhy.backendUrl": {
           "type": "string",
-          "default": "http://localhost:8000",
+          "default": "http://3.37.125.200:8000",
           "markdownDescription": "**[고급]** CodeWhy 백엔드 서버 URL. 일반 사용자는 변경할 필요가 없으며, 자체 호스팅(self-hosted) 백엔드를 사용할 때만 수정합니다.",
           "order": 100
         }
