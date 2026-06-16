@@ -726,22 +726,148 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .tl-item__desc { font-size: 11.5px; color: var(--fg-dim); margin-top: 3px; line-height: 1.6; }
 
     /* ── 이슈 페인 (요구사항 역추적) ─────────────────────────────── */
+    #is-list { display: flex; flex-direction: column; gap: 8px; }
     .is-item {
-        display: flex; flex-direction: column; gap: 4px;
-        padding: 10px 12px; cursor: pointer;
+        display: flex; flex-direction: column; gap: 7px;
+        padding: 12px 13px; cursor: pointer;
         background: var(--surface); border: 1px solid var(--line);
-        border-radius: 9px;
+        border-radius: 10px;
+        transition: border-color .12s ease, background .12s ease;
     }
-    .is-item:hover { background: var(--line); }
-    .is-item__head { display: flex; align-items: center; gap: 8px; }
+    .is-item:hover { background: #1D1D21; border-color: var(--accent-violet); }
+    .is-item__head { display: flex; align-items: center; gap: 7px; }
+    .is-item__state {
+        display: inline-flex; align-items: center; gap: 4px;
+        font-size: 10.5px; font-weight: 600; color: var(--fg-mute);
+    }
+    .is-item__state::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--fg-mute); }
+    .is-item__state.open { color: #4ADE80; }
+    .is-item__state.open::before { background: #4ADE80; box-shadow: 0 0 5px rgba(74,222,128,0.6); }
+    .is-item__state.closed { color: #F87171; }
+    .is-item__state.closed::before { background: #F87171; }
+    .is-item__num { color: var(--fg-mute); font-size: 11px; font-weight: 600; }
     .is-item__badge {
         flex-shrink: 0; font-size: 10.5px; padding: 2px 7px; border-radius: 6px;
         border: 1px solid var(--line);
     }
+    .is-item__head .is-item__badge { margin-left: auto; }
     .is-item__badge.ok { color: var(--accent-cyan); border-color: rgba(103,232,249,0.4); }
     .is-item__badge.guess { color: var(--fg-mute); }
-    .is-item__title { color: var(--fg); font-size: 12.5px; font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .is-item__excerpt { color: var(--fg-mute); font-size: 11px; line-height: 1.55; }
+    .is-item__title {
+        color: var(--fg); font-size: 13px; font-weight: 600; line-height: 1.4;
+        display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    }
+    .is-item__foot {
+        display: flex; align-items: center; gap: 11px;
+        color: var(--fg-mute); font-size: 10.5px;
+        padding-top: 2px; border-top: 1px solid var(--line);
+    }
+    .is-item__foot .meta { margin-left: auto; color: var(--fg-mute); }
+
+    /* ── 이슈 상세 화면 ──────────────────────────────────────────── */
+    .is-detail { display: flex; flex-direction: column; gap: 13px; }
+    .is-d-nav { display: flex; align-items: center; justify-content: space-between; }
+    .is-d-back {
+        display: inline-flex; align-items: center; gap: 3px;
+        background: none; border: none; padding: 0; cursor: pointer;
+        color: var(--fg-dim); font-size: 12px; font-family: inherit;
+    }
+    .is-d-back:hover { color: var(--fg); }
+    .is-d-pager { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-mute); font-size: 11.5px; }
+    .is-d-pager button {
+        background: none; border: none; cursor: pointer; color: var(--fg-mute);
+        font-size: 15px; line-height: 1; padding: 0 2px; font-family: inherit;
+    }
+    .is-d-pager button:disabled { opacity: 0.3; cursor: default; }
+    .is-d-pager button:not(:disabled):hover { color: var(--fg); }
+
+    .is-d-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .is-d-idline { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+    .is-d-state {
+        display: inline-flex; align-items: center; gap: 5px;
+        padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 600;
+        border: 1px solid var(--line); color: var(--fg-mute);
+    }
+    .is-d-state::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--fg-mute); }
+    .is-d-state.open { color: #4ADE80; border-color: rgba(74,222,128,0.4); }
+    .is-d-state.open::before { background: #4ADE80; box-shadow: 0 0 6px rgba(74,222,128,0.6); }
+    .is-d-state.closed { color: #F87171; border-color: rgba(248,113,113,0.4); }
+    .is-d-state.closed::before { background: #F87171; }
+    .is-d-num { color: var(--fg-mute); font-size: 12px; font-weight: 600; }
+    .is-d-ai {
+        flex-shrink: 0; display: inline-flex; align-items: center; gap: 5px;
+        padding: 4px 12px; border-radius: 8px; cursor: pointer; border: none;
+        color: #fff; font-size: 11.5px; font-weight: 600; font-family: inherit;
+        background: var(--grad);
+    }
+    .is-d-ai:hover { filter: brightness(1.12); }
+
+    .is-d-title {
+        color: var(--fg); font-size: 15px; font-weight: 700; line-height: 1.4;
+    }
+    .is-d-title[data-url]:hover { color: var(--accent-violet); }
+
+    .is-d-labels { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .is-d-label {
+        font-size: 10.5px; padding: 2px 8px; border-radius: 6px;
+        background: var(--surface); border: 1px solid var(--line); color: var(--fg-dim);
+    }
+
+    .is-d-meta {
+        display: grid; grid-template-columns: auto 1fr; row-gap: 8px; column-gap: 14px;
+        font-size: 12px; margin: 0;
+        padding: 11px 13px; background: var(--surface); border: 1px solid var(--line); border-radius: 9px;
+    }
+    .is-d-meta dt { color: var(--fg-mute); }
+    .is-d-meta dd { margin: 0; color: var(--fg-dim); }
+    .is-d-meta dd strong { color: var(--fg); font-weight: 600; }
+    .is-d-meta .avatar {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 16px; height: 16px; border-radius: 50%; background: var(--accent-violet);
+        color: #18181B; font-size: 9px; font-weight: 700; margin-right: 5px; vertical-align: -3px;
+    }
+
+    .is-d-body { color: var(--fg-dim); font-size: 12.5px; line-height: 1.7; word-break: break-word; }
+    .is-d-body code { background: var(--code-bg); color: var(--code-fg); padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
+
+    .is-d-quote {
+        border-left: 3px solid var(--accent-violet);
+        background: var(--callout-bg);
+        border-radius: 0 8px 8px 0;
+        padding: 10px 14px; font-size: 12px; color: var(--fg); line-height: 1.6; word-break: break-word;
+    }
+
+    .is-d-sec-title { color: var(--fg-mute); font-size: 11px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+    .is-d-atts { display: flex; flex-direction: column; gap: 6px; margin-top: -4px; }
+    .is-d-att {
+        display: flex; align-items: center; gap: 10px;
+        padding: 9px 12px; background: var(--surface); border: 1px solid var(--line);
+        border-radius: 9px; cursor: pointer;
+    }
+    .is-d-att:hover { border-color: var(--accent-violet); }
+    .is-d-att__ico {
+        flex-shrink: 0; width: 26px; height: 30px; border-radius: 4px;
+        background: #DC2626; color: #fff; font-size: 8px; font-weight: 700;
+        display: flex; align-items: center; justify-content: center;
+    }
+    .is-d-att__name { color: var(--fg); font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .is-d-att__meta { color: var(--fg-mute); font-size: 10.5px; margin-top: 1px; }
+
+    .is-d-composer {
+        border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 10px 12px;
+    }
+    .is-d-composer textarea {
+        width: 100%; border: none; background: none; resize: none; color: var(--fg);
+        font-family: inherit; font-size: 12px; line-height: 1.5; outline: none; min-height: 36px;
+    }
+    .is-d-composer textarea::placeholder { color: var(--fg-mute); }
+    .is-d-composer__bar { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
+    .is-d-composer__icons { display: flex; gap: 12px; color: var(--fg-mute); font-size: 13px; }
+    .is-d-submit {
+        background: var(--accent-violet); color: #18181B; border: none;
+        border-radius: 7px; padding: 5px 18px; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit;
+    }
+    .is-d-submit:hover { filter: brightness(1.08); }
 
     /* ── 로딩 스피너 ─────────────────────────────────────────────── */
     .spinner {
@@ -832,8 +958,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         <div id="is-empty" class="empty"><strong>이슈</strong> 탭을 누르면 현재 라인과<br/>연관된 GitHub Issue·기획서를 찾아 드립니다.</div>
         <div id="is-loading" class="empty hidden"><span class="spinner"></span> 연관 이슈 찾는 중…</div>
         <div id="is-body" class="body hidden">
-            <div class="related__title" id="is-title"></div>
-            <div class="related__list" id="is-list"></div>
+            <div id="is-list-view">
+                <div class="related__title" id="is-title"></div>
+                <div class="related__list" id="is-list"></div>
+            </div>
+            <div id="is-detail-view" class="is-detail hidden"></div>
         </div>
     </div><!-- /#pane-issue -->
 
@@ -995,32 +1124,240 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         ticket:   { label: '✓ 티켓 정확', cls: 'ok' },
         semantic: { label: '≈ 추정(검색)', cls: 'guess' },
     };
+    // 이슈 탭 상태 — 목록과 상세를 한 데이터(isDocs)로 공유하고 isIndex 로 상세 대상을 가린다.
+    let isDocs = [];
+    let isLine = 0;
+    let isIndex = 0;
+
     function isResult(p) {
-        const list = document.getElementById('is-list');
-        list.innerHTML = '';
-        const docs = p.documents || [];
-        document.getElementById('is-title').textContent = 'L' + (p.line || '?') + ' 연관 GitHub Issue ' + docs.length + '건';
-        docs.forEach(d => list.appendChild(renderIssueItem(d)));
+        isDocs = p.documents || [];
+        isLine = p.line || 0;
+        isIndex = 0;
+        renderIssueList();
+        showIssueList();
         isShow('body');
     }
-    function renderIssueItem(d) {
+    function showIssueList() {
+        document.getElementById('is-list-view').classList.remove('hidden');
+        document.getElementById('is-detail-view').classList.add('hidden');
+    }
+    function showIssueDetail() {
+        document.getElementById('is-list-view').classList.add('hidden');
+        document.getElementById('is-detail-view').classList.remove('hidden');
+    }
+    function renderIssueList() {
+        const list = document.getElementById('is-list');
+        list.innerHTML = '';
+        document.getElementById('is-title').textContent = 'L' + (isLine || '?') + ' 연관 GitHub Issue ' + isDocs.length + '건';
+        isDocs.forEach((d, i) => list.appendChild(renderIssueItem(d, i)));
+    }
+    function renderIssueItem(d, i) {
         const type = d.matchType || 'semantic';
         const badge = IS_BADGE[type] || IS_BADGE.semantic;
         const pct = (d.confidence != null) ? ' · ' + Math.round(d.confidence * 100) + '%' : '';
+        const state = String(d.state || '').toLowerCase();
+        const stateCls = state === 'closed' ? 'closed' : 'open';
+        const stateLabel = state === 'closed' ? '닫힘' : '열림';
+
         const el = document.createElement('div');
         el.className = 'is-item';
-        el.dataset.action = 'openIssue';
-        el.dataset.url = d.url || '';
-        el.innerHTML =
-            '<div class="is-item__head">' +
-                '<span class="is-item__badge ' + badge.cls + '"></span>' +
-                '<span class="is-item__title"></span>' +
-            '</div>' +
-            (d.excerpt ? '<div class="is-item__excerpt"></div>' : '');
-        el.querySelector('.is-item__badge').textContent = badge.label + pct;
-        el.querySelector('.is-item__title').textContent = d.title || '(제목 없음)';
-        if (d.excerpt) { el.querySelector('.is-item__excerpt').textContent = d.excerpt; }
+        el.dataset.action = 'openIssueDetail';   // 항목 선택 → 상세 화면(외부 열기 아님)
+        el.dataset.index = i;
+
+        // 머리: 상태 · 번호 ……… 신뢰도 배지
+        const head = document.createElement('div');
+        head.className = 'is-item__head';
+        head.innerHTML =
+            '<span class="is-item__state ' + stateCls + '"></span>' +
+            '<span class="is-item__num"></span>' +
+            '<span class="is-item__badge ' + badge.cls + '"></span>';
+        head.querySelector('.is-item__state').textContent = stateLabel;
+        head.querySelector('.is-item__num').textContent = (d.issueNumber != null) ? ('#' + d.issueNumber) : '';
+        head.querySelector('.is-item__badge').textContent = badge.label + pct;
+        el.appendChild(head);
+
+        // 제목(최대 2줄)
+        const title = document.createElement('div');
+        title.className = 'is-item__title';
+        title.textContent = d.title || '(제목 없음)';
+        el.appendChild(title);
+
+        // 푸터: 📎 첨부 · 💬 코멘트 ……… @담당자 · 날짜
+        const attCount = (d.attachments || []).length;
+        const date = isDateOnly(d.updatedAt || d.createdAt);
+        const rightBits = [];
+        if (d.assignee) { rightBits.push('@' + d.assignee); }
+        if (date) { rightBits.push(date); }
+        if (attCount || d.commentCount || rightBits.length) {
+            const foot = document.createElement('div');
+            foot.className = 'is-item__foot';
+            let left = '';
+            if (attCount) { left += '<span>📎 ' + attCount + '</span>'; }
+            if (d.commentCount) { left += '<span>💬 ' + d.commentCount + '</span>'; }
+            foot.innerHTML = left;
+            if (rightBits.length) {
+                const m = document.createElement('span');
+                m.className = 'meta';
+                m.textContent = rightBits.join(' · ');
+                foot.appendChild(m);
+            }
+            el.appendChild(foot);
+        }
         return el;
+    }
+
+    // ── 이슈 상세 화면 ───────────────────────────────────────────
+    function isDateOnly(s) {
+        if (!s) { return ''; }
+        const m = String(s).slice(0, 10);
+        return /^\\d{4}-\\d{2}-\\d{2}$/.test(m) ? m : String(s);
+    }
+    function openIssueDetail(i) {
+        if (!isDocs.length) { return; }
+        isIndex = Math.max(0, Math.min(i, isDocs.length - 1));
+        renderIssueDetail();
+        showIssueDetail();
+    }
+    function appendMetaRow(dl, term, value, strong) {
+        const dt = document.createElement('dt'); dt.textContent = term;
+        const dd = document.createElement('dd');
+        if (strong) { const st = document.createElement('strong'); st.textContent = value; dd.appendChild(st); }
+        else { dd.textContent = value; }
+        dl.appendChild(dt); dl.appendChild(dd);
+    }
+    function renderAttachment(a) {
+        const el = document.createElement('div');
+        el.className = 'is-d-att';
+        el.dataset.action = 'openIssue';        // 첨부는 직접 링크를 외부로 연다
+        el.dataset.url = a.url || '';
+        const ext = (String(a.label || '').split('.').pop() || '').toUpperCase().slice(0, 4);
+        el.innerHTML =
+            '<span class="is-d-att__ico"></span>' +
+            '<div style="min-width:0">' +
+                '<div class="is-d-att__name"></div>' +
+                (a.pageCount ? '<div class="is-d-att__meta"></div>' : '') +
+            '</div>';
+        el.querySelector('.is-d-att__ico').textContent = ext && ext !== (a.label || '') ? ext : 'FILE';
+        el.querySelector('.is-d-att__name').textContent = a.label || a.url || '첨부';
+        if (a.pageCount) { el.querySelector('.is-d-att__meta').textContent = a.pageCount + ' p'; }
+        return el;
+    }
+    function renderIssueDetail() {
+        const d = isDocs[isIndex];
+        const wrap = document.getElementById('is-detail-view');
+        wrap.innerHTML = '';
+        if (!d) { return; }
+
+        const state = String(d.state || '').toLowerCase();
+        const stateCls = state === 'closed' ? 'closed' : 'open';
+        const stateLabel = state === 'closed' ? '닫힘' : '열림';
+        const type = d.matchType || 'semantic';
+        const badge = IS_BADGE[type] || IS_BADGE.semantic;
+        const pct = (d.confidence != null) ? ' · ' + Math.round(d.confidence * 100) + '%' : '';
+
+        // 네비게이션 (목록으로 / n·총건수)
+        const nav = document.createElement('div');
+        nav.className = 'is-d-nav';
+        nav.innerHTML =
+            '<button class="is-d-back" data-action="issueBack">‹ 목록으로</button>' +
+            '<span class="is-d-pager">' +
+                '<button data-action="issuePrev">‹</button>' +
+                '<span class="pos"></span>' +
+                '<button data-action="issueNext">›</button>' +
+            '</span>';
+        nav.querySelector('.pos').textContent = (isIndex + 1) + ' / ' + isDocs.length;
+        nav.querySelector('[data-action="issuePrev"]').disabled = isIndex === 0;
+        nav.querySelector('[data-action="issueNext"]').disabled = isIndex >= isDocs.length - 1;
+        wrap.appendChild(nav);
+
+        // 헤더: 상태 배지 + 이슈 번호 + AI 질문
+        const head = document.createElement('div');
+        head.className = 'is-d-head';
+        head.innerHTML =
+            '<span class="is-d-idline">' +
+                '<span class="is-d-state ' + stateCls + '"></span>' +
+                '<span class="is-d-num"></span>' +
+            '</span>' +
+            '<button class="is-d-ai" data-action="issueAiAsk">✦ AI 질문</button>';
+        head.querySelector('.is-d-state').textContent = stateLabel;
+        head.querySelector('.is-d-num').textContent = (d.issueNumber != null) ? ('#' + d.issueNumber) : '';
+        wrap.appendChild(head);
+
+        // 제목 (클릭 시 원문 이슈 열기)
+        const title = document.createElement('div');
+        title.className = 'is-d-title';
+        if (d.url) { title.dataset.action = 'openIssue'; title.dataset.url = d.url; title.title = '원문 이슈 열기'; }
+        title.textContent = d.title || '(제목 없음)';
+        wrap.appendChild(title);
+
+        // 라벨 칩 + 매치 신뢰도 배지
+        const labelWrap = document.createElement('div');
+        labelWrap.className = 'is-d-labels';
+        (d.labels || []).forEach(name => {
+            const chip = document.createElement('span');
+            chip.className = 'is-d-label';
+            chip.textContent = (String(name).charAt(0) === '#' ? '' : '#') + name;
+            labelWrap.appendChild(chip);
+        });
+        const mb = document.createElement('span');
+        mb.className = 'is-item__badge ' + badge.cls;
+        mb.textContent = badge.label + pct;
+        labelWrap.appendChild(mb);
+        wrap.appendChild(labelWrap);
+
+        // 메타 (담당자 / 연결된 코드 / 개설 / 업데이트)
+        const meta = document.createElement('dl');
+        meta.className = 'is-d-meta';
+        const assignee = d.assignee || '';
+        appendMetaRow(meta, '담당자', assignee ? ('@' + assignee) : '미지정', !!assignee);
+        appendMetaRow(meta, '연결된 코드', 'L' + (isLine || '?'), true);
+        const created = isDateOnly(d.createdAt);
+        const updated = isDateOnly(d.updatedAt);
+        if (created) { appendMetaRow(meta, '개설', created, false); }
+        if (updated) { appendMetaRow(meta, '업데이트', updated, false); }
+        wrap.appendChild(meta);
+
+        // 본문
+        if (d.body) {
+            const body = document.createElement('div');
+            body.className = 'is-d-body';
+            body.innerHTML = decorate(d.body);   // decorate 가 먼저 escape → 안전
+            wrap.appendChild(body);
+        }
+
+        // 인용(발췌)
+        if (d.excerpt) {
+            const q = document.createElement('div');
+            q.className = 'is-d-quote';
+            q.textContent = d.excerpt;
+            wrap.appendChild(q);
+        }
+
+        // 첨부파일
+        const atts = d.attachments || [];
+        if (atts.length) {
+            const sec = document.createElement('div');
+            sec.className = 'is-d-sec-title';
+            sec.textContent = '📎 첨부파일 ' + atts.length;
+            wrap.appendChild(sec);
+            const list = document.createElement('div');
+            list.className = 'is-d-atts';
+            atts.forEach(a => list.appendChild(renderAttachment(a)));
+            wrap.appendChild(list);
+        }
+
+        // 코멘트 작성 — 시각 요소(쓰기 미연동), 등록 시 '준비 중' 안내
+        const cc = (d.commentCount != null && d.commentCount > 0) ? (' (' + d.commentCount + ')') : '';
+        const composer = document.createElement('div');
+        composer.className = 'is-d-composer';
+        composer.innerHTML =
+            '<textarea rows="2"></textarea>' +
+            '<div class="is-d-composer__bar">' +
+                '<span class="is-d-composer__icons">📎 @</span>' +
+                '<button class="is-d-submit" data-action="issueComment">등록</button>' +
+            '</div>';
+        composer.querySelector('textarea').placeholder = '코멘트 남기기' + cc + '...';
+        wrap.appendChild(composer);
     }
 
     // 커밋 이력이 없는 라인(미커밋 파일 등) — 깨져 보이는 메타 카드 대신 안내 문구만 깔끔히
@@ -1324,7 +1661,21 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             vscode.postMessage({ type: 'openCommitHash', payload: { hash: el.dataset.hash } });
             return;
         }
-        // 이슈 항목은 자기 URL 을 함께 실어 보낸다.
+        // 이슈 목록 항목 선택 — 외부로 열지 않고 상세 화면으로 전환한다.
+        if (el.dataset.action === 'openIssueDetail') {
+            openIssueDetail(parseInt(el.dataset.index, 10) || 0);
+            return;
+        }
+        // 상세 화면 네비게이션
+        if (el.dataset.action === 'issueBack') { showIssueList(); return; }
+        if (el.dataset.action === 'issuePrev') { openIssueDetail(isIndex - 1); return; }
+        if (el.dataset.action === 'issueNext') { openIssueDetail(isIndex + 1); return; }
+        // AI 질문 / 코멘트 등록 — 아직 미연동, '준비 중' 안내만(openIssueTodo 재사용).
+        if (el.dataset.action === 'issueAiAsk' || el.dataset.action === 'issueComment') {
+            vscode.postMessage({ type: 'openIssueTodo' });
+            return;
+        }
+        // 이슈/첨부 항목은 자기 URL 을 함께 실어 외부로 연다.
         if (el.dataset.action === 'openIssue') {
             vscode.postMessage({ type: 'openIssue', payload: { url: el.dataset.url } });
             return;

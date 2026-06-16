@@ -28,12 +28,35 @@ class TraceRequest(BaseModel):
     remoteUrl: str | None = None
 
 
+class AttachmentMatch(BaseModel):
+    """이슈에 첨부된 요구사항 문서 한 건."""
+    label: str                  # 첨부 표시명/파일명
+    url: str                    # 첨부 직접 링크
+    pageCount: int | None = None  # PDF 등 페이지 수(미상이면 None)
+
+
 class DocumentMatch(BaseModel):
-    title: str                  # Issue 제목 또는 첨부 파일명
-    url: str                    # Issue URL 또는 첨부 파일 URL
+    """역추적된 GitHub/GitLab Issue 한 건 (이슈 상세 화면의 단위).
+
+    기존 호환 필드(title/url/matchType/confidence/excerpt)에 더해, 이슈 탭
+    상세 화면(담당자·라벨·상태·첨부 목록 등)을 그릴 메타를 함께 싣는다.
+    """
+    title: str                  # Issue 제목
+    url: str                    # Issue URL
     matchType: Literal["issue", "ticket", "semantic"] = "issue"
     confidence: float | None = None   # ticket=확정(None), semantic=0~1
-    excerpt: str | None = None        # Issue 본문 일부 발췌
+    excerpt: str | None = None        # Issue 본문 일부 발췌(인용 블록)
+
+    # ── 상세 화면 메타 (모두 옵셔널, 점진 도입) ─────────────────────────────
+    issueNumber: int | None = None    # 이슈 번호(#N)
+    state: str | None = None          # open / closed
+    labels: list[str] = []            # 라벨명 목록(#spec 등)
+    assignee: str | None = None       # 담당자 로그인/표시명
+    createdAt: str | None = None      # 개설 ISO8601
+    updatedAt: str | None = None      # 최근 수정 ISO8601
+    commentCount: int | None = None   # 코멘트 수
+    body: str | None = None           # 이슈 본문 전문(상세 화면 표시용)
+    attachments: list[AttachmentMatch] = []  # 첨부 문서 목록
 
 
 class TraceResponse(BaseModel):

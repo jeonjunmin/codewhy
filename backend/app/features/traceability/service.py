@@ -19,6 +19,7 @@ from app.core.vcs import Issue
 
 
 _MAX_EXCERPT_CHARS = 300
+_MAX_BODY_CHARS = 4000   # 상세 화면 본문 전문 상한(과도한 payload 방지)
 
 
 def trace(commit_hash: str, commit_message: str, *, branch: str, remote) -> list[dict]:
@@ -34,34 +35,48 @@ def trace(commit_hash: str, commit_message: str, *, branch: str, remote) -> list
     return _format_results(issues, match_type)
 
 
+def _confidence_for(match_type: str) -> float | None:
+    """matchType 별 신뢰도. issue=확정(None), ticket=0.8, semantic=0.5."""
+    if match_type == "issue":
+        return None
+    return 0.8 if match_type == "ticket" else 0.5
+
+
 def _format_results(issues: list[Issue], match_type: str) -> list[dict]:
-    """Issue 목록을 TraceResponse DocumentMatch 형식으로 변환한다."""
-    results: list[dict] = []
+    """Issue 목록을 TraceResponse DocumentMatch(이슈 단위) 형식으로 변환한다.
 
-    for issue in issues:
-        excerpt = _make_excerpt(issue.body)
+    한 이슈가 하나의 항목이며, 첨부 문서는 항목 안의 attachments 배열로 중첩한다.
+    (상세 화면이 이슈 메타 + 첨부 목록을 함께 그리기 때문.)
+    """
+    return [
+        {
+            "title": issue.title or f"Issue #{issue.number}",
+            "url": issue.url,
+            "matchType": match_type,
+            "confidence": _confidence_for(match_type),
+            "excerpt": _make_excerpt(issue.body),
+            "issueNumber": issue.number,
+            "state": issue.state or None,
+            "labels": issue.labels,
+            "assignee": issue.assignee or None,
+            "createdAt": issue.created_at or None,
+            "updatedAt": issue.updated_at or None,
+            "commentCount": issue.comment_count,
+            "body": _clip(issue.body, _MAX_BODY_CHARS),
+            "attachments": [
+                {"label": att.label, "url": att.url, "pageCount": att.page_count}
+                for att in issue.attachments
+            ],
+        }
+        for issue in issues
+    ]
 
-        if issue.attachments:
-            # 첨부 파일이 있으면 각 첨부를 별도 항목으로 (첨부 URL → 직접 열기)
-            for att in issue.attachments:
-                results.append({
-                    "title": att.label or f"Issue #{issue.number}: {issue.title}",
-                    "url": att.url,
-                    "matchType": match_type,
-                    "confidence": None if match_type == "issue" else 0.8 if match_type == "ticket" else 0.5,
-                    "excerpt": excerpt,
-                })
-        else:
-            # 첨부 없으면 Issue 자체를 항목으로
-            results.append({
-                "title": f"Issue #{issue.number}: {issue.title}" if issue.title else f"Issue #{issue.number}",
-                "url": issue.url,
-                "matchType": match_type,
-                "confidence": None if match_type == "issue" else 0.8 if match_type == "ticket" else 0.5,
-                "excerpt": excerpt,
-            })
 
-    return results
+def _clip(text: str, limit: int) -> str | None:
+    if not text or not text.strip():
+        return None
+    stripped = text.strip()
+    return stripped[:limit] + "…" if len(stripped) > limit else stripped
 
 
 def _make_excerpt(body: str) -> str | None:
