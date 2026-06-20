@@ -97,12 +97,17 @@ async def context_blame(req: BlameRequest, db: AsyncSession = Depends(get_db)):
         commit = file = None
 
     # 2. 캐시 조회 (커밋×파일 단위 — 같은 커밋의 다른 줄도 적중)
-    if commit is not None and file is not None:
+    #    단, 여러 번 수정된 줄(멀티 리비전)은 '이력 반영' 요약을 위해 캐시를 우회하고 재생성한다
+    #    (커밋 단위 캐시 설명은 최신 변경 1건만 담아 이력을 반영하지 못하므로).
+    multi_revision = len(line_history) > 1
+    if commit is not None and file is not None and not multi_revision:
         cached = await crud.get_cached_blame(db, file.id, commit)
         if cached:
             # 라인 스코프 필드(이력 + 이슈 롤업)는 캐시되지 않으므로 확장이 보낸 라인 이력으로 다시 조립해 덧붙인다.
             # (캐시는 커밋×파일 단위라 줄 번호가 빠져 있다 — 같은 커밋의 다른 줄에도 적중하므로)
             cached.update(service.build_line_fields(line_history, info.commit_hash))
+            # headline 은 캐시 컬럼에 없으니 설명에서 다시 뽑아 채운다.
+            cached.setdefault("headline", service.extract_headline(cached.get("explanation", "")))
             return BlameResponse(**cached)
 
     # 3. 미스 → 분기:
