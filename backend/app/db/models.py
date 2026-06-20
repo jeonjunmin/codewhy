@@ -18,6 +18,7 @@ from sqlalchemy import (
     BigInteger,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -67,6 +68,9 @@ class Commit(Base):
     committed_date: Mapped[date | None] = mapped_column(Date)
     message: Mapped[str | None] = mapped_column(Text)
     ticket: Mapped[str | None] = mapped_column(Text)
+    # 이 커밋의 연관 이슈(commit_issues) 추출을 시도한 시각. NULL = 아직 인덱싱 안 함.
+    # 커밋↔이슈 연결은 불변이므로, 한 번 채워지면 재조회하지 않는다(0건이어도 타임스탬프로 표시).
+    issues_indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     repository: Mapped["Repository"] = relationship(back_populates="commits")
@@ -153,6 +157,35 @@ class TimelineSummary(Base):
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     milestones: Mapped[list | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CommitIssue(Base):
+    """커밋↔GitHub Issue 연결(불변) 영구 캐시 — 파일 단위 역추적의 1차 캐시.
+
+    "이 커밋이 어떤 이슈를 참조하는가"는 git 히스토리상 바뀌지 않는 사실이므로 영구 저장한다.
+    파일을 열 때 미인덱싱 커밋(commits.issues_indexed_at IS NULL)만 GitHub 에 조회해 채우는
+    cache-aside 증분 방식이라, 새 커밋(=새 이슈 참조)은 다음 조회에 자동 반영된다.
+
+    이슈의 '가변 메타'(state/labels/commentCount 등)는 여기 두지 않는다 — 그건 조회 시점에
+    이슈 번호 집합으로 일괄 refresh 해 항상 최신을 유지한다(신선도 보장).
+
+    link_source: issue(PR 본문 직결) | ticket(티켓 검색) | semantic(키워드 검색).
+    """
+
+    __tablename__ = "commit_issues"
+    __table_args__ = (
+        UniqueConstraint("commit_id", "issue_number", name="uq_commit_issues"),
+        Index("ix_commit_issues_commit", "commit_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    commit_id: Mapped[int] = mapped_column(ForeignKey("commits.id", ondelete="CASCADE"), nullable=False)
+    issue_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    link_source: Mapped[str] = mapped_column(String(16), nullable=False)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    commit: Mapped["Commit"] = relationship()
 
 
 class TimelineSummaryCache(Base):

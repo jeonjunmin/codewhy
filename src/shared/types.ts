@@ -189,11 +189,17 @@ export interface TimelineResult {
 // --- Requirement Trace (담당: 개발자 C) -----------------------------
 export interface TraceRequest {
     filePath: string;
+    /** @deprecated 파일 단위 추적으로 전환 — 로깅/하위호환용으로만 남는다. */
     line: number;
     repoPath: string;
     // ── 확장이 로컬 git 으로 수집해 전송 (원격 백엔드는 로컬 저장소 접근 불가) ──────
-    /** blamed 커밋 메타. 미커밋 라인 등으로 없으면 null. */
+    /** 대표 커밋 메타(파일 최신 커밋). commits 가 비었을 때의 단일-커밋 폴백용. */
     blame: GitCommitMeta | null;
+    /**
+     * 이 파일을 건드린 커밋들(최신순). 백엔드가 각 커밋에서 연관 이슈를 모아
+     * 중복 제거해 '파일 단위' 연관 이슈 목록을 만든다. 비면 blame 단건으로 폴백.
+     */
+    commits: CommitInput[];
     /** 현재 브랜치명(티켓 추출용). */
     branch: string;
     /** origin remote URL 원문 — 백엔드가 파싱해 GitHub/GitLab API 조회에 쓴다. */

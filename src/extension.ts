@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { registerContextBlame } from './features/contextBlame';
 import { registerTimelineSummary } from './features/timelineSummary';
 import { registerRequirementTrace } from './features/requirementTrace';
-import { createHttpClient } from './shared/http';
+import { createHttpClient, initBackendMode } from './shared/http';
 import { channel as output } from './shared/log';
 
 /**
@@ -92,6 +92,9 @@ function watchWorkspaceFolder(
 // ── activate ─────────────────────────────────────────────────────────────────
 
 export function activate(context: vscode.ExtensionContext) {
+    // 실행 모드 캡처: Development(F5)면 로컬 백엔드, Production(설치본)이면 AWS 서버를 호출한다.
+    initBackendMode(context.extensionMode);
+
     registerContextBlame(context);     // 👤 개발자 A
     registerTimelineSummary(context);  // 👤 개발자 B
     registerRequirementTrace(context); // 👤 개발자 C

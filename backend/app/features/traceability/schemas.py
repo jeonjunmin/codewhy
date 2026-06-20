@@ -16,14 +16,18 @@ from typing import Literal
 from pydantic import BaseModel
 
 from app.features.blame.schemas import GitCommitMeta
+from app.features.timeline.schemas import CommitInput
 
 
 class TraceRequest(BaseModel):
     filePath: str
-    line: int
+    line: int = 0   # 파일 단위 추적으로 전환 — 로깅/하위호환용으로만 남는다.
     repoPath: str
     # ── 확장이 로컬 git 으로 수집해 전송 (원격 백엔드는 로컬 저장소 접근 불가) ──────
     blame: GitCommitMeta | None = None
+    # 이 파일을 건드린 커밋들(최신순). 각 커밋의 연관 이슈를 모아 중복 제거한다.
+    # 비면 blame 단건으로 폴백(구버전 확장 호환).
+    commits: list[CommitInput] = []
     branch: str = ""
     remoteUrl: str | None = None
 

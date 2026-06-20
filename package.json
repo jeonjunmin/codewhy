@@ -4,6 +4,10 @@
   "description": "AI 기반 코드 컨텍스트 분석 - 컨텍스트 블레임, 타임라인 요약, 요구사항 역추적",
   "version": "0.0.1",
   "icon": "images/icon-128.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jeonjunmin/codewhy.git"
+  },
   "engines": {
     "vscode": "^1.118.0"
   },
@@ -111,6 +115,12 @@
           "default": "http://3.37.125.200:8000",
           "markdownDescription": "**[고급]** CodeWhy 백엔드 서버 URL. 일반 사용자는 변경할 필요가 없으며, 자체 호스팅(self-hosted) 백엔드를 사용할 때만 수정합니다.",
           "order": 100
+        },
+        "codewhy.devBackendUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "markdownDescription": "**[개발자]** 확장을 F5(Extension Development Host)로 실행할 때 사용할 로컬 백엔드 URL. 설치본(.vsix/마켓플레이스)에서는 무시되고 `codewhy.backendUrl`이 사용됩니다.",
+          "order": 101
         }
       }
     }

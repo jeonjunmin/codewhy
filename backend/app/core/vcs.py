@@ -549,6 +549,53 @@ def search_github_issues(remote: Remote, query: str, per_page: int = 5) -> list[
         return []
 
 
+# 한 번의 Search 쿼리에 묶을 티켓 수 상한 — q 길이/항 수 폭주 방어(많으면 청크로 분할).
+_TICKETS_PER_QUERY = 20
+
+
+def search_github_issues_batch(remote: Remote, tickets: list[str]) -> dict[str, list[Issue]]:
+    """여러 티켓을 OR 쿼리로 묶어 한 번(또는 몇 번)에 검색한다 — 파일 단위 ticket 경로용.
+
+    `repo:o/r (PAY-1 OR PAY-2 ...) is:issue` 형태로, 커밋마다 따로 검색하던 것을
+    티켓 고유 집합 단위 한두 번으로 줄인다. 반환: {ticket: [Issue,...]}.
+
+    GitHub Search 결과는 어떤 티켓이 매칭됐는지 알려주지 않으므로, 이슈 제목/본문에
+    티켓 문자열이 들어있는지로 역매핑한다(보통 제목·본문에 티켓이 적혀 있음).
+    미연동/실패 시 빈 dict — 호출 측이 그대로 진행한다.
+    """
+    out: dict[str, list[Issue]] = {}
+    if remote.host != "github":
+        return out
+    uniq = [t for t in dict.fromkeys(tickets) if t.strip()]
+    if not uniq:
+        return out
+
+    for start in range(0, len(uniq), _TICKETS_PER_QUERY):
+        chunk = uniq[start:start + _TICKETS_PER_QUERY]
+        or_expr = " OR ".join(chunk)
+        issues = search_github_issues(remote, f"({or_expr})", per_page=100)
+        # 역매핑 — 각 이슈를 자신을 매칭시킨 티켓(들)에 귀속.
+        for issue in issues:
+            haystack = f"{issue.title}\n{issue.body}".upper()
+            for ticket in chunk:
+                if ticket.upper() in haystack:
+                    out.setdefault(ticket, []).append(issue)
+    return out
+
+
+def fetch_issues_batch(remote: Remote | None, numbers: list[int]) -> dict[int, Issue]:
+    """이슈 번호 집합의 최신 메타를 일괄 조회한다 — 파일 단위 메타 refresh용.
+
+    번호별 단건 조회(`_fetch_issues`)를 재사용하되, `@lru_cache` 가 세션 내 중복 호출을
+    막는다. 메타(state/labels/commentCount)는 캐시하지 않고 매 요청 여기서 새로 읽어
+    항상 최신을 유지한다(신선도 보장). 반환: {issue_number: Issue}.
+    """
+    if not remote or not numbers:
+        return {}
+    uniq = list(dict.fromkeys(numbers))
+    return {issue.number: issue for issue in _fetch_issues(remote, uniq)}
+
+
 def find_issues_for_remote(
     remote: "Remote | None", commit_hash: str, commit_message: str, branch: str = "",
 ) -> tuple[list[Issue], str]:

@@ -283,21 +283,23 @@ export function runTimelineTab() {
     ).catch((err) => sidebar!.timelineEmpty(`타임라인 요약 실패: ${(err as Error).message}`));
 }
 
-/** 이슈 탭: 현재 라인과 연관된 GitHub Issue 를 역추적해 목록으로 표시. */
+/** 이슈 탭: 현재 파일과 연관된 GitHub Issue 를 역추적해 목록으로 표시. */
 export async function runIssueTab() {
     if (!sidebar) { return; }
     sidebar.activateTab('issue');
     const ctx = getEditorContext();
     if (!ctx) { return; }
 
+    // 추적 단위가 '파일'이므로 빈 결과/결과 표시 모두 파일명을 기준으로 안내한다.
+    const issueFileName = ctx.filePath.split(/[\\/]/).pop() ?? ctx.filePath;
     sidebar.issueLoading();
     try {
         const result = await fetchRequirementTrace(buildTraceRequest(ctx));
         if (!result.documents || result.documents.length === 0) {
-            sidebar.issueEmpty(`L${ctx.line} 와 연관된 GitHub Issue를 찾지 못했습니다.`);
+            sidebar.issueEmpty(`${issueFileName} 와 연관된 GitHub Issue를 찾지 못했습니다.`);
             return;
         }
-        sidebar.issueResult(ctx.line, result);
+        sidebar.issueResult(ctx.line, issueFileName, result);
     } catch (err) {
         sidebar.issueEmpty(`요구사항 역추적 실패: ${(err as Error).message}`);
     }
@@ -342,18 +344,30 @@ function buildReasonRequest(hash: string, filePath: string, repoPath: string): R
     };
 }
 
-/** 이슈 역추적(/trace)의 요청 본문을 로컬 git 으로 조립한다. */
+/**
+ * 이슈 역추적(/trace)의 요청 본문을 로컬 git 으로 조립한다.
+ *
+ * 추적 단위는 '라인'이 아니라 '파일' 이다 — 이 파일을 건드린 커밋 이력 전체를 모아
+ * 보내면 백엔드가 각 커밋의 연관 이슈를 합쳐 중복 제거한다. blame(라인 단건)은
+ * 커밋 이력이 비었을 때의 폴백으로만 남긴다.
+ */
 function buildTraceRequest(ctx: { filePath: string; line: number; repoPath: string }): TraceRequest {
     const { meta } = localGit.getBlameInfo(ctx.repoPath, ctx.filePath, ctx.line);
+    // GitHub API 호출량을 제어하려 최근 커밋으로 상한을 둔다(파일이 오래될수록 이력이 길어짐).
+    const commits = collectGitLog(ctx.repoPath, ctx.filePath).slice(0, TRACE_COMMIT_LIMIT);
     return {
         filePath: ctx.filePath,
         line: ctx.line,
         repoPath: ctx.repoPath,
         blame: meta,
+        commits,
         branch: localGit.getCurrentBranch(ctx.repoPath),
         remoteUrl: localGit.getRemoteUrl(ctx.repoPath),
     };
 }
+
+/** 파일 단위 추적 시 백엔드로 보낼 커밋 상한 — 외부 API 조회량을 제어한다. */
+const TRACE_COMMIT_LIMIT = 20;
 
 /** 파일의 git 커밋 이력(타임라인 입력)을 수집한다. */
 function collectGitLog(repoPath: string, filePath: string): CommitInput[] {

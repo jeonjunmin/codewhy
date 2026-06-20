@@ -37,7 +37,7 @@ type BlameStreamState =
 
 type IssueState =
     | { kind: 'loading' }
-    | { kind: 'result'; line: number; result: TraceResult }
+    | { kind: 'result'; line: number; fileName: string; result: TraceResult }
     | { kind: 'empty'; message?: string };
 
 export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
@@ -256,8 +256,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         this.lastIssue = { kind: 'loading' };
         this.postIssue(this.lastIssue);
     }
-    issueResult(line: number, result: TraceResult) {
-        this.lastIssue = { kind: 'result', line, result };
+    issueResult(line: number, fileName: string, result: TraceResult) {
+        this.lastIssue = { kind: 'result', line, fileName, result };
         this.postIssue(this.lastIssue);
     }
     issueEmpty(message?: string) {
@@ -271,7 +271,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         if (s.kind === 'loading') {
             wv.postMessage({ type: 'isLoading' });
         } else if (s.kind === 'result') {
-            wv.postMessage({ type: 'isResult', payload: { line: s.line, documents: s.result.documents } });
+            wv.postMessage({ type: 'isResult', payload: { line: s.line, fileName: s.fileName, documents: s.result.documents } });
         } else {
             wv.postMessage({ type: 'isEmpty', payload: { message: s.message } });
         }
@@ -726,6 +726,50 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .tl-item__desc { font-size: 11.5px; color: var(--fg-dim); margin-top: 3px; line-height: 1.6; }
 
     /* ── 이슈 페인 (요구사항 역추적) ─────────────────────────────── */
+    #is-list-view { display: flex; flex-direction: column; gap: 11px; }
+
+    /* 목록 헤더: '요구사항 추적' + 파일 칩 */
+    .is-l-head { display: flex; flex-direction: column; gap: 8px; }
+    .is-l-head__title { color: var(--fg); font-size: 14px; font-weight: 700; letter-spacing: -0.01em; }
+    .is-l-file {
+        display: inline-flex; align-items: center; gap: 6px; align-self: flex-start;
+        color: var(--fg-dim); font-size: 12px;
+    }
+    .is-l-file__kind {
+        width: 16px; height: 16px; flex-shrink: 0;
+        display: inline-flex; align-items: center; justify-content: center;
+        background: #6D28D9; color: #fff; border-radius: 3px; font-size: 10px; font-weight: 700;
+    }
+    .is-l-file .mono { color: var(--fg); }
+
+    /* 검색 박스 */
+    .is-search {
+        display: flex; align-items: center; gap: 8px;
+        padding: 7px 11px; border-radius: 9px;
+        background: var(--surface); border: 1px solid var(--line);
+    }
+    .is-search:focus-within { border-color: var(--accent-violet); }
+    .is-search__ico { display: inline-flex; color: var(--fg-mute); flex-shrink: 0; }
+    .is-search input {
+        flex: 1; min-width: 0; border: none; background: none; outline: none;
+        color: var(--fg); font-family: inherit; font-size: 12px;
+    }
+    .is-search input::placeholder { color: var(--fg-mute); }
+
+    /* 상태 필터 탭 (전체/열림/닫힘/초안) */
+    .is-filters { display: flex; gap: 4px; }
+    .is-filter {
+        display: inline-flex; align-items: center; gap: 5px;
+        padding: 5px 9px; border-radius: 7px;
+        background: transparent; border: none; cursor: pointer;
+        color: var(--fg-mute); font-family: inherit; font-size: 11.5px; font-weight: 500;
+        transition: background .12s, color .12s;
+    }
+    .is-filter:hover { background: var(--line); color: var(--fg-dim); }
+    .is-filter.active { background: var(--surface); color: var(--fg); box-shadow: inset 0 0 0 1px var(--line); }
+    .is-filter__n { color: var(--fg-mute); font-size: 10.5px; font-weight: 600; }
+    .is-filter.active .is-filter__n { color: var(--accent-violet); }
+
     #is-list { display: flex; flex-direction: column; gap: 8px; }
     .is-item {
         display: flex; flex-direction: column; gap: 7px;
@@ -745,6 +789,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .is-item__state.open::before { background: #4ADE80; box-shadow: 0 0 5px rgba(74,222,128,0.6); }
     .is-item__state.closed { color: #F87171; }
     .is-item__state.closed::before { background: #F87171; }
+    .is-item__state.draft { color: var(--accent-violet); }
+    .is-item__state.draft::before { background: var(--accent-violet); }
     .is-item__num { color: var(--fg-mute); font-size: 11px; font-weight: 600; }
     .is-item__badge {
         flex-shrink: 0; font-size: 10.5px; padding: 2px 7px; border-radius: 6px;
@@ -763,6 +809,26 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         padding-top: 2px; border-top: 1px solid var(--line);
     }
     .is-item__foot .meta { margin-left: auto; color: var(--fg-mute); }
+
+    /* 하단 라벨+메타 한 줄 */
+    .is-item__bottom { display: flex; align-items: center; gap: 7px; }
+    .is-item__labels { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; }
+    .is-item__label {
+        font-size: 10px; padding: 1px 7px; border-radius: 5px; white-space: nowrap;
+        background: var(--surface-2); border: 1px solid var(--line); color: var(--fg-dim);
+    }
+    .is-item__metaright {
+        margin-left: auto; flex-shrink: 0;
+        display: inline-flex; align-items: center; gap: 9px;
+        color: var(--fg-mute); font-size: 10.5px;
+    }
+    .is-item__metaright span { display: inline-flex; align-items: center; gap: 3px; }
+    /* 담당자 아바타 (이름 첫 글자) */
+    .is-avatar {
+        width: 17px; height: 17px; border-radius: 50%; flex-shrink: 0;
+        display: inline-flex; align-items: center; justify-content: center;
+        color: #fff; font-size: 9px; font-weight: 700;
+    }
 
     /* ── 이슈 상세 화면 ──────────────────────────────────────────── */
     .is-detail { display: flex; flex-direction: column; gap: 13px; }
@@ -793,6 +859,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .is-d-state.open::before { background: #4ADE80; box-shadow: 0 0 6px rgba(74,222,128,0.6); }
     .is-d-state.closed { color: #F87171; border-color: rgba(248,113,113,0.4); }
     .is-d-state.closed::before { background: #F87171; }
+    .is-d-state.draft { color: var(--accent-violet); border-color: var(--line-soft); }
+    .is-d-state.draft::before { background: var(--accent-violet); }
     .is-d-num { color: var(--fg-mute); font-size: 12px; font-weight: 600; }
     .is-d-ai {
         flex-shrink: 0; display: inline-flex; align-items: center; gap: 5px;
@@ -830,13 +898,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .is-d-body { color: var(--fg-dim); font-size: 12.5px; line-height: 1.7; word-break: break-word; }
     .is-d-body code { background: var(--code-bg); color: var(--code-fg); padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
 
-    .is-d-quote {
-        border-left: 3px solid var(--accent-violet);
-        background: var(--callout-bg);
-        border-radius: 0 8px 8px 0;
-        padding: 10px 14px; font-size: 12px; color: var(--fg); line-height: 1.6; word-break: break-word;
-    }
-
     .is-d-sec-title { color: var(--fg-mute); font-size: 11px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
     .is-d-atts { display: flex; flex-direction: column; gap: 6px; margin-top: -4px; }
     .is-d-att {
@@ -852,22 +913,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
     .is-d-att__name { color: var(--fg); font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .is-d-att__meta { color: var(--fg-mute); font-size: 10.5px; margin-top: 1px; }
-
-    .is-d-composer {
-        border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 10px 12px;
-    }
-    .is-d-composer textarea {
-        width: 100%; border: none; background: none; resize: none; color: var(--fg);
-        font-family: inherit; font-size: 12px; line-height: 1.5; outline: none; min-height: 36px;
-    }
-    .is-d-composer textarea::placeholder { color: var(--fg-mute); }
-    .is-d-composer__bar { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
-    .is-d-composer__icons { display: flex; gap: 12px; color: var(--fg-mute); font-size: 13px; }
-    .is-d-submit {
-        background: var(--accent-violet); color: #18181B; border: none;
-        border-radius: 7px; padding: 5px 18px; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit;
-    }
-    .is-d-submit:hover { filter: brightness(1.08); }
 
     /* ── 로딩 스피너 ─────────────────────────────────────────────── */
     .spinner {
@@ -955,12 +1000,26 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
 
     <!-- ─────────────── 이슈 탭 ─────────────── -->
     <div id="pane-issue" class="pane hidden">
-        <div id="is-empty" class="empty"><strong>이슈</strong> 탭을 누르면 현재 라인과<br/>연관된 GitHub Issue·기획서를 찾아 드립니다.</div>
+        <div id="is-empty" class="empty"><strong>이슈</strong> 탭을 누르면 이 파일과<br/>연관된 GitHub Issue·기획서를 찾아 드립니다.</div>
         <div id="is-loading" class="empty hidden"><span class="spinner"></span> 연관 이슈 찾는 중…</div>
         <div id="is-body" class="body hidden">
             <div id="is-list-view">
-                <div class="related__title" id="is-title"></div>
+                <div class="is-l-head">
+                    <span class="is-l-head__title">요구사항 추적</span>
+                    <span class="is-l-file"><span class="is-l-file__kind" id="is-l-kind">K</span><span class="mono" id="is-l-fname"></span></span>
+                </div>
+                <div class="is-search">
+                    <span class="is-search__ico" id="ico-is-search"></span>
+                    <input id="is-search-input" type="text" placeholder="요구사항 검색…" autocomplete="off" spellcheck="false" />
+                </div>
+                <div class="is-filters" id="is-filters">
+                    <button class="is-filter active" data-filter="all">전체 <span class="is-filter__n" data-count="all">0</span></button>
+                    <button class="is-filter" data-filter="open">열림 <span class="is-filter__n" data-count="open">0</span></button>
+                    <button class="is-filter" data-filter="closed">닫힘 <span class="is-filter__n" data-count="closed">0</span></button>
+                    <button class="is-filter" data-filter="draft">초안 <span class="is-filter__n" data-count="draft">0</span></button>
+                </div>
                 <div class="related__list" id="is-list"></div>
+                <div id="is-list-empty" class="empty hidden">검색 결과가 없습니다.</div>
             </div>
             <div id="is-detail-view" class="is-detail hidden"></div>
         </div>
@@ -990,6 +1049,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         clock:  '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="8" cy="8" r="6.5"/><path d="M8 4.5V8l2.5 1.5"/></svg>',
         issue:  '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="6.5"/><circle cx="8" cy="8" r="1.6" fill="currentColor" stroke="none"/></svg>',
         caret:  '<svg width="9" height="9" viewBox="0 0 16 16" fill="currentColor"><path d="M6 3.5l5.5 4.5L6 12.5z"/></svg>',
+        search: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>',
         check:'<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 8.5l3.2 3.2L13 4.5"/></svg>',
         shieldBig: '<svg width="30" height="30" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.1"><path d="M8 1l6 2v5c0 4-2.8 6.6-6 7-3.2-.4-6-3-6-7V3l6-2z"/><path d="M5.5 8l1.8 1.8L11 6" stroke-width="1.3"/></svg>',
         sparkBig: '<svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l1.5 4.5L14 7l-4.5 1.5L8 13l-1.5-4.5L2 7l4.5-1.5L8 1z"/></svg>',
@@ -1006,6 +1066,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         setIcon('ico-hero-shield', ICON.shieldBig);
         setIcon('ico-hero-spark', ICON.sparkBig);
         setIcon('ico-hero-check', ICON.check);
+        setIcon('ico-is-search', ICON.search);
     } catch (err) {
         vscode.postMessage({ type: 'webview-error', payload: '아이콘 초기화 실패: ' + String(err) });
     }
@@ -1125,14 +1186,34 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         semantic: { label: '≈ 추정(검색)', cls: 'guess' },
     };
     // 이슈 탭 상태 — 목록과 상세를 한 데이터(isDocs)로 공유하고 isIndex 로 상세 대상을 가린다.
+    // isQuery(검색어)·isFilter(상태 탭)는 목록 뷰 상태로, 데이터 재요청 없이 클라이언트에서만 거른다.
     let isDocs = [];
     let isLine = 0;
+    let isFileName = '';
     let isIndex = 0;
+    let isQuery = '';
+    let isFilter = 'all';   // all | open | closed | draft
+
+    // 이슈 상태를 필터 버킷으로 분류한다. 백엔드 state(open/closed)에 더해
+    // 'draft'(초안)도 받을 수 있게 열어 둔다(미전송 시 초안 탭은 0건).
+    function issueBucket(d) {
+        const s = String((d && d.state) || '').toLowerCase();
+        if (s === 'closed') { return 'closed'; }
+        if (s === 'draft') { return 'draft'; }
+        return 'open';
+    }
 
     function isResult(p) {
         isDocs = p.documents || [];
         isLine = p.line || 0;
+        isFileName = p.fileName || '';
         isIndex = 0;
+        isQuery = '';
+        isFilter = 'all';
+        const input = document.getElementById('is-search-input');
+        if (input) { input.value = ''; }
+        document.getElementById('is-l-fname').textContent = isFileName;
+        document.getElementById('is-l-kind').textContent = fileKind(isFileName);
         renderIssueList();
         showIssueList();
         isShow('body');
@@ -1148,32 +1229,71 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     function renderIssueList() {
         const list = document.getElementById('is-list');
         list.innerHTML = '';
-        document.getElementById('is-title').textContent = 'L' + (isLine || '?') + ' 연관 GitHub Issue ' + isDocs.length + '건';
-        isDocs.forEach((d, i) => list.appendChild(renderIssueItem(d, i)));
+
+        // 상태별 건수 — 필터 탭 배지 갱신.
+        const counts = { all: isDocs.length, open: 0, closed: 0, draft: 0 };
+        isDocs.forEach(d => { counts[issueBucket(d)]++; });
+        document.querySelectorAll('#is-filters .is-filter__n').forEach(n => {
+            n.textContent = counts[n.dataset.count] != null ? counts[n.dataset.count] : 0;
+        });
+        document.querySelectorAll('#is-filters .is-filter').forEach(b => {
+            b.classList.toggle('active', b.dataset.filter === isFilter);
+        });
+
+        // 검색어(제목/번호/라벨) + 상태 필터로 거른다. 원본 인덱스를 유지해 상세 이동이 어긋나지 않게 한다.
+        const q = isQuery.trim().toLowerCase();
+        let shown = 0;
+        isDocs.forEach((d, i) => {
+            if (isFilter !== 'all' && issueBucket(d) !== isFilter) { return; }
+            if (q) {
+                const hay = [d.title || '', d.issueNumber != null ? ('#' + d.issueNumber) : '', (d.labels || []).join(' ')]
+                    .join(' ').toLowerCase();
+                if (hay.indexOf(q) === -1) { return; }
+            }
+            list.appendChild(renderIssueItem(d, i));
+            shown++;
+        });
+        document.getElementById('is-list-empty').classList.toggle('hidden', shown > 0);
     }
+    // 상태 버킷 → 표시 라벨/클래스 (열림/닫힘/초안).
+    const IS_STATE = {
+        open:   { label: '열림', cls: 'open' },
+        closed: { label: '닫힘', cls: 'closed' },
+        draft:  { label: '초안', cls: 'draft' },
+    };
+    // 담당자 아바타 배경색 — 이름을 해시해 안정적으로 같은 색을 준다.
+    const AVA_COLORS = ['#E05454', '#2CB8B8', '#8B5CF6', '#D97706', '#16A34A', '#3B82F6', '#EC4899', '#F97316'];
+    function avatarColor(name) {
+        let h = 0;
+        for (let k = 0; k < name.length; k++) { h = (h * 31 + name.charCodeAt(k)) >>> 0; }
+        return AVA_COLORS[h % AVA_COLORS.length];
+    }
+    function makeAvatar(name) {
+        const ava = document.createElement('span');
+        ava.className = 'is-avatar';
+        ava.style.background = avatarColor(name);
+        ava.textContent = name.charAt(0);
+        ava.title = name;
+        return ava;
+    }
+
     function renderIssueItem(d, i) {
-        const type = d.matchType || 'semantic';
-        const badge = IS_BADGE[type] || IS_BADGE.semantic;
-        const pct = (d.confidence != null) ? ' · ' + Math.round(d.confidence * 100) + '%' : '';
-        const state = String(d.state || '').toLowerCase();
-        const stateCls = state === 'closed' ? 'closed' : 'open';
-        const stateLabel = state === 'closed' ? '닫힘' : '열림';
+        const bucket = issueBucket(d);
+        const st = IS_STATE[bucket] || IS_STATE.open;
 
         const el = document.createElement('div');
         el.className = 'is-item';
         el.dataset.action = 'openIssueDetail';   // 항목 선택 → 상세 화면(외부 열기 아님)
         el.dataset.index = i;
 
-        // 머리: 상태 · 번호 ……… 신뢰도 배지
+        // 머리: 상태 · 번호
         const head = document.createElement('div');
         head.className = 'is-item__head';
         head.innerHTML =
-            '<span class="is-item__state ' + stateCls + '"></span>' +
-            '<span class="is-item__num"></span>' +
-            '<span class="is-item__badge ' + badge.cls + '"></span>';
-        head.querySelector('.is-item__state').textContent = stateLabel;
+            '<span class="is-item__state ' + st.cls + '"></span>' +
+            '<span class="is-item__num"></span>';
+        head.querySelector('.is-item__state').textContent = st.label;
         head.querySelector('.is-item__num').textContent = (d.issueNumber != null) ? ('#' + d.issueNumber) : '';
-        head.querySelector('.is-item__badge').textContent = badge.label + pct;
         el.appendChild(head);
 
         // 제목(최대 2줄)
@@ -1182,27 +1302,32 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         title.textContent = d.title || '(제목 없음)';
         el.appendChild(title);
 
-        // 푸터: 📎 첨부 · 💬 코멘트 ……… @담당자 · 날짜
+        // 하단: 라벨 칩 ……… 담당자 아바타 · 💬 코멘트 · 📎 첨부
+        const labels = d.labels || [];
         const attCount = (d.attachments || []).length;
-        const date = isDateOnly(d.updatedAt || d.createdAt);
-        const rightBits = [];
-        if (d.assignee) { rightBits.push('@' + d.assignee); }
-        if (date) { rightBits.push(date); }
-        if (attCount || d.commentCount || rightBits.length) {
-            const foot = document.createElement('div');
-            foot.className = 'is-item__foot';
-            let left = '';
-            if (attCount) { left += '<span>📎 ' + attCount + '</span>'; }
-            if (d.commentCount) { left += '<span>💬 ' + d.commentCount + '</span>'; }
-            foot.innerHTML = left;
-            if (rightBits.length) {
-                const m = document.createElement('span');
-                m.className = 'meta';
-                m.textContent = rightBits.join(' · ');
-                foot.appendChild(m);
-            }
-            el.appendChild(foot);
+        const bottom = document.createElement('div');
+        bottom.className = 'is-item__bottom';
+        const labelWrap = document.createElement('span');
+        labelWrap.className = 'is-item__labels';
+        labels.slice(0, 3).forEach(name => {
+            const chip = document.createElement('span');
+            chip.className = 'is-item__label';
+            chip.textContent = (String(name).charAt(0) === '#' ? '' : '#') + name;
+            labelWrap.appendChild(chip);
+        });
+        bottom.appendChild(labelWrap);
+
+        const right = document.createElement('span');
+        right.className = 'is-item__metaright';
+        if (d.assignee) { right.appendChild(makeAvatar(d.assignee)); }
+        if (d.commentCount) {
+            const c = document.createElement('span'); c.textContent = '💬 ' + d.commentCount; right.appendChild(c);
         }
+        if (attCount) {
+            const a = document.createElement('span'); a.textContent = '📎 ' + attCount; right.appendChild(a);
+        }
+        bottom.appendChild(right);
+        el.appendChild(bottom);
         return el;
     }
 
@@ -1248,9 +1373,9 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         wrap.innerHTML = '';
         if (!d) { return; }
 
-        const state = String(d.state || '').toLowerCase();
-        const stateCls = state === 'closed' ? 'closed' : 'open';
-        const stateLabel = state === 'closed' ? '닫힘' : '열림';
+        const bucket = issueBucket(d);
+        const stateCls = bucket;
+        const stateLabel = (IS_STATE[bucket] || IS_STATE.open).label;
         const type = d.matchType || 'semantic';
         const badge = IS_BADGE[type] || IS_BADGE.semantic;
         const pct = (d.confidence != null) ? ' · ' + Math.round(d.confidence * 100) + '%' : '';
@@ -1310,7 +1435,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         meta.className = 'is-d-meta';
         const assignee = d.assignee || '';
         appendMetaRow(meta, '담당자', assignee ? ('@' + assignee) : '미지정', !!assignee);
-        appendMetaRow(meta, '연결된 코드', 'L' + (isLine || '?'), true);
+        appendMetaRow(meta, '연결된 코드', isFileName || ('L' + (isLine || '?')), true);
         const created = isDateOnly(d.createdAt);
         const updated = isDateOnly(d.updatedAt);
         if (created) { appendMetaRow(meta, '개설', created, false); }
@@ -1325,14 +1450,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             wrap.appendChild(body);
         }
 
-        // 인용(발췌)
-        if (d.excerpt) {
-            const q = document.createElement('div');
-            q.className = 'is-d-quote';
-            q.textContent = d.excerpt;
-            wrap.appendChild(q);
-        }
-
         // 첨부파일
         const atts = d.attachments || [];
         if (atts.length) {
@@ -1345,19 +1462,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             atts.forEach(a => list.appendChild(renderAttachment(a)));
             wrap.appendChild(list);
         }
-
-        // 코멘트 작성 — 시각 요소(쓰기 미연동), 등록 시 '준비 중' 안내
-        const cc = (d.commentCount != null && d.commentCount > 0) ? (' (' + d.commentCount + ')') : '';
-        const composer = document.createElement('div');
-        composer.className = 'is-d-composer';
-        composer.innerHTML =
-            '<textarea rows="2"></textarea>' +
-            '<div class="is-d-composer__bar">' +
-                '<span class="is-d-composer__icons">📎 @</span>' +
-                '<button class="is-d-submit" data-action="issueComment">등록</button>' +
-            '</div>';
-        composer.querySelector('textarea').placeholder = '코멘트 남기기' + cc + '...';
-        wrap.appendChild(composer);
     }
 
     // 커밋 이력이 없는 라인(미커밋 파일 등) — 깨져 보이는 메타 카드 대신 안내 문구만 깔끔히
@@ -1629,6 +1733,18 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         vscode.postMessage({ type: 'switchTab', payload: { tab: tab.dataset.tab } });
     });
 
+    // ── 이슈 목록: 상태 필터 탭 + 검색(둘 다 클라이언트 필터, 재요청 없음) ──
+    document.getElementById('is-filters').addEventListener('click', (e) => {
+        const btn = e.target.closest('.is-filter');
+        if (!btn) { return; }
+        isFilter = btn.dataset.filter || 'all';
+        renderIssueList();
+    });
+    document.getElementById('is-search-input').addEventListener('input', (e) => {
+        isQuery = e.target.value || '';
+        renderIssueList();
+    });
+
     // ── 버튼·링크 액션 위임 ───────────────────────────────────────
     document.body.addEventListener('click', (e) => {
         const el = e.target.closest('[data-action]');
@@ -1670,8 +1786,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         if (el.dataset.action === 'issueBack') { showIssueList(); return; }
         if (el.dataset.action === 'issuePrev') { openIssueDetail(isIndex - 1); return; }
         if (el.dataset.action === 'issueNext') { openIssueDetail(isIndex + 1); return; }
-        // AI 질문 / 코멘트 등록 — 아직 미연동, '준비 중' 안내만(openIssueTodo 재사용).
-        if (el.dataset.action === 'issueAiAsk' || el.dataset.action === 'issueComment') {
+        // AI 질문 — 아직 미연동, '준비 중' 안내만(openIssueTodo 재사용).
+        if (el.dataset.action === 'issueAiAsk') {
             vscode.postMessage({ type: 'openIssueTodo' });
             return;
         }
