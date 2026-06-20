@@ -762,26 +762,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .pane.hidden { display: none !important; }
 
     /* ── 타임라인 페인 ───────────────────────────────────────────── */
-    .file-chip {
-        display: inline-flex; align-items: center; gap: 5px;
-        font-size: 11px; color: var(--fg-dim);
-        background: var(--surface); border: 1px solid var(--line);
-        border-radius: 6px; padding: 3px 9px;
-        max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    }
-    .file-chip-name { font-weight: 600; color: var(--fg); }
-    .ai-card {
-        background: var(--callout-bg);
-        border: 1px solid var(--line-soft);
-        border-radius: 12px; padding: 12px 14px;
-    }
-    .ai-card__label {
-        display: inline-flex; align-items: center; gap: 6px;
-        color: var(--accent-violet); font-size: 11.5px; font-weight: 600;
-        margin-bottom: 6px;
-    }
-    .ai-card__text { color: var(--fg); font-size: 12.5px; line-height: 1.7; }
-    .ai-card__text strong { color: #fff; font-weight: 700; }
+    /* 요약 카드·헤더는 블레임과 동일한 .callout / .crumb 스타일을 공유한다. */
     .caret {
         display: inline-block; width: 2px; height: 1em; margin-left: 2px;
         vertical-align: text-bottom; background: var(--accent-violet);
@@ -1156,11 +1137,18 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     <div id="pane-timeline" class="pane hidden">
         <div id="tl-empty" class="empty">파일을 연 뒤 <strong>타임라인</strong> 탭을 누르면<br/>이 파일의 변경 역사를 요약해 드립니다.</div>
         <div id="tl-body" class="body hidden">
-            <div class="file-chip"><span>📄</span><span class="file-chip-name" id="tl-file"></span></div>
-            <div class="ai-card">
-                <div class="ai-card__label"><span id="ico-tl-spark"></span> AI 요약</div>
-                <div class="ai-card__text" id="tl-summary"></div>
+            <div class="crumb">
+                <span class="mono crumb__file" id="tl-file"></span>
+                <span class="crumb__dot"></span>
             </div>
+            <section class="callout">
+                <div class="callout__lead" id="tl-summary"></div>
+                <section class="callout__detail hidden" id="tl-detail-sec">
+                    <div class="callout__detail-label">자세한 배경</div>
+                    <div class="callout__detail-body" id="tl-detail"></div>
+                </section>
+                <button class="callout__more expanded hidden" id="tl-more" data-action="toggleCallout">접기</button>
+            </section>
             <section id="tl-ms-wrap" class="hidden">
                 <div class="related__title">주요 마일스톤 <span id="tl-ms-count"></span></div>
                 <div class="tl-list" id="tl-list"></div>
@@ -1246,7 +1234,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         setIcon('ico-tab-blame', ICON.search);   // '돋보기' 탭 — 용어에 맞춰 돋보기 아이콘
         setIcon('ico-tab-timeline', ICON.clock);
         setIcon('ico-tab-issue', ICON.branch);
-        setIcon('ico-tl-spark', ICON.spark);
         setIcon('ico-hero-shield', ICON.shieldBig);
         setIcon('ico-hero-spark', ICON.sparkBig);
         setIcon('ico-hero-check', ICON.check);
@@ -1298,9 +1285,12 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     function tlStreaming(p) {
         tlText = p.text || '';
         document.getElementById('tl-file').textContent = p.fileName || '';
+        // 핵심/배경 분리·접기는 done(tlResult)에서 확정하고, 스트리밍 중엔 캐럿만 띄운다.
         document.getElementById('tl-summary').innerHTML = tlText
             ? renderBold(tlText) + '<span class="caret"></span>'
             : '<span class="spinner"></span>AI가 소스 코드를 분석 중입니다…';
+        document.getElementById('tl-detail-sec').classList.add('hidden');
+        document.getElementById('tl-more').classList.add('hidden');
         document.getElementById('tl-ms-wrap').classList.add('hidden');
         tlShow('body');
     }
@@ -1310,7 +1300,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
     function tlResult(p) {
         document.getElementById('tl-file').textContent = p.fileName || '';
-        document.getElementById('tl-summary').innerHTML = renderBold(p.summary || '');
+        // 요약을 핵심 한 줄 / 자세한 배경으로 가르고 캐럿을 거둔다(블레임 콜아웃과 동일).
+        tlFillSummary(p.summary || '');
         const wrap = document.getElementById('tl-ms-wrap');
         const list = document.getElementById('tl-list');
         list.innerHTML = '';
@@ -2064,22 +2055,38 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    // 콜아웃 본문 — 핵심 한 줄(#narrative)과 자세한 배경(#ca-detail)으로 갈라 채운다.
-    function fillCallout(text, headline) {
+    // 콜아웃 본문을 핵심 한 줄(lead)과 자세한 배경(detail)으로 갈라 채운다(요소 기반).
+    // 블레임·타임라인이 같은 .callout 구조를 공유하므로 ID 만 달리해 재사용한다.
+    function fillCalloutEls(ids, text, headline, fallback) {
         const split = splitLead(text, headline);
-        const leadEl = document.getElementById('narrative');
-        leadEl.innerHTML = renderBold(split.lead || text || '변경 사유를 분석할 수 없습니다.');
-        const sec = document.getElementById('ca-detail-sec');
-        const detail = document.getElementById('ca-detail');
+        const leadEl = document.getElementById(ids.lead);
+        leadEl.innerHTML = renderBold(split.lead || text || fallback);
+        const sec = document.getElementById(ids.detailSec);
+        const detail = document.getElementById(ids.detail);
+        const more = document.getElementById(ids.more);
         if (split.rest) {
             detail.innerHTML = renderBold(split.rest);
             sec.classList.remove('hidden');
-            setupCalloutToggle(true);
+            if (more) { more.classList.remove('hidden'); more.classList.add('expanded'); more.textContent = '접기'; }
         } else {
             detail.innerHTML = '';
             sec.classList.add('hidden');
-            setupCalloutToggle(false);
+            if (more) { more.classList.add('hidden'); }
         }
+    }
+    // 블레임 콜아웃 — 핵심 한 줄(#narrative) / 자세한 배경(#ca-detail).
+    function fillCallout(text, headline) {
+        fillCalloutEls(
+            { lead: 'narrative', detailSec: 'ca-detail-sec', detail: 'ca-detail', more: 'callout-more' },
+            text, headline, '변경 사유를 분석할 수 없습니다.',
+        );
+    }
+    // 타임라인 요약 — 핵심 한 줄(#tl-summary) / 자세한 배경(#tl-detail).
+    function tlFillSummary(text) {
+        fillCalloutEls(
+            { lead: 'tl-summary', detailSec: 'tl-detail-sec', detail: 'tl-detail', more: 'tl-more' },
+            text, null, 'AI 요약을 생성하지 못했습니다.',
+        );
     }
     // 팀/티켓 칩 — 메타 표에 흩어진 핵심을 콜아웃 옆에 모은다. 없는 항목은 건너뛴다.
     function renderCalloutChips(p) {
@@ -2096,18 +2103,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         add(ICON.users, p.team);
         add(ICON.issue, p.ticket);
         box.classList.toggle('hidden', !box.childNodes.length);
-    }
-    // '자세한 배경'이 있으면 펼친 상태('접기')로 토글 버튼을 노출하고, 없으면 숨긴다.
-    function setupCalloutToggle(hasDetail) {
-        const more = document.getElementById('callout-more');
-        if (!more) { return; }
-        if (hasDetail) {
-            more.classList.remove('hidden');
-            more.classList.add('expanded');
-            more.textContent = '접기';
-        } else {
-            more.classList.add('hidden');
-        }
     }
     function blStreaming(p) {
         showTab('blame');
@@ -2330,9 +2325,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             vscode.postMessage({ type: 'switchTab', payload: { tab: 'blame' } });
             return;
         }
-        // 콜아웃 '더 보기/접기' — '자세한 배경' 영역을 통째로 접고/펼친다.
+        // 콜아웃 '더 보기/접기' — 같은 카드 안 '자세한 배경'을 통째로 접고/펼친다.
+        // 블레임·타임라인이 같은 버튼을 쓰므로, 클릭한 버튼이 속한 .callout 기준으로 찾는다.
         if (el.dataset.action === 'toggleCallout') {
-            const sec = document.getElementById('ca-detail-sec');
+            const card = el.closest('.callout');
+            const sec = card ? card.querySelector('.callout__detail') : null;
             if (!sec) { return; }
             const collapsed = sec.classList.toggle('hidden');
             el.classList.toggle('expanded', !collapsed);
