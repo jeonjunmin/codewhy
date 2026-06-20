@@ -211,6 +211,26 @@ def _format_one(issue: Issue, match_type: str) -> dict:
             {"label": att.label, "url": att.url, "pageCount": att.page_count}
             for att in issue.attachments
         ],
+        "comments": [_format_comment(c) for c in issue.comments],
+    }
+
+
+def _format_comment(c) -> dict:
+    """vcs.Comment → CommentMatch dict. 본문은 상세 화면 길이에 맞춰 클립한다."""
+    return {
+        "kind": c.kind,
+        "author": c.author or None,
+        "createdAt": c.created_at or None,
+        "body": _clip(c.body, _MAX_BODY_CHARS),
+        "event": c.event or None,
+        "label": c.label or None,
+        "assignee": c.assignee or None,
+        "commitSha": c.commit_sha or None,
+        "commitSummary": c.commit_summary or None,
+        "attachments": [
+            {"label": att.label, "url": att.url, "pageCount": att.page_count}
+            for att in c.attachments
+        ],
     }
 
 
