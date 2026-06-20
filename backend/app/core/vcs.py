@@ -472,8 +472,10 @@ _ISSUE_REF_RE = re.compile(
 # (1) GitHub user-attachments (드래그-드롭 업로드): files/, assets/
 # (2) 레포 raw / blob 의 파일 링크 (기획서를 레포에 같이 두는 케이스)
 _ATTACHMENT_URL_RES = (
-    re.compile(r"https?://github\.com/user-attachments/(?:files|assets)/[^\s)\]]+", re.IGNORECASE),
-    re.compile(r"https?://[^\s)\]]+\.(?:pdf|docx?|xlsx?|pptx?|hwp|md|txt)", re.IGNORECASE),
+    # 종료 문자에 따옴표/꺾쇠도 포함 — HTML <img src="URL"> 에서 닫는 따옴표가 URL 에 섞이지 않게.
+    re.compile(r'https?://github\.com/user-attachments/(?:files|assets)/[^\s)\]"\'<>]+', re.IGNORECASE),
+    # 문서 + 이미지 확장자. 이미지는 프런트엔드가 인라인 미리보기로 그린다(sidebar.ts renderImageAttachment).
+    re.compile(r'https?://[^\s)\]"\'<>]+\.(?:pdf|docx?|xlsx?|pptx?|hwp|md|txt|png|jpe?g|gif|webp|svg|bmp|avif)', re.IGNORECASE),
 )
 
 # 마크다운 링크 `[label](url)` — label 이 첨부 표시명으로 더 친절하다.

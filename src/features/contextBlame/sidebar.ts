@@ -415,7 +415,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             `default-src 'none'`,
             `style-src ${this.view?.webview.cspSource ?? "'self'"} 'unsafe-inline'`,
             `script-src 'nonce-${nonce}'`,
-            `img-src ${this.view?.webview.cspSource ?? "'self'"} data:`,
+            // 이슈 첨부/본문 이미지는 GitHub(githubusercontent 리다이렉트 포함) 등 외부 https 호스트에 있으므로 허용.
+            `img-src ${this.view?.webview.cspSource ?? "'self'"} https: data:`,
             `font-src ${this.view?.webview.cspSource ?? "'self'"}`,
         ].join('; ');
 
@@ -978,6 +979,43 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
     .is-d-att__name { color: var(--fg); font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .is-d-att__meta { color: var(--fg-mute); font-size: 10.5px; margin-top: 1px; }
+    /* 이미지 첨부 — 칩 대신 인라인 미리보기(클릭 시 원본 열기). */
+    .is-d-img {
+        margin: 0; border: 1px solid var(--line); border-radius: 9px;
+        overflow: hidden; cursor: pointer; background: var(--surface-2);
+    }
+    .is-d-img:hover { border-color: var(--accent-violet); }
+    .is-d-img img { display: block; width: 100%; max-height: 320px; object-fit: contain; }
+    .is-d-img figcaption {
+        padding: 6px 10px; color: var(--fg-mute); font-size: 10.5px;
+        border-top: 1px solid var(--line); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .is-d-img img { cursor: zoom-in; }
+    /* 본문 안 인라인 이미지(HTML <img> / 마크다운 ![](url)). 클릭 시 확대 팝업. */
+    .is-d-bimg {
+        display: block; max-width: 100%; max-height: 280px; object-fit: contain;
+        border: 1px solid var(--line); border-radius: 9px; margin: 8px 0;
+        background: var(--surface-2); cursor: zoom-in;
+    }
+    .is-d-bimg-fail {
+        display: inline-block; margin: 6px 0; color: var(--accent-violet);
+        font-size: 12px; cursor: pointer; text-decoration: underline;
+    }
+    /* 확대 팝업(라이트박스) — 화면 전체를 덮고, 아무 데나 누르면 닫힌다. */
+    .is-lightbox {
+        position: fixed; inset: 0; z-index: 50; padding: 24px;
+        background: rgba(0,0,0,0.82); cursor: zoom-out;
+        display: flex; align-items: center; justify-content: center;
+    }
+    .is-lightbox.hidden { display: none; }
+    .is-lightbox img {
+        max-width: 100%; max-height: 100%; border-radius: 6px;
+        box-shadow: 0 8px 40px rgba(0,0,0,0.55);
+    }
+    .is-lightbox__hint {
+        position: fixed; bottom: 16px; left: 0; right: 0; text-align: center;
+        color: rgba(255,255,255,0.6); font-size: 11px; pointer-events: none;
+    }
 
     /* ── 활동 타임라인 (코멘트 + 시스템 이벤트) ─────────────────── */
     .is-d-feed { display: flex; flex-direction: column; gap: 12px; }
@@ -1274,7 +1312,21 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
     // 이슈 본문 → HTML. 연속된 "> …" 줄은 인용 박스(.is-d-quote)로 묶고,
     // 나머지 줄은 renderBold(=decorate+굵게)로 그린다. (마크다운 최소 지원)
-    function renderIssueBodyHTML(text) {
+    // URL 끝에 붙은 따옴표/꺾쇠/공백을 떨군다 — HTML <img src="..."> 추출 시 닫는 따옴표가
+    // 섞여 들어오는 케이스(백엔드 정규식 보정 전 데이터 포함)를 프런트에서도 방어한다.
+    function cleanUrl(u) { return String(u || '').replace(/[\\s"'<>]+$/g, ''); }
+    // 속성값 escape — innerHTML 문자열에 URL 을 안전히 끼우기 위함.
+    function attrEsc(s) {
+        return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+            .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+    // 본문 인라인 이미지 1장 — 클릭하면 라이트박스로 확대(zoomImage).
+    function bodyImgHTML(url) {
+        const safe = attrEsc(cleanUrl(url));
+        return '<img class="is-d-bimg" data-action="zoomImage" data-url="' + safe + '" src="' + safe + '" alt="첨부 이미지" loading="lazy"/>';
+    }
+    // 인용/개행만 처리하는 본문 텍스트 렌더(이미지 토큰을 걷어낸 조각에 적용).
+    function renderBodyText(text) {
         const lines = String(text).split('\\n');   // 실제 개행으로 분리
         let html = '';
         let quote = [];
@@ -1290,6 +1342,26 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             else { flush(); html += ln.trim() ? (renderBold(ln) + '<br/>') : '<br/>'; }
         });
         flush();
+        return html;
+    }
+    // 본문을 이미지 토큰(HTML <img src> / 마크다운 ![alt](url)) 기준으로 쪼개,
+    // 이미지는 인라인 미리보기로, 나머지는 텍스트로 렌더한다.
+    // 렌더한 이미지 URL 은 imgUrlsOut(있으면)에 모아 첨부 중복 제거에 쓴다.
+    function renderIssueBodyHTML(text, imgUrlsOut) {
+        const src = String(text);
+        const IMG_TOKEN = /<img\\b[^>]*?\\bsrc\\s*=\\s*["']([^"'\\s>]+)["']?[^>]*>|!\\[[^\\]]*\\]\\((https?:\\/\\/[^)\\s]+)\\)/gi;
+        let html = '';
+        let last = 0;
+        let m;
+        while ((m = IMG_TOKEN.exec(src))) {
+            const seg = src.slice(last, m.index);
+            if (seg.trim()) { html += renderBodyText(seg); }
+            const url = cleanUrl(m[1] || m[2]);
+            if (url) { html += bodyImgHTML(url); if (imgUrlsOut) { imgUrlsOut.push(url); } }
+            last = m.index + m[0].length;
+        }
+        const tail = src.slice(last);
+        if (tail.trim() || !html) { html += renderBodyText(tail); }
         return html;
     }
 
@@ -1595,11 +1667,21 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         else { dd.textContent = value; }
         dl.appendChild(dt); dl.appendChild(dd);
     }
-    function renderAttachment(a) {
+    // 첨부가 이미지인지 — 확장자(.png 등) 또는 GitHub 드래그-드롭 업로드(user-attachments/assets,
+    // 확장자 없음)로 판별. assets 는 이미지가 아닐 수도 있어, 일단 미리보기로 시도하고 로드 실패 시 칩으로 폴백한다.
+    function isImageAttachment(a) {
+        const s = ((a && a.url) || '') + ' ' + ((a && a.label) || '');
+        const low = s.toLowerCase();
+        if (/\\.(png|jpe?g|gif|webp|svg|bmp|avif)(\\?|#|$)/.test(low)) { return true; }
+        if (/user-attachments\\/assets\\//.test(low)) { return true; }
+        return false;
+    }
+    // 비-이미지 첨부 — 확장자 배지가 달린 파일 칩.
+    function renderFileChip(a) {
         const el = document.createElement('div');
         el.className = 'is-d-att';
         el.dataset.action = 'openIssue';        // 첨부는 직접 링크를 외부로 연다
-        el.dataset.url = a.url || '';
+        el.dataset.url = cleanUrl(a.url);
         const ext = (String(a.label || '').split('.').pop() || '').toUpperCase().slice(0, 4);
         el.innerHTML =
             '<span class="is-d-att__ico"></span>' +
@@ -1611,6 +1693,30 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         el.querySelector('.is-d-att__name').textContent = a.label || a.url || '첨부';
         if (a.pageCount) { el.querySelector('.is-d-att__meta').textContent = a.pageCount + ' p'; }
         return el;
+    }
+    // 이미지 첨부 — 인라인 미리보기. 클릭 시 원본을 외부로 연다.
+    // CSP 는 img-src 에 https: 를 허용한다(renderHtml 참고). 로드 실패(권한 만료·삭제 등) 시 파일 칩으로 교체.
+    function renderImageAttachment(a) {
+        const url = cleanUrl(a.url);
+        const fig = document.createElement('figure');
+        fig.className = 'is-d-img';
+        fig.dataset.action = 'zoomImage';   // 클릭 시 확대 팝업(라이트박스)
+        fig.dataset.url = url;
+        const img = document.createElement('img');
+        img.src = url;
+        img.alt = a.label || '첨부 이미지';
+        img.loading = 'lazy';
+        img.addEventListener('error', () => { fig.replaceWith(renderFileChip(a)); });
+        fig.appendChild(img);
+        if (a.label) {
+            const cap = document.createElement('figcaption');
+            cap.textContent = a.label;
+            fig.appendChild(cap);
+        }
+        return fig;
+    }
+    function renderAttachment(a) {
+        return (a && a.url && isImageAttachment(a)) ? renderImageAttachment(a) : renderFileChip(a);
     }
     function renderIssueDetail() {
         const d = isDocs[isIndex];
@@ -1689,16 +1795,28 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         if (updated) { appendMetaRow(meta, '업데이트', updated, false); }
         wrap.appendChild(meta);
 
-        // 본문 — 마크다운 인용(> …)은 인용 박스로, 나머지는 decorate 로 그린다.
+        // 본문 — 인용(> …)은 인용 박스, 이미지(<img>/![](url))는 인라인 미리보기, 나머지는 텍스트.
+        const bodyImgUrls = [];
         if (d.body) {
             const body = document.createElement('div');
             body.className = 'is-d-body';
-            body.innerHTML = renderIssueBodyHTML(d.body);
+            body.innerHTML = renderIssueBodyHTML(d.body, bodyImgUrls);
+            // 인라인 이미지 로드 실패(비공개 레포·만료·삭제) 시 '열기' 링크로 폴백.
+            body.querySelectorAll('img.is-d-bimg').forEach(img => {
+                img.addEventListener('error', () => {
+                    const link = document.createElement('span');
+                    link.className = 'is-d-bimg-fail';
+                    link.dataset.action = 'openIssue';
+                    link.dataset.url = img.dataset.url || '';
+                    link.textContent = '이미지 열기 ↗';
+                    img.replaceWith(link);
+                });
+            });
             wrap.appendChild(body);
         }
 
-        // 첨부파일
-        const atts = d.attachments || [];
+        // 첨부파일 — 본문에 이미 인라인으로 들어간 이미지는 중복 노출하지 않는다.
+        const atts = (d.attachments || []).filter(a => bodyImgUrls.indexOf(cleanUrl(a.url)) === -1);
         if (atts.length) {
             const sec = document.createElement('div');
             sec.className = 'is-d-sec-title';
@@ -2166,12 +2284,40 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             vscode.postMessage({ type: 'openIssue', payload: { url: el.dataset.url } });
             return;
         }
+        // 이미지(본문/첨부) 클릭 — 확대 팝업으로.
+        if (el.dataset.action === 'zoomImage') {
+            showLightbox(el.dataset.url);
+            return;
+        }
         // 라인 수정 이력의 '이슈 N' 배지 — 이슈 기능 미완이라 임시 안내만(행 클릭으로 번지지 않음).
         if (el.dataset.action === 'openIssueTodo') {
             vscode.postMessage({ type: 'openIssueTodo' });
             return;
         }
         vscode.postMessage({ type: el.dataset.action });
+    });
+
+    // ── 이미지 확대 팝업(라이트박스) ──────────────────────────────────────
+    // 첫 호출 때 오버레이를 만들어 재사용한다. 배경/이미지 클릭 또는 ESC 로 닫는다.
+    let lightboxEl = null;
+    function showLightbox(url) {
+        const clean = cleanUrl(url);
+        if (!clean) { return; }
+        if (!lightboxEl) {
+            lightboxEl = document.createElement('div');
+            lightboxEl.className = 'is-lightbox hidden';
+            lightboxEl.innerHTML = '<img alt="확대 이미지"/><div class="is-lightbox__hint">클릭 또는 ESC로 닫기</div>';
+            lightboxEl.addEventListener('click', hideLightbox);
+            document.body.appendChild(lightboxEl);
+        }
+        lightboxEl.querySelector('img').src = clean;
+        lightboxEl.classList.remove('hidden');
+    }
+    function hideLightbox() {
+        if (lightboxEl) { lightboxEl.classList.add('hidden'); lightboxEl.querySelector('img').src = ''; }
+    }
+    window.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && lightboxEl && !lightboxEl.classList.contains('hidden')) { hideLightbox(); }
     });
 
     // ── 마우스 '뒤로' 사이드 버튼 → 이슈 상세에서 목록으로 ─────────────────

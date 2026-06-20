@@ -44,6 +44,22 @@ def test_pdf_url_outside_user_attachments_still_matched():
     assert any(a.url.endswith("/spec.pdf") for a in attachments)
 
 
+def test_image_url_recognized_as_attachment():
+    # 외부 호스트의 raw 이미지도 첨부로 인식돼 프런트엔드 인라인 미리보기로 이어진다.
+    body = "스크린샷 ![버그](https://img.example.com/shot.png) 첨부"
+    attachments = _extract_attachments(body)
+    assert any(a.url.endswith("/shot.png") for a in attachments)
+
+
+def test_html_img_src_excludes_trailing_quote():
+    # GitHub 가 붙이는 HTML <img src="..."> 의 닫는 따옴표가 URL 에 섞이면 안 된다.
+    body = '<img width="348" src="https://github.com/user-attachments/assets/580cd28d-9551" />'
+    attachments = _extract_attachments(body)
+    assert len(attachments) == 1
+    assert attachments[0].url.endswith("580cd28d-9551")
+    assert '"' not in attachments[0].url
+
+
 def test_dedup_attachments_by_url():
     url = "https://github.com/user-attachments/files/1/a.pdf"
     body = f"[A]({url}) 그리고 직접 링크 {url}"
