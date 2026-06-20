@@ -23,7 +23,7 @@ from typing import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.timeline_file_graph import parse_ai_response, stream_file_summary
+from app.ai.timeline_file_graph import stream_file_summary
 from app.core.commit_classifier import filter_meaningful
 from app.features.timeline import crud
 
@@ -136,23 +136,33 @@ async def stream_summary(db: AsyncSession, ctx: dict) -> AsyncGenerator[str, Non
                 file_path, parsed["type"], parsed["domain"])
 
     full_text = ""
+    result: dict = {}
     try:
-        async for delta in stream_file_summary(
+        async for item in stream_file_summary(
             file_path=file_path,
             commits_text=commits_text,
             commit_type=parsed["type"],
             commit_domain=parsed["domain"],
         ):
-            full_text += delta
-            yield f"data: {json.dumps({'delta': delta}, ensure_ascii=False)}\n\n"
+            if isinstance(item, str):
+                # LLM 토큰 델타 — 프론트엔드로 즉시 흘려보낸다
+                full_text += item
+                yield f"data: {json.dumps({'delta': item}, ensure_ascii=False)}\n\n"
+            elif isinstance(item, dict):
+                # 그래프 완료 시 LangGraph 가 전달하는 최종 파싱·검증 결과
+                result = item
     except Exception as exc:
         logger.exception("[timeline] 스트리밍 중 오류 — file=%s : %s", file_path, exc)
         yield f"data: {json.dumps({'error': str(exc)}, ensure_ascii=False)}\n\n"
         return
 
-    # 스트림 종료 → 누적 텍스트 파싱 + 캐시 저장 (요구사항 3)
-    result = parse_ai_response(full_text)
-    logger.info("[timeline] Bedrock 스트리밍 완료 — summary=%d자  milestones=%d건",
+    # LangGraph on_chain_end 를 못 받은 경우의 폴백.
+    # full_text 는 이제 _SummaryExtractor 가 걸러낸 순수 summary 텍스트이므로
+    # parse_ai_response(JSON 파서) 가 아닌 직접 dict 로 구성한다.
+    if not result:
+        result = {"summary": full_text, "milestones": []}
+
+    logger.info("[timeline] 그래프 완료 — summary=%d자  milestones=%d건",
                 len(result.get("summary", "")), len(result.get("milestones", [])))
 
     await crud.save_summary(db, file.id, set_hash, result)
