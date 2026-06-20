@@ -845,7 +845,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
     .is-search input::placeholder { color: var(--fg-mute); }
 
-    /* 상태 필터 탭 (전체/열림/닫힘/초안) */
+    /* 상태 필터 탭 (전체/열림/닫힘) */
     .is-filters { display: flex; gap: 4px; }
     .is-filter {
         display: inline-flex; align-items: center; gap: 5px;
@@ -878,8 +878,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .is-item__state.open::before { background: #4ADE80; box-shadow: 0 0 5px rgba(74,222,128,0.6); }
     .is-item__state.closed { color: #F87171; }
     .is-item__state.closed::before { background: #F87171; }
-    .is-item__state.draft { color: var(--accent-violet); }
-    .is-item__state.draft::before { background: var(--accent-violet); }
     .is-item__num { color: var(--fg-mute); font-size: 11px; font-weight: 600; }
     /* 등록일 — 머리 줄 오른쪽 끝에 옅게. */
     .is-item__date { margin-left: auto; color: var(--fg-mute); font-size: 10.5px; }
@@ -906,7 +904,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .is-item__metaright {
         margin-left: auto; flex-shrink: 0;
         display: inline-flex; align-items: center; gap: 9px;
-        color: var(--fg-mute); font-size: 10.5px;
+        color: var(--fg-mute); font-size: 11.5px;
     }
     .is-item__metaright span { display: inline-flex; align-items: center; gap: 3px; }
     /* 담당자 아바타 (이름 첫 글자) */
@@ -945,8 +943,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .is-d-state.open::before { background: #4ADE80; box-shadow: 0 0 6px rgba(74,222,128,0.6); }
     .is-d-state.closed { color: #F87171; border-color: rgba(248,113,113,0.4); }
     .is-d-state.closed::before { background: #F87171; }
-    .is-d-state.draft { color: var(--accent-violet); border-color: var(--line-soft); }
-    .is-d-state.draft::before { background: var(--accent-violet); }
     .is-d-num { color: var(--fg-mute); font-size: 12px; font-weight: 600; }
     .is-d-ai {
         flex-shrink: 0; display: inline-flex; align-items: center; gap: 5px;
@@ -1183,7 +1179,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
                     <button class="is-filter active" data-filter="all">전체 <span class="is-filter__n" data-count="all">0</span></button>
                     <button class="is-filter" data-filter="open">열림 <span class="is-filter__n" data-count="open">0</span></button>
                     <button class="is-filter" data-filter="closed">닫힘 <span class="is-filter__n" data-count="closed">0</span></button>
-                    <button class="is-filter" data-filter="draft">초안 <span class="is-filter__n" data-count="draft">0</span></button>
                 </div>
                 <div class="related__list" id="is-list"></div>
                 <div id="is-list-empty" class="empty hidden">검색 결과가 없습니다.</div>
@@ -1221,9 +1216,9 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         shieldBig: '<svg width="30" height="30" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.1"><path d="M8 1l6 2v5c0 4-2.8 6.6-6 7-3.2-.4-6-3-6-7V3l6-2z"/><path d="M5.5 8l1.8 1.8L11 6" stroke-width="1.3"/></svg>',
         sparkBig: '<svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l1.5 4.5L14 7l-4.5 1.5L8 13l-1.5-4.5L2 7l4.5-1.5L8 1z"/></svg>',
         // 코멘트 수 칩 — 이모지(💬) 대신 SVG 말풍선(웹뷰 폰트에서 깨지지 않음).
-        comment: '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M2 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H6.5L4 13.5V11H3a1 1 0 0 1-1-1V4z"/></svg>',
+        comment: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M2 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H6.5L4 13.5V11H3a1 1 0 0 1-1-1V4z"/></svg>',
         // 첨부 수 칩 — 이모지(📎) 대신 SVG 클립.
-        clip: '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 7.2l-5 5a2.8 2.8 0 0 1-4-4l5.2-5.2a1.8 1.8 0 0 1 2.6 2.6l-5.2 5.2a.8.8 0 0 1-1.2-1.2l4.6-4.6"/></svg>',
+        clip: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 7.2l-5 5a2.8 2.8 0 0 1-4-4l5.2-5.2a1.8 1.8 0 0 1 2.6 2.6l-5.2 5.2a.8.8 0 0 1-1.2-1.2l4.6-4.6"/></svg>',
         // 팀 칩용 — 사람 둘.
         users: '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="6" cy="5" r="2.2"/><path d="M2 13c0-2.2 1.8-3.6 4-3.6s4 1.4 4 3.6"/><path d="M10.6 3.2a2.2 2.2 0 0 1 0 4.1M11 9.6c1.8.2 3 1.5 3 3.4"/></svg>',
     };
@@ -1419,7 +1414,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     let isFileName = '';
     let isIndex = 0;
     let isQuery = '';
-    let isFilter = 'all';   // all | open | closed | draft
+    let isFilter = 'all';   // all | open | closed
     let isScope = 'file';   // 'file'(파일 검색) | 'commit'(라인 이력의 '이슈 N' 배지)
     // 현재 목록에 '보이는' 항목들의 원본 isDocs 인덱스(필터+검색 적용 순서).
     // 상세 이전/다음은 isDocs 전체가 아니라 이 부분집합 안에서만 이동해야 한다(버그 #4).
@@ -1427,12 +1422,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     // 비었으면(예: 커밋 스코프) 전체를 보이는 것으로 간주한다.
     function visibleList() { return isVisible.length ? isVisible : isDocs.map((_, i) => i); }
 
-    // 이슈 상태를 필터 버킷으로 분류한다. 백엔드 state(open/closed)에 더해
-    // 'draft'(초안)도 받을 수 있게 열어 둔다(미전송 시 초안 탭은 0건).
+    // 이슈 상태를 필터 버킷으로 분류한다. 백엔드 state(open/closed) 기준.
     function issueBucket(d) {
         const s = String((d && d.state) || '').toLowerCase();
         if (s === 'closed') { return 'closed'; }
-        if (s === 'draft') { return 'draft'; }
         return 'open';
     }
 
@@ -1510,9 +1503,18 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         const list = document.getElementById('is-list');
         list.innerHTML = '';
 
-        // 상태별 건수 — 필터 탭 배지 갱신.
-        const counts = { all: isDocs.length, open: 0, closed: 0, draft: 0 };
-        isDocs.forEach(d => { counts[issueBucket(d)]++; });
+        // 검색어(제목/번호/라벨) 일치 여부 — 카운트와 목록이 같은 기준을 쓰게 헬퍼로 묶는다.
+        const q = isQuery.trim().toLowerCase();
+        const matchesQuery = (d) => {
+            if (!q) { return true; }
+            const hay = [d.title || '', d.issueNumber != null ? ('#' + d.issueNumber) : '', (d.labels || []).join(' ')]
+                .join(' ').toLowerCase();
+            return hay.indexOf(q) !== -1;
+        };
+
+        // 상태별 건수 — 필터 탭 배지 갱신. 검색어를 통과한 항목만 세어 탭 숫자와 실제 목록 건수를 일치시킨다.
+        const counts = { all: 0, open: 0, closed: 0 };
+        isDocs.forEach(d => { if (matchesQuery(d)) { counts.all++; counts[issueBucket(d)]++; } });
         document.querySelectorAll('#is-filters .is-filter__n').forEach(n => {
             n.textContent = counts[n.dataset.count] != null ? counts[n.dataset.count] : 0;
         });
@@ -1520,17 +1522,12 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             b.classList.toggle('active', b.dataset.filter === isFilter);
         });
 
-        // 검색어(제목/번호/라벨) + 상태 필터로 거른다. 원본 인덱스를 유지해 상세 이동이 어긋나지 않게 한다.
+        // 검색어 + 상태 필터로 거른다. 원본 인덱스를 유지해 상세 이동이 어긋나지 않게 한다.
         // 보이는 항목의 원본 인덱스를 isVisible 에 같은 순서로 쌓아, 상세 이전/다음이 이 부분집합만 돌게 한다.
-        const q = isQuery.trim().toLowerCase();
         isVisible = [];
         isDocs.forEach((d, i) => {
             if (isFilter !== 'all' && issueBucket(d) !== isFilter) { return; }
-            if (q) {
-                const hay = [d.title || '', d.issueNumber != null ? ('#' + d.issueNumber) : '', (d.labels || []).join(' ')]
-                    .join(' ').toLowerCase();
-                if (hay.indexOf(q) === -1) { return; }
-            }
+            if (!matchesQuery(d)) { return; }
             list.appendChild(renderIssueItem(d, i));
             isVisible.push(i);
         });
@@ -1540,11 +1537,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         listEmpty.textContent = '검색 결과가 없습니다.';
         listEmpty.classList.toggle('hidden', shown > 0);
     }
-    // 상태 버킷 → 표시 라벨/클래스 (열림/닫힘/초안).
+    // 상태 버킷 → 표시 라벨/클래스 (열림/닫힘).
     const IS_STATE = {
         open:   { label: '열림', cls: 'open' },
         closed: { label: '닫힘', cls: 'closed' },
-        draft:  { label: '초안', cls: 'draft' },
     };
     // 담당자 아바타 배경색 — 이름을 해시해 안정적으로 같은 색을 준다.
     const AVA_COLORS = ['#E05454', '#2CB8B8', '#8B5CF6', '#D97706', '#16A34A', '#3B82F6', '#EC4899', '#F97316'];
