@@ -1114,14 +1114,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             <span class="crumb__dot"></span>
         </div>
 
-        <dl class="meta">
-            <dt>작성자</dt><dd class="author"><strong id="author-name"></strong><span id="author-team-wrap" class="hidden">&nbsp;·&nbsp;<span id="author-team"></span></span></dd>
-            <dt>커밋</dt><dd><a class="link mono" id="meta-commit" data-action="openCommit"></a><span id="meta-ticket-wrap" class="hidden"> — <span class="ticket" id="meta-ticket"></span></span></dd>
-            <dt>날짜</dt><dd><span id="meta-date"></span><span id="meta-relative-wrap" class="hidden"> <span style="color:var(--fg-mute)">(<span id="meta-relative"></span>)</span></span></dd>
-            <dt>변경</dt><dd id="meta-change">—</dd>
-            <dt>출처</dt><dd id="meta-source">—</dd>
-        </dl>
-
         <section id="lineissues-wrap" class="hidden">
             <div class="history__title">연관 이슈</div>
             <div class="lineissues" id="lineissues-list"></div>
@@ -2067,21 +2059,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         document.getElementById('callout-more').classList.add('hidden');
         document.getElementById('callout-chips').classList.add('hidden');
 
-        // 메타/브레드크럼/이력 — render() 와 동일하게 채운다(출처/PR 은 done 에서 확정).
+        // 브레드크럼/이력 — render() 와 동일하게 채운다.
         document.getElementById('file-name').textContent = p.fileName;
         document.getElementById('file-line').textContent = 'L' + p.line;
         document.getElementById('file-kind').textContent = fileKind(p.fileName);
-        document.getElementById('author-name').textContent = p.author || '?';
-        toggle('author-team-wrap', !!p.team);
-        if (p.team) document.getElementById('author-team').textContent = p.team;
-        document.getElementById('meta-commit').textContent = p.commitShort || '—';
-        toggle('meta-ticket-wrap', !!p.ticket);
-        if (p.ticket) document.getElementById('meta-ticket').textContent = p.ticket;
-        document.getElementById('meta-date').textContent = p.dateFull || '—';
-        toggle('meta-relative-wrap', !!p.relative);
-        if (p.relative) document.getElementById('meta-relative').textContent = p.relative;
-        document.getElementById('meta-change').textContent = formatChange(p.changeStats, null) || '—';
-        document.getElementById('meta-source').textContent = '…';
 
         const histWrap = document.getElementById('history-wrap');
         const histList = document.getElementById('history-list');
@@ -2111,9 +2092,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             // 안전망: 콜아웃 구조가 없으면 설명만 통째로 그린다.
             calloutEl.innerHTML = leadDecorate(blExp, p.headline);
         }
-        // 출처/변경(PR 라인 포함)을 최종 확정.
-        document.getElementById('meta-source').textContent = p.sourceRef || '—';
-        document.getElementById('meta-change').textContent = formatChange(p.changeStats, p.prInfo) || '—';
         // 핵심 칩 + 3줄 접기 적용.
         renderCalloutChips(p);
         applyCalloutClamp();
@@ -2141,23 +2119,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         document.getElementById('file-name').textContent = p.fileName;
         document.getElementById('file-line').textContent = 'L' + p.line;
         document.getElementById('file-kind').textContent = fileKind(p.fileName);
-
-        document.getElementById('author-name').textContent = p.author || '?';
-        toggle('author-team-wrap', !!p.team);
-        if (p.team) document.getElementById('author-team').textContent = p.team;
-
-        document.getElementById('meta-commit').textContent = p.commitShort || '—';
-        toggle('meta-ticket-wrap', !!p.ticket);
-        if (p.ticket) document.getElementById('meta-ticket').textContent = p.ticket;
-
-        document.getElementById('meta-date').textContent = p.dateFull || '—';
-        toggle('meta-relative-wrap', !!p.relative);
-        if (p.relative) document.getElementById('meta-relative').textContent = p.relative;
-
-        const change = formatChange(p.changeStats, p.prInfo);
-        document.getElementById('meta-change').textContent = change || '—';
-
-        document.getElementById('meta-source').textContent = p.sourceRef || '—';
 
         // 라인 수정 이력
         const histWrap = document.getElementById('history-wrap');
@@ -2271,13 +2232,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             // 치환돼 생성된 HTML 의 정규식이 줄을 넘겨 깨진다(Invalid regular expression).
             // 주석에도 단일 개행 메타문자를 적지 말 것 — 주석 자체가 두 줄로 쪼개져 깨진다.
             .replace(/\\n/g, '<br/>');
-    }
-
-    function formatChange(stats, pr) {
-        const parts = [];
-        if (stats) parts.push('+' + stats.added + ' -' + stats.removed);
-        if (pr) parts.push('동일 PR ' + pr.lines + ' 라인');
-        return parts.join(' · ');
     }
 
     function fileKind(name) {
