@@ -554,32 +554,52 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .callout {
         background: var(--callout-bg);
         border: 1px solid var(--line-soft);
-        border-radius: 12px;
-        padding: 12px 14px;
+        border-radius: 14px;
+        padding: 14px 16px;
     }
-    .callout__title {
-        display: inline-flex; align-items: center; gap: 6px;
-        color: var(--accent-violet);
-        font-size: 11.5px; font-weight: 600;
-        margin-bottom: 6px;
+    /* 작성자 행 — 아바타 + 이름 + 날짜 */
+    .callout__author { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; }
+    .callout__avatar {
+        flex-shrink: 0; width: 30px; height: 30px; border-radius: 50%;
+        display: inline-flex; align-items: center; justify-content: center;
+        background: var(--grad); color: #fff;
+        font-size: 11px; font-weight: 700; letter-spacing: 0.3px;
     }
-    .callout__body {
-        color: var(--fg); font-size: 13px; line-height: 1.6;
+    .callout__who { display: flex; flex-direction: column; line-height: 1.3; min-width: 0; }
+    .callout__name { color: var(--fg); font-size: 12.5px; font-weight: 600; }
+    .callout__when { color: var(--fg-mute); font-size: 11px; }
+    /* 핵심 한 줄 — 굵게, 가장 먼저 눈에 들어오는 결론 */
+    .callout__lead { color: var(--fg); font-size: 13.5px; line-height: 1.62; font-weight: 600; }
+    /* 자세한 배경 */
+    .callout__detail { margin-top: 13px; }
+    .callout__detail-label { color: var(--fg-mute); font-size: 11px; font-weight: 500; margin-bottom: 5px; }
+    .callout__detail-body { color: var(--fg-dim); font-size: 12.5px; line-height: 1.65; }
+    /* 핵심 구절 강조(마커) — 백엔드 **강조** 구절을 옅은 보라 형광펜으로.
+       작성자 이름(.callout__name)도 <strong> 이므로, 본문 영역으로만 범위를 좁힌다. */
+    .callout__lead strong, .callout__lead b,
+    .callout__detail-body strong, .callout__detail-body b {
+        font-weight: 700; color: var(--fg);
+        background: rgba(167,139,250,0.16);
+        border-radius: 3px; padding: 0 3px;
+        -webkit-box-decoration-break: clone; box-decoration-break: clone;
     }
-    /* 접힌 상태 — 첫 3줄만 보이고 나머지는 '더 보기'로 펼친다(가독성). */
-    .callout__body.clamped {
-        display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
-    }
-    .callout__body .ca-author { color: var(--accent-violet); font-weight: 700; }
-    /* 핵심 한 줄(설명 첫 문장) — 접힌 상태에서도 요점이 먼저 눈에 들어오게. */
-    .callout__body .ca-lead { font-weight: 700; color: var(--fg); }
     .callout__more {
-        margin-top: 6px; padding: 0; background: none; border: none;
-        color: var(--accent-violet); font-size: 11.5px; cursor: pointer; font-family: inherit;
+        display: inline-flex; align-items: center; gap: 6px;
+        margin-top: 13px; padding: 0; background: none; border: none;
+        color: var(--fg-mute); font-size: 11.5px; cursor: pointer; font-family: inherit;
     }
-    .callout__more:hover { text-decoration: underline; }
+    .callout__more::before {
+        content: ''; width: 0; height: 0;
+        border-left: 4px solid transparent; border-right: 4px solid transparent;
+        border-top: 5px solid currentColor;
+    }
+    /* 펼친 상태(접기) — 셰브론을 위로 뒤집는다 */
+    .callout__more.expanded::before {
+        border-top: none; border-bottom: 5px solid currentColor;
+    }
+    .callout__more:hover { color: var(--fg-dim); }
     /* 출처/팀/PR 칩 — 메타 표에 묻혀 있던 핵심을 콜아웃 옆에서 한눈에. */
-    .callout__chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .callout__chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
     .ca-chip {
         display: inline-flex; align-items: center; gap: 4px;
         font-size: 11px; padding: 2px 8px; border-radius: 6px;
@@ -587,27 +607,27 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
     .ca-chip svg { opacity: 0.8; }
     .ca-chip--src { color: var(--accent-violet); border-color: var(--line-soft); }
-    .callout__body code {
+    .callout code {
         background: var(--code-bg); color: var(--code-fg);
         padding: 1px 5px; border-radius: 4px; font-size: 11.5px;
     }
 
-    /* ── 파일 브레드크럼 ─────────────────────────────────────────── */
+    /* ── 파일 헤더(상단) ─────────────────────────────────────────── */
     .crumb {
-        display: flex; align-items: center; gap: 6px;
-        padding: 6px 0; border-bottom: 1px solid var(--line);
-        color: var(--fg-dim); font-size: 12px;
+        display: flex; align-items: center; gap: 8px;
+        padding: 2px 2px 12px;
+        color: var(--fg-dim); font-size: 12.5px;
     }
-    .crumb__icon {
-        width: 16px; height: 16px;
-        display: inline-flex; align-items: center; justify-content: center;
-        background: #6D28D9; color: #fff; border-radius: 3px;
-        font-size: 10px; font-weight: 700;
+    .crumb__file { color: var(--fg-dim); }
+    .crumb__line {
+        color: var(--accent-violet);
+        background: rgba(167,139,250,0.12);
+        border: 1px solid var(--line-soft);
+        padding: 1px 7px; border-radius: 6px;
+        font-size: 11px; font-weight: 600;
     }
-    .crumb__sep { color: var(--fg-mute); }
-    .crumb__line { color: var(--fg-dim); }
     .crumb__dot {
-        margin-left: auto; width: 7px; height: 7px;
+        margin-left: auto; width: 8px; height: 8px;
         background: var(--accent-cyan); border-radius: 50%;
         box-shadow: 0 0 8px rgba(103,232,249,0.55);
     }
@@ -1097,22 +1117,28 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div id="content" class="body hidden">
-        <section class="callout">
-            <div class="callout__title">
-                <span id="ico-callout"></span> 이 라인이 추가된 이유
-            </div>
-            <div class="callout__body" id="narrative"></div>
-            <button class="callout__more hidden" id="callout-more" data-action="toggleCallout">더 보기</button>
-            <div class="callout__chips hidden" id="callout-chips"></div>
-        </section>
-
         <div class="crumb">
-            <span class="crumb__icon" id="file-kind">K</span>
-            <span class="mono" id="file-name"></span>
-            <span class="crumb__sep">›</span>
+            <span class="mono crumb__file" id="file-name"></span>
             <span class="crumb__line mono" id="file-line"></span>
             <span class="crumb__dot"></span>
         </div>
+
+        <section class="callout">
+            <div class="callout__author">
+                <span class="callout__avatar" id="ca-avatar"></span>
+                <span class="callout__who">
+                    <strong class="callout__name" id="ca-name"></strong>
+                    <span class="callout__when" id="ca-when"></span>
+                </span>
+            </div>
+            <div class="callout__lead" id="narrative"></div>
+            <section class="callout__detail hidden" id="ca-detail-sec">
+                <div class="callout__detail-label">자세한 배경</div>
+                <div class="callout__detail-body" id="ca-detail"></div>
+            </section>
+            <button class="callout__more expanded hidden" id="callout-more" data-action="toggleCallout">접기</button>
+            <div class="callout__chips hidden" id="callout-chips"></div>
+        </section>
 
         <section id="lineissues-wrap" class="hidden">
             <div class="history__title">연관 이슈</div>
@@ -1216,7 +1242,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     // 아이콘 주입은 보조 장식이므로, 한 요소가 없더라도 핸드셰이크(ready)까지 죽지 않게 격리한다.
     try {
         const setIcon = (id, svg) => { const el = document.getElementById(id); if (el) { el.innerHTML = svg; } };
-        setIcon('ico-callout', ICON.spark);
         setIcon('ico-info', ICON.spark);
         setIcon('ico-tab-blame', ICON.search);   // '돋보기' 탭 — 용어에 맞춰 돋보기 아이콘
         setIcon('ico-tab-timeline', ICON.clock);
@@ -1981,23 +2006,20 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     // blResult   : 캐럿 제거 + 핵심 한 줄 강조 + 접기 + 칩 확정.
     let blExp = '';
 
-    // 설명의 첫 문장만 굵게(핵심 한 줄). 나머지가 있을 때만 강조해, 접힌 상태에서도 요점이 먼저 보인다.
-    // 한국어 종결('…다.'/'…요.') 및 일반 문장부호(. ! ?)를 첫 문장 경계로 본다.
-    function leadDecorate(text, headline) {
+    // 설명을 '핵심 한 줄(lead)'과 '자세한 배경(rest)'으로 가른다.
+    // 백엔드 headline 이 있으면 그것을 핵심으로, 없으면 첫 문장(…다./…요./. ! ?)을 경계로 본다.
+    function splitLead(text, headline) {
         const t = String(text || '').trim();
         const h = String(headline || '').trim();
-        // 백엔드가 준 핵심 한 줄이 있으면 그걸 굵게. 본문이 그 문장으로 시작하면 앞부분만 굵게(중복 방지).
         if (h) {
-            // 핵심 한 줄(굵게) 다음에 줄바꿈을 넣어 본문과 분리한다(가독성).
+            // 본문이 핵심 문장으로 시작하면 그 뒤만 배경으로(중복 방지), 아니면 본문 전체를 배경으로.
             if (t && t.indexOf(h) === 0) {
-                const rest = t.slice(h.length).replace(/^[\\s,]+/, '').trim();
-                return '<b class="ca-lead">' + decorate(h) + '</b>' + (rest ? '<br>' + decorate(rest) : '');
+                return { lead: h, rest: t.slice(h.length).replace(/^[\\s,]+/, '').trim() };
             }
-            if (t) { return '<b class="ca-lead">' + decorate(h) + '</b><br>' + decorate(t); }
-            return '<b class="ca-lead">' + decorate(h) + '</b>';
+            return { lead: h, rest: t };
         }
-        if (!t) { return ''; }
-        // 헤드라인이 없을 때의 폴백 — 첫 문장 끝(…다./…요./. ! ?). 단문 여러 개면 첫 문장이 곧 핵심.
+        if (!t) { return { lead: '', rest: '' }; }
+        // 헤드라인이 없을 때의 폴백 — 첫 문장 끝까지를 핵심으로.
         let m = t.match(/^[\\s\\S]*?(?:다\\.|요\\.|[.!?])/);
         // 한 문장이 너무 길거나(런온) 종결부호가 없으면 첫 쉼표(절 경계)까지를 핵심으로 잡는다.
         if (!m || m[0].length > 45) {
@@ -2005,11 +2027,59 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             if (c) { m = c; }
         }
         if (m) {
-            const lead = m[0].replace(/[\\s,]+$/, '');
-            const rest = t.slice(m[0].length).replace(/^[\\s,]+/, '').trim();
-            if (rest) { return '<b class="ca-lead">' + decorate(lead) + '</b><br>' + decorate(rest); }
+            return {
+                lead: m[0].replace(/[\\s,]+$/, ''),
+                rest: t.slice(m[0].length).replace(/^[\\s,]+/, '').trim(),
+            };
         }
-        return decorate(t);
+        return { lead: t, rest: '' };
+    }
+
+    // 작성자 이름 → 아바타 이니셜. "yejin-kb" → "YK", "홍길동" → "홍".
+    function initials(name) {
+        const parts = String(name || '').split(/[^A-Za-z0-9가-힣]+/).filter(Boolean);
+        if (!parts.length) { return '?'; }
+        const a = parts[0].charAt(0);
+        const b = parts.length > 1 ? parts[1].charAt(0) : '';
+        return (a + b).toUpperCase();
+    }
+
+    // "2026-06-07" → "2026년 6월 7일". 파싱 실패 시 원본 그대로.
+    function longDateKo(iso) {
+        const m = String(iso || '').match(/(\\d{4})-(\\d{1,2})-(\\d{1,2})/);
+        if (!m) { return iso || ''; }
+        return m[1] + '년 ' + Number(m[2]) + '월 ' + Number(m[3]) + '일';
+    }
+
+    // 작성자 행(아바타 + 이름 + 날짜)을 채운다. 메타(스트리밍)·결과(캐시) 양쪽에서 호출.
+    function fillAuthor(p) {
+        const av = document.getElementById('ca-avatar');
+        const nm = document.getElementById('ca-name');
+        const wh = document.getElementById('ca-when');
+        if (av) { av.textContent = initials(p.author); }
+        if (nm) { nm.textContent = p.author || '?'; }
+        if (wh) {
+            const d = longDateKo(p.dateFull);
+            wh.textContent = d + (p.relative ? ' · ' + p.relative + ' 수정' : '');
+        }
+    }
+
+    // 콜아웃 본문 — 핵심 한 줄(#narrative)과 자세한 배경(#ca-detail)으로 갈라 채운다.
+    function fillCallout(text, headline) {
+        const split = splitLead(text, headline);
+        const leadEl = document.getElementById('narrative');
+        leadEl.innerHTML = renderBold(split.lead || text || '변경 사유를 분석할 수 없습니다.');
+        const sec = document.getElementById('ca-detail-sec');
+        const detail = document.getElementById('ca-detail');
+        if (split.rest) {
+            detail.innerHTML = renderBold(split.rest);
+            sec.classList.remove('hidden');
+            setupCalloutToggle(true);
+        } else {
+            detail.innerHTML = '';
+            sec.classList.add('hidden');
+            setupCalloutToggle(false);
+        }
     }
     // 팀/티켓 칩 — 메타 표에 흩어진 핵심을 콜아웃 옆에 모은다. 없는 항목은 건너뛴다.
     function renderCalloutChips(p) {
@@ -2027,15 +2097,17 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         add(ICON.issue, p.ticket);
         box.classList.toggle('hidden', !box.childNodes.length);
     }
-    // 콜아웃을 3줄로 접고, 실제로 잘렸을 때만 '더 보기'를 노출한다.
-    function applyCalloutClamp() {
-        const body = document.getElementById('narrative');
+    // '자세한 배경'이 있으면 펼친 상태('접기')로 토글 버튼을 노출하고, 없으면 숨긴다.
+    function setupCalloutToggle(hasDetail) {
         const more = document.getElementById('callout-more');
-        if (!body || !more) { return; }
-        body.classList.add('clamped');
-        more.textContent = '더 보기';
-        const clipped = body.clientHeight > 0 && body.scrollHeight > body.clientHeight + 2;
-        more.classList.toggle('hidden', !clipped);
+        if (!more) { return; }
+        if (hasDetail) {
+            more.classList.remove('hidden');
+            more.classList.add('expanded');
+            more.textContent = '접기';
+        } else {
+            more.classList.add('hidden');
+        }
     }
     function blStreaming(p) {
         showTab('blame');
@@ -2044,25 +2116,20 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         document.getElementById('content').classList.remove('hidden');
         revealTabs(true);
 
-        // 콜아웃: "{작성자}님이 {월일}에 " 접두 + 타이핑될 설명(#ca-exp) + 깜빡이는 캐럿.
-        blExp = p.text || '';
-        const calloutEl = document.getElementById('narrative');
-        if (p.author && p.dateShort) {
-            calloutEl.innerHTML = '<span class="ca-author"></span>님이 ' + decorate(p.dateShort) + '에 <span id="ca-exp"></span><span class="caret"></span>';
-            calloutEl.querySelector('.ca-author').textContent = p.author;
-        } else {
-            calloutEl.innerHTML = '<span id="ca-exp"></span><span class="caret"></span>';
-        }
-        if (blExp) { document.getElementById('ca-exp').innerHTML = renderBold(blExp); }
-        // 스트리밍 중엔 펼쳐서 자라는 걸 보여주고, 접기·칩은 done(blResult)에서 확정한다.
-        calloutEl.classList.remove('clamped');
-        document.getElementById('callout-more').classList.add('hidden');
-        document.getElementById('callout-chips').classList.add('hidden');
-
-        // 브레드크럼/이력 — render() 와 동일하게 채운다.
+        // 파일 헤더 + 작성자 행(아바타·이름·날짜)을 메타로 먼저 채운다.
         document.getElementById('file-name').textContent = p.fileName;
         document.getElementById('file-line').textContent = 'L' + p.line;
-        document.getElementById('file-kind').textContent = fileKind(p.fileName);
+        fillAuthor(p);
+
+        // 콜아웃: 핵심 한 줄 자리(#narrative)에 타이핑될 설명(#ca-exp) + 깜빡이는 캐럿.
+        // 핵심/배경 분리·칩은 done(blResult)에서 확정한다.
+        blExp = p.text || '';
+        const calloutEl = document.getElementById('narrative');
+        calloutEl.innerHTML = '<span id="ca-exp"></span><span class="caret"></span>';
+        if (blExp) { document.getElementById('ca-exp').innerHTML = renderBold(blExp); }
+        document.getElementById('ca-detail-sec').classList.add('hidden');
+        document.getElementById('callout-more').classList.add('hidden');
+        document.getElementById('callout-chips').classList.add('hidden');
 
         const histWrap = document.getElementById('history-wrap');
         const histList = document.getElementById('history-list');
@@ -2081,20 +2148,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         if (exp) { exp.innerHTML = renderBold(blExp); }
     }
     function blResult(p) {
+        // 스트리밍으로 모인 전체 설명을 핵심 한 줄 / 자세한 배경으로 가르고 캐럿을 거둔다.
         blExp = (p.explanation || blExp || '').trim();
-        const calloutEl = document.getElementById('narrative');
-        const exp = document.getElementById('ca-exp');
-        if (exp) {
-            exp.innerHTML = leadDecorate(blExp, p.headline);   // 백엔드 핵심 한 줄 강조
-            const caret = calloutEl.querySelector('.caret');
-            if (caret) { caret.remove(); }
-        } else {
-            // 안전망: 콜아웃 구조가 없으면 설명만 통째로 그린다.
-            calloutEl.innerHTML = leadDecorate(blExp, p.headline);
-        }
-        // 핵심 칩 + 3줄 접기 적용.
+        fillCallout(blExp, p.headline);
         renderCalloutChips(p);
-        applyCalloutClamp();
     }
 
     function render(p) {
@@ -2103,22 +2160,12 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         document.getElementById('content').classList.remove('hidden');
         revealTabs(true);
 
-        // 콜아웃 본문 — "{작성자}님이 {월일}에 {설명}" 한 문장. 작성자만 보라색 강조.
-        // author/dateShort 가 없으면 설명만 노출한다.
-        const calloutEl = document.getElementById('narrative');
-        if (p.author && p.dateShort) {
-            calloutEl.innerHTML = '<span class="ca-author"></span>님이 ' + decorate(p.dateShort) + '에 ' + leadDecorate(p.explanation || '', p.headline);
-            calloutEl.querySelector('.ca-author').textContent = p.author;
-        } else {
-            calloutEl.innerHTML = leadDecorate(p.explanation || '변경 사유를 분석할 수 없습니다.', p.headline);
-        }
-        // 핵심 칩 + 3줄 접기 적용(스트리밍 없이 곧장 최종 상태).
-        renderCalloutChips(p);
-        applyCalloutClamp();
-
+        // 파일 헤더 + 작성자 행 + 콜아웃(핵심 한 줄 / 자세한 배경) — 스트리밍 없이 곧장 최종 상태.
         document.getElementById('file-name').textContent = p.fileName;
         document.getElementById('file-line').textContent = 'L' + p.line;
-        document.getElementById('file-kind').textContent = fileKind(p.fileName);
+        fillAuthor(p);
+        fillCallout(p.explanation || '', p.headline);
+        renderCalloutChips(p);
 
         // 라인 수정 이력
         const histWrap = document.getElementById('history-wrap');
@@ -2283,11 +2330,13 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             vscode.postMessage({ type: 'switchTab', payload: { tab: 'blame' } });
             return;
         }
-        // 콜아웃 '더 보기/접기' — AI 요약 3줄 접기 토글.
+        // 콜아웃 '더 보기/접기' — '자세한 배경' 영역을 통째로 접고/펼친다.
         if (el.dataset.action === 'toggleCallout') {
-            const body = document.getElementById('narrative');
-            const nowClamped = body.classList.toggle('clamped');
-            el.textContent = nowClamped ? '더 보기' : '접기';
+            const sec = document.getElementById('ca-detail-sec');
+            if (!sec) { return; }
+            const collapsed = sec.classList.toggle('hidden');
+            el.classList.toggle('expanded', !collapsed);
+            el.textContent = collapsed ? '더 보기' : '접기';
             return;
         }
         // 라인 수정 이력 캐럿/이유 박스 클릭 — 행을 펼치고(토글) 그 커밋 사유를 지연 로드한다.
