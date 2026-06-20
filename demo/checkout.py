@@ -48,10 +48,22 @@ def vat(amount: int) -> int:
     return round(amount * VAT_RATE)
 
 
-def settlement_total(order: Order, coupon_rate: float = 0.0) -> int:
-    """수수료·쿠폰·부가세를 반영한 최종 정산액."""
+def _steps(order: Order, coupon_rate: float):
+    """정산을 (단계명, 금액) 흐름으로 산출하는 파이프라인.
+
+    각 단계를 독립적으로 합산·검증·표시할 수 있도록 분리했다 (#63).
+    """
     charged = final_charge(order)
-    # VAT는 쿠폰 할인 전 공급가 기준으로 부과해야 한다 (#62)
-    tax = vat(charged)
-    discounted = apply_coupon(charged, coupon_rate)
-    return discounted + tax
+    yield "공급가", charged
+    yield "부가세", vat(charged)
+    yield "쿠폰할인", apply_coupon(charged, coupon_rate) - charged
+
+
+def settlement_total(order: Order, coupon_rate: float = 0.0) -> int:
+    """단계별 파이프라인을 합산한 최종 정산액."""
+    return sum(amount for _, amount in _steps(order, coupon_rate))
+
+
+def settlement_breakdown(order: Order, coupon_rate: float = 0.0) -> dict[str, int]:
+    """정산 내역을 단계별로 분해해 보여준다 (영수증·정산서용)."""
+    return {name: amount for name, amount in _steps(order, coupon_rate)}
