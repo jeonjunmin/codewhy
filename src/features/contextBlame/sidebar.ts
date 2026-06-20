@@ -1383,6 +1383,16 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         const d = isParseDate(s);
         return d ? ((d.getMonth() + 1) + '월 ' + d.getDate() + '일') : isDateOnly(s);
     }
+    // 활동 피드 날짜+시각 — "YYYY년 M월 D일 오전/오후 h:mm" (로컬 시간). 실패 시 isMonthDay.
+    function isDateTime(s) {
+        const d = isParseDate(s);
+        if (!d) { return isMonthDay(s); }
+        let h = d.getHours();
+        const ampm = h < 12 ? '오전' : '오후';
+        h = h % 12; if (h === 0) { h = 12; }
+        const mm = String(d.getMinutes()).padStart(2, '0');
+        return d.getFullYear() + '년 ' + (d.getMonth() + 1) + '월 ' + d.getDate() + '일 ' + ampm + ' ' + h + ':' + mm;
+    }
     // 메타 '업데이트' 칸 — "방금 / N분 전 / N시간 전 …" 상대 시각. 실패 시 isDateOnly.
     function isRelative(s) {
         const d = isParseDate(s);
@@ -1602,7 +1612,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             txt.appendChild(document.createTextNode('님이 ')); }
         txt.appendChild(document.createTextNode(text || ''));
         const dt = document.createElement('span'); dt.className = 'is-d-ev__date';
-        dt.textContent = ' · ' + isMonthDay(date); txt.appendChild(dt);
+        dt.textContent = ' · ' + isDateTime(date); txt.appendChild(dt);
         return el;
     }
 
@@ -1618,7 +1628,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         if (sha) { const c = document.createElement('code'); c.textContent = sha; txt.appendChild(c); }
         if (it.commitSummary) { txt.appendChild(document.createTextNode(' — ' + it.commitSummary)); }
         const dt = document.createElement('span'); dt.className = 'is-d-ev__date';
-        dt.textContent = ' · ' + isMonthDay(it.createdAt); txt.appendChild(dt);
+        dt.textContent = ' · ' + isDateTime(it.createdAt); txt.appendChild(dt);
         return el;
     }
 
@@ -1632,7 +1642,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         head.appendChild(makeAvatar(author));
         const nm = document.createElement('span'); nm.className = 'is-cmt__name'; nm.textContent = author;
         head.appendChild(nm);
-        const dt = document.createElement('span'); dt.className = 'is-cmt__date'; dt.textContent = isMonthDay(c.createdAt);
+        const dt = document.createElement('span'); dt.className = 'is-cmt__date'; dt.textContent = isDateTime(c.createdAt);
         head.appendChild(dt);
         el.appendChild(head);
         if (c.body) {
