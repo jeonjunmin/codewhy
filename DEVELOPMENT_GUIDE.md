@@ -2,7 +2,7 @@
 
 > 현재 소스 코드(`master` 기준) 기반으로 정리한 **단일 개발 레퍼런스**입니다.
 > 개발 현황·구조·담당 분장·커밋 규칙·TODO를 한 곳에서 관리합니다.
-> 마지막 정리: 2026-06-07 (블레임↔타임라인 공통 처리 원칙 §6에 신설, §10에 보정 항목 추가, §6 타임라인 구현 흐름 상세 추가 — to-be 기준)
+> 마지막 정리: 2026-06-20 (역추적 GitHub Issue 전환 완료 §1·§6·§7, 타임라인 SSE 스트리밍 전환 §6, `commit_classifier`/`project` 신설 반영 §5·§7, `documents`/`document_links` 테이블 제거 §7, §10 블로커 해소·TODO 정리)
 
 ---
 
@@ -40,12 +40,12 @@ CodeWhy는 **"코드의 왜(why)를 설명하는"** VSCode 확장 + Python 백�
 
 ### 요구사항 문서 연결 방식 (현재 상태)
 
-요구사항 문서를 코드와 잇는 방식은 **기능별로 다릅니다.** 장기적으로 두 갈래를 통합할지는 §10 블로커 항목 참고.
+요구사항 문서를 코드와 잇는 방식은 **블레임·역추적이 같은 GitHub Issue 체인으로 통일**되었습니다(2026-06 전환 완료). 타임라인만 문서를 참조하지 않습니다.
 
 | 기능 | 현재 동작 |
 |---|---|
 | 컨텍스트 블레임 | **GitHub Issue 본문 + 첨부 파일을 실시간 조회**. 별도 업로드 불필요. `commit → PR → Closes #N → Issue → attachments` 체인. |
-| 요구사항 역추적 | **Document 저장소(`documents`/`document_links` 테이블) 기반**. 온보딩 시 사전 매핑 + 커밋 키워드 기반 Bedrock KB 검색. GitHub Issue 첨부로의 전환은 §10에 계획되어 있으며 아직 실행되지 않음. |
+| 요구사항 역추적 | **GitHub Issue 체인 기반으로 전환 완료.** `commit → PR → Issue → 첨부/코멘트/이벤트`를 실시간 조회. `commit_issues` 테이블이 "커밋↔이슈 번호"만 영구 캐시(cache-aside)하고, 이슈 본문·상태·라벨 등 가변 메타는 조회 시점에 갱신. 매칭 경로는 `issue`/`ticket`/`semantic` 3종(§6). 구 `documents`/`document_links` 저장소는 제거됨(§7). |
 | 타임라인 요약 | 요구사항 문서를 직접 참조하지 않음(커밋 메시지/타입만으로 요약). |
 
 ---
@@ -85,9 +85,10 @@ CodeWhy는 **"코드의 왜(why)를 설명하는"** VSCode 확장 + Python 백�
                                                                                       │
                                                ┌──────────────────┐                   │
                                                │  GitHub API       │ ◀────────────────┘
-                                               │  - PR 조회         │   (블레임 전용:
-                                               │  - Issue 본문/첨부  │    Issue 본문·첨부를
-                                               └──────────────────┘    LLM 맥락으로 전달)
+                                               │  - PR 조회         │   (블레임 + 역추적:
+                                               │  - Issue 본문/첨부  │    Issue 본문·첨부·코멘트·
+                                               │  - Issue 코멘트/타임라인│    이벤트를 실시간 수집)
+                                               └──────────────────┘
 ```
 
 **데이터 흐름의 공통 패턴**:
@@ -108,8 +109,8 @@ CodeWhy는 **"코드의 왜(why)를 설명하는"** VSCode 확장 + Python 백�
 | VSCode 확장 | TypeScript 5.9, VSCode Extension API (`^1.118.0`), axios |
 | 백엔드 | Python 3.11+, FastAPI, Uvicorn, Pydantic v2 / pydantic-settings |
 | DB | PostgreSQL(RDS), SQLAlchemy 2.0(async/asyncpg), Alembic(psycopg2) |
-| AI | AWS Bedrock — Converse API(LLM), LangGraph(타임라인 Map-Reduce) |
-| VCS 연동 | GitHub REST API (PR·Issue·첨부 조회), GitLab MR API (계획) |
+| AI | AWS Bedrock — Converse API(블레임, boto3 직접), ChatBedrock 스트리밍(타임라인, async generator SSE), Knowledge Base(역추적 시맨틱 검색) |
+| VCS 연동 | GitHub REST API (PR·Issue·첨부·코멘트·이벤트 조회), GitLab MR API (블레임 일부 지원) |
 | Git | Git CLI subprocess (`app/core/git.py`) |
 
 ---
@@ -120,31 +121,35 @@ CodeWhy는 **"코드의 왜(why)를 설명하는"** VSCode 확장 + Python 백�
 codewhy/
 ├── src/                              # VSCode 확장 (TypeScript)
 │   ├── extension.ts                  # 진입점 — 기능 register 호출만
-│   ├── shared/                       # http 클라이언트, editor 유틸, 공용 타입
+│   ├── shared/                       # http 클라이언트, editor/git 유틸, 공용 타입, 로그
 │   └── features/
-│       ├── contextBlame/             # 신예진 — command / view(webview) / api / sidebar
-│       ├── timelineSummary/          # 박성태 — command / view / api
-│       └── requirementTrace/         # 전준민 — command / view / api
+│       ├── contextBlame/             # 신예진 — command / view(webview) / sidebar / api
+│       ├── timelineSummary/          # 박성태 — command / api (렌더링은 command 내부)
+│       └── requirementTrace/         # 전준민 — command / api (렌더링은 command 내부)
 │
 └── backend/app/                      # FastAPI 백엔드
     ├── main.py                       # 앱 생성 + 라우터 등록 + DB 연결 확인
     ├── core/                         # 공용 모듈
     │   ├── git.py                    # blame/log/diff/branch 추출
-    │   ├── ai_client.py / bedrock.py # Bedrock Converse / LangChain ChatBedrock
+    │   ├── ai_client.py / bedrock.py # Bedrock Converse(boto3) / LangChain ChatBedrock
+    │   ├── commit_classifier.py      # 커밋 분류 SSOT — classify_commit/SKIP_TYPES/filter_meaningful (블레임·타임라인 공유)
     │   ├── config.py                 # pydantic-settings 환경설정
-    │   ├── tickets.py                # 커밋/파일명에서 티켓(PAY-2041) 추출
-    │   └── vcs.py                    # GitHub/GitLab PR·Issue·첨부 조회
+    │   ├── tickets.py                # 커밋/파일명에서 티켓(PAY-2041)·이슈 번호(#N) 추출
+    │   ├── vcs.py                    # GitHub/GitLab PR·Issue·첨부·코멘트·이벤트 조회 (lru_cache)
+    │   ├── knowledge_base.py         # Bedrock Knowledge Base 조회 (역추적 semantic, RAG retrieve)
+    │   └── doc_index.py              # 업로드 문서 S3→KB 인덱싱 (온보딩 시맨틱, 미설정 시 no-op)
     ├── db/
-    │   ├── models.py                 # 통합 스키마 ORM
+    │   ├── models.py                 # 통합 스키마 ORM (8테이블)
     │   ├── postgres.py               # async engine / get_db / Base
     │   └── crud_common.py            # repo/commit/file 공유 백본 upsert
-    ├── ai/graph.py                   # LangGraph 타임라인 Map-Reduce 파이프라인
+    ├── ai/timeline_file_graph.py     # 타임라인 Bedrock 스트리밍 (async generator, ChatGPT식 토큰 yield)
     ├── alembic/versions/             # DB 마이그레이션
     └── features/
         ├── blame/                    # 신예진 — router/service/crud/schemas
-        ├── timeline/                 # 박성태 — router/service/crud/graph/schemas
-        ├── traceability/             # 전준민 — router/service/schemas
-        └── onboarding/               # router/backfill/schemas (브라운필드 백필)
+        ├── timeline/                 # 박성태 — router/service/crud/schemas
+        ├── traceability/             # 전준민 — router/service/crud/schemas (commit_issues 캐시)
+        ├── project/                  # router/schemas — 프로젝트 초기화 + 저장된 타임라인 일괄 조회 (/api/v1/project)
+        └── onboarding/               # router/backfill/schemas (브라운필드 백본 백필)
 ```
 
 ---
@@ -153,15 +158,17 @@ codewhy/
 
 ### ✅ 컨텍스트 블레임 (Context Blame) — 동작 가능
 
-`POST /api/blame/context`, `POST /api/blame/ask`
+`POST /api/blame/context`, `POST /api/blame/reason`, `POST /api/blame/ask`
 
 **무엇을 하나**: 사용자가 클릭한 코드 라인의 "왜 바꿨는지"를 AI가 추론해 사이드바에 보여준다.
 
 - git blame → 커밋 해석 → PR에서 연결된 GitHub Issue + 첨부 문서 수집
 - 코드 + 커밋 + Issue 맥락을 Bedrock Converse로 종합 → **변경 사유 한국어 설명**
 - 부가: 티켓/팀 매핑, 같은 티켓 후속 커밋 → "함께 일어난 일" 조립
+- **라인 수정 이력 + 이슈 롤업**: 사이드바 하단에 해당 라인을 거쳐 간 커밋 이력을 표시하고, 각 행에 참조 이슈 수 배지(`issueCount`)와 실제 이동 링크(`issueUrl`)를 제공 (#24/#33/#46)
+- **커밋별 사유 펼침**(`/reason`): 이력 항목을 펼치면 그 커밋의 변경 사유를 지연 생성. `/context`와 같은 `(file_id, commit_id)` 캐시를 공유하므로 재호출 없이 적중
 - "AI에게 더 묻기"(`/ask`) 후속 질문 지원
-- **캐시**: `blame_explanations` UNIQUE(**file_id, commit_id**) — 커밋×파일 단위
+- **캐시**: `blame_explanations` UNIQUE(**file_id, commit_id**) — 커밋×파일 단위. 커밋↔이슈 매핑은 `commit_issues` 영구 캐시 공유(역추적과 동일 백본)
 - Bedrock 미설정 시 커밋 메시지로 폴백 → 로컬에서도 깨지지 않음
 
 #### 구현 흐름 상세
@@ -201,25 +208,24 @@ codewhy/
 **비용 최적화**:
 1. diff 길이 제한 (`_MAX_DIFF_CHARS = 2000`) — 거대 커밋의 토큰 폭발 방지
 2. 프롬프트 캐싱 — 설명+AI제안이 같은 context 블록 공유, 두 번째 호출은 Bedrock 캐시 적중
-3. 노이즈 커밋(test/chore/docs)은 LLM 호출을 건너뛰고 정형 응답으로 대체 — **예정** (§10 P1, 타임라인과 처리 원칙 정렬)
+3. 노이즈 커밋(test/chore/docs)은 LLM 호출을 건너뛰고 정형 응답으로 대체 — **적용 완료** (`commit_classifier.classify_commit` → `SKIP_TYPES` 시 `_noise_response`, 타임라인과 처리 원칙 #2 정렬)
 
 ### ✅ 타임라인 요약 (Timeline Summary) — 동작 가능
 
-`POST /api/timeline/summary`
+`POST /api/timeline/summary` (캐시 적중 시 JSON, 미스 시 **SSE 스트림**)
+`GET /api/v1/project/timeline` (DB에 저장된 요약 일괄 조회 — Bedrock 0회)
 
-- LangGraph **Map-Reduce 파이프라인** 완성(`features/timeline/graph.py`)
-- 노이즈 커밋(test/chore/docs) 제거, 청크 20개 단위, JSON 파싱 실패 시 최대 2회 재시도, 실패 시 폴백 응답
-- **캐시**: `timeline_summaries` UNIQUE(file_id, commit_set_hash) — `compute_commit_set_hash`는 정렬된 커밋 해시 SHA-256으로 구현됨
-- 프론트엔드 Webview에서 마일스톤 타임라인 시각화(세로선·날짜 칩·설명 카드) 제공
-- map 단계는 현재 **순차 실행** — Bedrock 호출 병렬화(LangGraph `Send()` API)는 §10 선택 항목
-- **비용 정책**: 일괄 prefetch 폐지(lazy on-demand) + 캐시 키에서 노이즈 커밋 제외 — 별도 plan 참조 (`TIMELINE_OPTIMIZATION_PLAN.md`)
+- **Bedrock 토큰 스트리밍** — `app/ai/timeline_file_graph.py`가 LangGraph StateGraph 대신 **async generator**로 직접 Bedrock을 호출해 ChatGPT식으로 토큰을 실시간 yield. 캐시 미스 시 라우터가 `text/event-stream`으로 흘려보낸다.
+- 노이즈 커밋(test/chore/docs)을 `commit_classifier.filter_meaningful`로 제거 → 캐시 키·LLM 입력 양쪽에서 제외
+- JSON 파싱 실패 시 누적 원본 텍스트를 `summary`로 폴백(`parse_ai_response`)
+- **캐시**: `timeline_summaries` UNIQUE(file_id, commit_set_hash) — `compute_commit_set_hash`는 의미 있는 커밋 해시를 정렬해 SHA-256
+- 프론트엔드가 스트리밍 토큰을 실시간 표시하고, 종료 프레임의 `{summary, milestones}`로 마일스톤 카드 확정
+- **프로젝트 일괄 조회**: `project` 기능이 `GET /api/v1/project/timeline`으로 저장된 모든 파일 요약을 한 번에 반환(Bedrock 미호출). `POST /initialize`는 일괄 분석을 폐지하고 ACK만 반환(lazy on-demand 정착)
 
 #### 구현 흐름 상세
 
-> ⚠️ **본 다이어그램은 `TIMELINE_OPTIMIZATION_PLAN.md` 적용 후의 to-be 흐름이다.** 현재 코드는 (a) 일괄 분석(`/files/analyze`, `/project/initialize` 백그라운드 태스크)이 살아 있고, (b) 캐시 키 계산이 노이즈 커밋을 포함해 SHA-256으로 묶으며, (c) 분류기는 `features/timeline/graph.py` 내부에 갇혀 있다. plan 완료 시 아래 흐름으로 정렬된다.
-
 > 핵심 설계 원칙: **요약 단위는 파일이고, 캐시 키는 그 파일의 "의미 있는 커밋 집합"이다.**
-> 노이즈 커밋(test/chore/docs)은 캐시 키 계산과 LLM 호출 양쪽에서 모두 제외한다. 같은 분류 기준을 블레임이 import해 쓰므로, 정의는 `backend/app/core/commit_classifier.py` 단일 소스에 둔다(§10 인프라).
+> 노이즈 커밋(test/chore/docs)은 캐시 키 계산과 LLM 호출 양쪽에서 모두 제외한다. 같은 분류 기준을 블레임이 import해 쓰므로, 정의는 `backend/app/core/commit_classifier.py` 단일 소스에 둔다.
 
 ```
 사용자가 파일 타임라인 열기 (VSCode 확장)
@@ -236,79 +242,76 @@ codewhy/
     ▼
 [4] 캐시 키 계산 (노이즈 면제 적용)
         target  = commit_classifier.filter_meaningful(commits)
-        keyhash = SHA-256(sorted(target.hash))
+        keyhash = compute_commit_set_hash = SHA-256(sorted(target.hash))
     │
     ▼
 [5] 캐시 조회  →  timeline_summaries WHERE (file_id, commit_set_hash=keyhash)
+        (service.prepare_summary)
     │
-    ├─ 적중 ──▶  저장된 {summary, milestones} 즉시 반환  (Bedrock 0회)
+    ├─ 적중 ──▶  JSON(TimelineResponse) 즉시 반환  (Bedrock 0회)
     │
-    └─ 미스 ──▶
-            [6] LangGraph 실행 (features/timeline/graph.py — StateGraph)
-                  ① classify_and_split — 청크 20커밋 단위 분할
-                                          (분류는 [4]에서 끝났으므로 여기는 분할만)
-                  ② map_summarize     — 청크별 ChatBedrock 호출 (순차, C회)
-                                          C = ceil(의미있는 커밋 수 / 20)
-                  ③ reduce_merge      — 중간 요약 통합 → 최종 JSON
-                                          (ChatBedrock 1회)
-                  ④ parse_output      — JSON 파싱
-                  ⑤ 실패 시           → increment_retry → reduce_merge 재시도
-                                          (MAX_RETRIES = 2)
-                  ⑥ 끝까지 실패       → apply_fallback
-                                          (LLM 원본 앞 300자 + 최근 5커밋)
+    └─ 미스 ──▶  StreamingResponse(text/event-stream) — service.stream_summary
+            [6] git diff 추출 → stream_file_summary(async generator)
+                  ① 대표 커밋 타입/도메인으로 관점 프롬프트 구성
+                  ② ChatBedrock 스트리밍 호출 — 토큰을 `data: {"delta": "..."}`
+                     프레임으로 즉시 yield (단일 호출, map-reduce 없음)
+                  ③ 스트림 종료 → 누적 텍스트 parse_ai_response(JSON|폴백)
+                  ④ 마지막 `data: {"done": true, "summary":..., "milestones":...}`
             [7] timeline_summaries upsert (file_id, commit_set_hash, summary, milestones)
-            [8] 응답 반환 → 프론트가 Webview에 마일스톤 카드로 렌더링
+            [8] 프론트가 누적 토큰 표시 → done 프레임으로 마일스톤 카드 확정
 ```
 
-**Bedrock 호출 횟수 (캐시 미스 1회 분석 기준)**:
-- 정상 경로: `C + 1` 회 (map C회 + reduce 1회)
-- 재시도 발생 시: 최대 `C + 1 + 2` 회 (reduce만 재호출, 최대 2회)
-- 폴백 진입 시: 위 호출 후 추가 호출 없음 — `apply_fallback`은 LLM 미호출
+**Bedrock 호출 횟수 (캐시 미스 1회 분석 기준)**: 파일당 **스트리밍 1회**. (이전 map-reduce의 `C+1`회에서 단일 호출로 단순화됨. 큰 파일 토큰 가드는 입력 커밋 텍스트 구성 단계에서 처리.)
 
 **캐시 무효화 정책**:
 - 의미 있는 커밋(feat/fix/refactor/perf/…)이 추가/변경되면 `keyhash` 가 바뀌어 자동 재분석.
 - 노이즈 커밋(test/chore/docs)만 푸시된 경우 `filter_meaningful`이 그것을 제외 → `keyhash` 불변 → **재분석 안 일어남**(블레임의 §6 공통 처리 원칙 #2 정렬).
 
 **LLM 진입점**:
-- `app.core.bedrock.get_bedrock_llm()` → `langchain_aws.ChatBedrock` 인스턴스를 LangGraph 노드에서 사용 (`HumanMessage` + `.invoke()`).
-- 블레임이 쓰는 `app.core.ai_client.call_bedrock`(boto3 Converse 직접)과는 다른 진입점. 같은 Bedrock 모델을 호출하지만 SDK 레이어가 다르며, 프롬프트 캐싱(`cachePoint`)은 현재 타임라인 경로에서 미사용 — 청크가 매번 다른 본문이므로 캐싱 이득이 작기 때문(§6 공통 처리 원칙 표의 5번 행 참고).
+- `app.core.bedrock.get_bedrock_llm()` → `langchain_aws.ChatBedrock` 인스턴스를 async generator에서 스트리밍 호출(`HumanMessage` + 토큰 스트림).
+- 블레임이 쓰는 `app.core.ai_client.call_bedrock`(boto3 Converse 직접)과는 다른 진입점. 같은 Bedrock 모델을 호출하지만 SDK 레이어가 다르며, 프롬프트 캐싱(`cachePoint`)은 타임라인 경로에서 미사용 — 파일마다 본문이 달라 캐싱 이득이 작기 때문.
 
 **비용 최적화**:
-1. **Lazy on-demand** — 사용자가 실제로 연 파일만 분석 (TIMELINE_OPTIMIZATION_PLAN.md A1)
-2. **노이즈 면제 캐시 키** — 의미 없는 커밋이 캐시를 깨지 않음 (TIMELINE_OPTIMIZATION_PLAN.md C)
-3. **청크 분할** — 큰 파일도 토큰 안전, map 단계 병렬화 여지(§10 선택)
-4. **재시도 상한 + 폴백** — JSON 파싱 실패가 무한 호출로 번지지 않음
+1. **Lazy on-demand** — 사용자가 실제로 연 파일만 분석. `project/initialize`의 일괄 분석은 폐지됨
+2. **노이즈 면제 캐시 키** — 의미 없는 커밋이 캐시를 깨지 않음
+3. **스트리밍 단일 호출** — 체감 지연을 토큰 단위로 분산, map-reduce 다중 호출 제거
+4. **저장 후 재조회 무비용** — `GET /project/timeline`은 DB만 읽어 Bedrock 0회
 
-### ✅ 요구사항 역추적 (Requirement Trace) — 동작 가능 (현 구현은 Document 저장소 기반)
+### ✅ 요구사항 역추적 (Requirement Trace) — 동작 가능 (GitHub Issue 체인 기반)
 
 `POST /api/trace/requirement`
 
-코드 라인에서 연관 기획 문서를 찾아 보여주는 기능. 현재 구현은 **`documents`/`document_links` 테이블에 미리 적재된 문서**를 매칭합니다. GitHub Issue 첨부 실시간 조회로의 전환은 §10에 계획되어 있으며 아직 실행 전입니다.
+코드(파일 단위)에서 연관 GitHub Issue와 그 첨부·코멘트·이벤트를 찾아 보여주는 기능. **블레임과 동일한 `commit → PR → Issue` 체인으로 통일**되었습니다(구 `documents`/`document_links` 저장소 폐지). 커밋↔이슈 번호는 `commit_issues` 테이블에 **영구 캐시(cache-aside)** 하고, 이슈 본문·상태·라벨 등 가변 메타는 조회 시점에 GitHub에서 갱신합니다.
 
 **추적 경로 (실제 코드)**:
 
 ```
-코드 라인 → git blame → commit
-    → ① 커밋/브랜치에서 티켓 번호 추출   → DocumentLink(link_type="ticket")
-    → ② 온보딩이 사전 적재한 매핑 조회   → DocumentLink(link_type="commit"|"file")
-    → ③ 커밋 메시지 키워드로 Bedrock KB 검색 → Passage → Document
+파일(+blamed 커밋들) → 각 커밋
+    → ① PR 본문에서 Issue 직접 연결 (Closes #N)        → link_source="issue"  (확정)
+    → ② 커밋/브랜치 티켓 번호로 GitHub Issue 검색         → link_source="ticket" (높음)
+    → ③ 커밋 메시지 키워드로 Issue/Bedrock KB 시맨틱 검색  → link_source="semantic" (추정)
+    → 미인덱싱 커밋만 GitHub 조회 → commit_issues 저장(증분)
+    → 이슈 번호 집합으로 본문/상태/라벨/코멘트/첨부 일괄 refresh
     → matchType/confidence 와 함께 UI에 표시
 ```
 
 | matchType | 방식 | 확신도 |
 |-----------|------|--------|
-| `ticket` | 커밋/브랜치 티켓 번호 → `DocumentLink(link_type="ticket")` | 확정 |
-| `backfill` | 온보딩이 사전 생성한 commit/file 단위 매핑 | 높음 |
-| `semantic` | 커밋 메시지 키워드 → Bedrock Knowledge Base 검색 | 추정 (낮음) |
+| `issue` | 커밋 → PR 본문 → Issue 직접 연결 (첨부 있음) | 확정 |
+| `ticket` | 커밋/브랜치 티켓 번호(PAY-2041) → GitHub Issue 검색 | 높음 |
+| `semantic` | 커밋 메시지 키워드 → GitHub Issue / Bedrock Knowledge Base 검색 | 추정 (낮음) |
 
-> 위 어느 경로에도 **GitHub Issue API 호출은 포함되지 않습니다.** "Closes #N 파싱 → Issue 첨부 수집"은 현재 컨텍스트 블레임에만 구현되어 있습니다.
+**응답 구성**(`traceability/schemas.py`): 이슈별 `DocumentMatch`(title/url/issueNumber/state/labels/assignee/excerpt) + 첨부 `AttachmentMatch`(label/url/pageCount) + 코멘트·이벤트 `CommentMatch`(comment: author/body/createdAt | event: labeled/assigned/closed 등). 이슈 상세를 코멘트·타임라인까지 펼쳐 보여줍니다(#46).
+
+> **외부 연동 미설정 시** 빈 결과로 폴백 → 로컬에서 절대 깨지지 않습니다. semantic 경로의 Bedrock KB(`core/knowledge_base.py`)는 KB 미설정 시 빈 리스트를 돌려줍니다.
 
 ### 🧪 브라운필드 온보딩 (Onboarding) — 개발 중
 
 `POST /api/onboarding/backfill`
 
-- 레거시 레포 전체 git 히스토리를 훑어 커밋↔Issue 역링크를 사전 생성
-- 부분 유니크 인덱스로 재실행 중복 방지(idempotent)
+- 레거시 레포 전체 git 히스토리를 훑어 **공유 백본(commits/files/commit_files)** 을 일괄 upsert
+- GitHub Issue 실시간 조회로 전환한 이후 `document_links` 사전 생성은 폐지 — 커밋↔이슈는 파일 조회 시점에 `commit_issues`로 증분 인덱싱
+- UNIQUE 제약으로 재실행 중복 방지(idempotent)
 
 ---
 
@@ -318,13 +321,13 @@ codewhy/
 
 | # | 원칙 | 블레임 | 타임라인 |
 |---|------|-------|---------|
-| 1 | **Lazy on-demand** — 사용자 액션 시점에만 분석, 일괄 prefetch 금지 | ✅ 적용 (라인 클릭 1회) | ✅ A1 전환 후 적용 (`TIMELINE_OPTIMIZATION_PLAN.md`) |
-| 2 | **노이즈 커밋 LLM 우회** — test/chore/docs는 LLM 호출·캐시 무효화에서 모두 제외 | ✅ 적용 (`analyze_blame` 진입 분기, 2026-06-07) | ⏳ 캐시 키 면제 예정 (별도 plan) |
+| 1 | **Lazy on-demand** — 사용자 액션 시점에만 분석, 일괄 prefetch 금지 | ✅ 적용 (라인 클릭 1회) | ✅ 적용 (`project/initialize` 일괄 분석 폐지, 파일 열 때 1회) |
+| 2 | **노이즈 커밋 LLM 우회** — test/chore/docs는 LLM 호출·캐시 무효화에서 모두 제외 | ✅ 적용 (`analyze_blame` 진입 분기) | ✅ 적용 (`filter_meaningful` → 캐시 키·LLM 입력 제외) |
 | 3 | **공유 백본** — repo/commit/file upsert는 항상 `db/crud_common.py` 경유 | ✅ | ✅ |
-| 4 | **외부 API 메모이즈** — GitHub PR·Issue 조회는 요청 스코프 캐시로 중복 호출 차단 | ✅ 적용 (`vcs.py` lru_cache 128, 2026-06-07) | — (외부 API 미사용) |
-| 5 | **폴백 정책 일관** — 외부 의존성 미설정·실패 시 예외 대신 동등 형식의 폴백 응답 | ✅ `[Bedrock 미연동] …` | ✅ `apply_fallback` + `_fallback_summary` |
+| 4 | **외부 API 메모이즈** — GitHub PR·Issue 조회는 요청 스코프 캐시로 중복 호출 차단 | ✅ 적용 (`vcs.py` lru_cache 128) | — (외부 API 미사용) |
+| 5 | **폴백 정책 일관** — 외부 의존성 미설정·실패 시 예외 대신 동등 형식의 폴백 응답 | ✅ `[Bedrock 미연동] …` | ✅ `parse_ai_response` 원본 텍스트 폴백 |
 
-원칙 2, 4를 위해 **공통 커밋 분류기**(`backend/app/core/commit_classifier.py`)를 신설할 예정 — `_classify_commit`/`SKIP_TYPES`를 타임라인 graph.py에서 추출해 블레임도 동일한 기준으로 호출 우회를 적용한다. (§10 인프라 참고)
+원칙 2를 위한 **공통 커밋 분류기**(`backend/app/core/commit_classifier.py`)는 **신설 완료** — `classify_commit`/`SKIP_TYPES`/`filter_meaningful`을 단일 소스로 두고, 타임라인(캐시 키·LLM 입력)과 블레임(노이즈 우회)이 모두 import해 같은 기준으로 동작한다.
 
 #### LLM 호출 방식 비교 (Bedrock + LangChain)
 
@@ -336,16 +339,16 @@ codewhy/
 블레임                              타임라인
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  service.py                          graph.py (LangGraph 노드)
+  service.py                          timeline_file_graph.py (async generator)
       │                                     │
-      │  boto3로 직접 호출                    │  LangChain에 위임
+      │  boto3로 직접 호출                    │  LangChain ChatBedrock 스트리밍에 위임
       ▼                                     ▼
-  [AWS Bedrock]                   [LangChain ChatBedrock]
-                                          │  (내부에서 boto3 사용)
+  [AWS Bedrock]                   [LangChain ChatBedrock.astream]
+                                          │  (토큰을 즉시 yield)
                                           ▼
                                     [AWS Bedrock]
 
-  "직통 전화"                        "콜센터 통해서 연결"
+  "직통 전화"                        "스트리밍 받아쓰기"
 ```
 
 ##### 블레임 — boto3 직접 호출 (`core/ai_client.py`)
@@ -367,32 +370,30 @@ LangChain이 이 구조를 추상화해버리면 캐싱 제어권이 없어진�
                                                        ↑ 이것 때문에 직접 호출
 ```
 
-##### 타임라인 — LangChain + LangGraph (`core/bedrock.py` + `features/timeline/graph.py`)
+##### 타임라인 — LangChain ChatBedrock 스트리밍 (`core/bedrock.py` + `ai/timeline_file_graph.py`)
 
 ```python
 # core/bedrock.py
 def get_bedrock_llm():
     return ChatBedrock(...)        # LangChain 객체 반환
 
-# graph.py — LangGraph 노드 안에서
-llm = get_bedrock_llm()
-llm.invoke([HumanMessage(content=prompt)])   # LangChain 방식
+# ai/timeline_file_graph.py — async generator 안에서
+async def stream_file_summary(...):
+    llm = get_bedrock_llm()
+    async for chunk in llm.astream([HumanMessage(content=prompt)]):
+        yield chunk.content        # 토큰을 즉시 SSE 프레임으로
 ```
 
-LangGraph의 `StateGraph` 노드가 LangChain 객체를 기대하므로, 5개 노드가 연결된 파이프라인 전체를 간결하게 구성할 수 있다.
+> **이전 구조 변경 메모**: 과거에는 LangGraph `StateGraph`(classify→map→reduce→parse→retry) map-reduce 파이프라인이었으나, ChatGPT식 실시간 출력 요구로 **단일 스트리밍 호출 + async generator**로 단순화됨. `langgraph` 의존성은 `requirements.txt`에 남아 있으나 현재 코드에서 미사용(§10 정리 대상).
 
 ```
-classify_and_split
+stream_file_summary (단일 노드)
       │
       ▼
-map_summarize ─── ChatBedrock.invoke() × 청크 수 (C회)
+ChatBedrock.astream() ─── 토큰 스트림 → `data: {"delta": "..."}` 프레임
       │
       ▼
-reduce_merge ──── ChatBedrock.invoke() × 1회
-      │
-      ▼
-parse_output ── 실패? → increment_retry → reduce_merge (재시도, MAX=2)
-                성공? → END
+스트림 종료 → parse_ai_response(JSON|폴백) → `data: {"done": true, ...}`
 ```
 
 ##### 비교 요약
@@ -400,49 +401,51 @@ parse_output ── 실패? → increment_retry → reduce_merge (재시도, MAX
 | 측면 | 블레임 | 타임라인 |
 |---|---|---|
 | 진입점 | `core/ai_client.py::call_bedrock` | `core/bedrock.py::get_bedrock_llm` |
-| SDK 레이어 | boto3 **Converse API 직접** 호출 | **LangChain `ChatBedrock`** 인스턴스 |
-| 오케스트레이션 | 단순 순차 (설명 1회 → 제안 1회) | **LangGraph `StateGraph`** (5 노드: split → map → reduce → parse → retry/fallback) |
+| SDK 레이어 | boto3 **Converse API 직접** 호출 | **LangChain `ChatBedrock`** 인스턴스 (`.astream`) |
+| 오케스트레이션 | 단순 순차 (설명 1회 → 제안 1회) | **async generator 스트리밍** (단일 호출, 토큰 즉시 yield) |
 | 메시지 구성 | `[context, cachePoint, prompt]` 3파트 | `HumanMessage(prompt)` 단일 |
-| **프롬프트 캐싱** | ✅ 활용 — 같은 context 블록 두 번 보내 캐시 적중 | ❌ 미활용 — 청크마다 본문이 달라 효과 작음 |
-| 호출 횟수/요청 | 2회 고정 (설명 + 제안) | 가변: `청크 수 + 1` (+ 재시도 최대 2) |
-| 토큰 가드 | `_MAX_DIFF_CHARS=2000` head-only 잘라내기 | 청크 20커밋 단위 분할 |
-| 폴백 | `[Bedrock 미연동] …` 메시지 | `apply_fallback` (LLM 원본 앞 300자 + 최근 5커밋) |
+| **프롬프트 캐싱** | ✅ 활용 — 같은 context 블록 두 번 보내 캐시 적중 | ❌ 미활용 — 파일마다 본문이 달라 효과 작음 |
+| 호출 횟수/요청 | 2회 고정 (설명 + 제안) | **1회 스트리밍** (캐시 미스 시) |
+| 토큰 가드 | `_MAX_DIFF_CHARS=2000` head-only 잘라내기 | 입력 커밋 텍스트 구성 단계에서 제한 |
+| 응답 전달 | JSON 일괄 반환 | **SSE(`text/event-stream`)** 토큰 스트림 + done 프레임 |
+| 폴백 | `[Bedrock 미연동] …` 메시지 | `parse_ai_response` — JSON 실패 시 원본 텍스트를 summary로 |
 
-**왜 두 진입점인가**: 블레임은 "프롬프트 캐싱으로 비용 깎기"가 우선이라 Converse를 직접 부르는 게 유리하고, 타임라인은 "여러 노드로 map-reduce·재시도·폴백을 오케스트레이션"하는 게 우선이라 LangGraph의 상태 머신이 적합하다. 두 진입점을 한 SDK로 합치려면 한쪽 도메인 요구를 양보해야 하므로 현재는 **공존을 인정**한다. 단, `core/commit_classifier.py`처럼 **공통 데이터/규칙은 공유 모듈**로 끌어내는 정책은 유지한다.
+**왜 두 진입점인가**: 블레임은 "프롬프트 캐싱으로 비용 깎기"가 우선이라 Converse를 직접 부르는 게 유리하고, 타임라인은 "토큰을 받는 즉시 화면에 흘려보내는 실시간 UX"가 우선이라 LangChain `ChatBedrock`의 `.astream`이 적합하다. 두 진입점을 한 SDK로 합치려면 한쪽 도메인 요구를 양보해야 하므로 현재는 **공존을 인정**한다. 단, `core/commit_classifier.py`처럼 **공통 데이터/규칙은 공유 모듈**로 끌어내는 정책은 유지한다.
 
 ---
 
-## 7. 데이터 모델 (통합 스키마 6테이블 — 목표; 현재는 documents/document_links 포함 8테이블)
+## 7. 데이터 모델 (통합 스키마 8테이블)
 
 ```
 repositories ─┬─ commits ─┬─ commit_files ─ files
+              │           ├─ commit_issues          (역추적·블레임 이슈 캐시)
               │           │
   blame_explanations ─────┘         timeline_summaries
 
-[과도기] documents ── document_links   (역추적 전용, §10에서 제거 예정)
+timeline_summary_cache  (repo_path/file_path 단위 분석 상태 — project 기능)
+
+(구 documents / document_links 테이블은 GitHub Issue 전환으로 제거됨)
 ```
 
 | 테이블 | 역할 | 핵심 제약 |
 | --- | --- | --- |
 | `repositories` | 레포 식별자 루트 | identifier UNIQUE |
-| `commits` | git 커밋 (블레임·타임라인 공유) | UNIQUE(repo_id, commit_hash) |
+| `commits` | git 커밋 (세 기능 공유) | UNIQUE(repo_id, commit_hash) |
 | `files` | 레포 내 파일 경로 | UNIQUE(repo_id, file_path) |
 | `commit_files` | 커밋↔파일 N:M + 변경량 | (commit_id, file_id) PK |
 | `blame_explanations` | 블레임 AI 결과 캐시 | UNIQUE(file_id, commit_id) |
 | `timeline_summaries` | 타임라인 요약 캐시 | UNIQUE(file_id, commit_set_hash) |
+| `commit_issues` | 커밋↔GitHub Issue 번호 영구 캐시 (cache-aside, 역추적·블레임 공유) | UNIQUE(commit_id, issue_number) |
+| `timeline_summary_cache` | 파일별 마지막 분석 상태(repo_path, file_path) — `project` 기능 | UNIQUE(repo_path, file_path) |
 
-> **`documents` / `document_links` 테이블 — 결정됨, 미실행 (2026-06-06)**
-> 요구사항 문서를 별도 업로드·저장하던 방식에서, **GitHub Issue 첨부 파일을 실시간 조회**하는 방식으로 전환하기로 결정했습니다.
-> - 문서 메타데이터를 DB에 저장할 필요 없음 — GitHub API가 원천
-> - 커밋↔문서 매핑도 DB에 저장할 필요 없음 — `commit → PR → Issue → attachments` 체인으로 파생
-> - 분석 결과(출처 URL 포함)는 `blame_explanations`의 JSON 컬럼에 이미 캐시됨
->
-> **현재 상태(실제 코드 기준)**: ORM(`db/models.py`의 `Document`/`DocumentLink`), 라우터(`features/documents/`, `main.py`의 include_router), 백필(`features/onboarding/backfill.py::_link_passages`)이 모두 그대로 살아 있으며 DROP 마이그레이션도 없습니다. **컨텍스트 블레임만 새 방식(GitHub Issue 실시간 조회)을 사용**하고, **역추적은 여전히 이 테이블에 의존**합니다.
->
-> 정리 작업은 §10 인프라 항목 참고.
+> **`documents` / `document_links` 테이블 — 제거 완료 (2026-06 GitHub Issue 전환)**
+> 요구사항 문서를 별도 업로드·저장하던 방식에서 **GitHub Issue 첨부/코멘트를 실시간 조회**하는 방식으로 전환하면서 두 테이블과 ORM(`Document`/`DocumentLink`)을 제거했습니다.
+> - 문서 메타데이터·커밋↔문서 매핑을 DB에 저장하지 않음 — `commit → PR → Issue → attachments` 체인으로 파생
+> - 변하지 않는 "커밋↔이슈 번호"만 `commit_issues`에 영구 캐시하고, 가변 메타는 조회 시점 refresh
+> - `features/documents/` 데드코드 폴더도 삭제 완료 (2026-06-20).
 
 **설계 원칙**:
-- 세 기능이 공유하는 데이터(작성자·날짜·메시지·티켓)는 `commits`/`files`에 한 번만 저장하고, 기능별 산출물은 FK로 참조.
+- 세 기능이 공유하는 데이터(작성자·날짜·메시지·티켓·이슈)는 `commits`/`files`/`commit_issues`에 한 번만 저장하고, 기능별 산출물은 FK로 참조.
 - 스키마 변경은 **반드시 Alembic autogenerate 마이그레이션**으로.
 
 ---
@@ -455,11 +458,15 @@ repositories ─┬─ commits ─┬─ commit_files ─ files
 | Method | Path | 담당 | 요청 | 응답 |
 | --- | --- | --- | --- | --- |
 | GET | `/health` | — | — | 헬스체크 |
-| POST | `/api/blame/context` | 신예진 | `{filePath, line, repoPath}` | `{explanation, commitHash, author, date, ...}` |
+| POST | `/api/blame/context` | 신예진 | `{filePath, line, repoPath, ...}` | `{explanation, commitHash, author, date, lineIssues, ...}` |
+| POST | `/api/blame/reason` | 신예진 | `{filePath, hash, commit, followups, ...}` | `{reason}` (라인 이력 항목 펼침 — 커밋별 사유) |
 | POST | `/api/blame/ask` | 신예진 | `{filePath, line, repoPath, question}` | `{answer}` |
-| POST | `/api/timeline/summary` | 박성태 | `{filePath, repoPath}` | `{summary, milestones:[{date, description}]}` |
-| POST | `/api/trace/requirement` | 전준민 | `{filePath, line, repoPath}` | `{documents:[{documentId, name, page?, excerpt?, downloadUrl, matchType?, confidence?}]}` |
-| POST | `/api/onboarding/backfill` | — | `{repoPath}` | 레포 전체 커밋↔Issue 백필 |
+| POST | `/api/timeline/summary` | 박성태 | `{filePath, repoPath, commits}` | 캐시 적중 → JSON `{summary, milestones}` / 미스 → **SSE** `data:{delta}` … `data:{done, summary, milestones}` |
+| POST | `/api/trace/requirement` | 전준민 | `{filePath, repoPath, commits, branch, remoteUrl}` | `{documents:[{title, url, matchType, confidence?, issueNumber?, state?, labels, assignee?, attachments[], comments[]}]}` |
+| POST | `/api/onboarding/backfill` | — | `{repoPath, since?, limit?}` | 레포 전체 공유 백본 백필 |
+| POST | `/api/v1/project/initialize` | 박성태 | `{project_path}` | `{status:"READY"}` (lazy ACK, 일괄 분석 없음) |
+| GET | `/api/v1/project/timeline` | 박성태 | `?project_path=` | 저장된 파일별 타임라인 일괄 (Bedrock 0회) |
+| GET | `/api/v1/project/status` | 박성태 | `?project_path=` | `{analyzed_files, status}` |
 
 ---
 
@@ -492,8 +499,11 @@ npm run watch                              # 다른 터미널: TS 감시 빌드
 | `DATABASE_URL` | PostgreSQL 접속 | localhost 기본값 |
 | `AWS_ACCESS_KEY_ID/SECRET/SESSION_TOKEN` | Bedrock 자격증명 | `~/.aws` 폴백 |
 | `BEDROCK_MODEL_ID` | LLM 모델 ID | 기본 Claude 3.5 Sonnet |
-| `GITHUB_TOKEN` | GitHub PR·Issue·첨부 조회 | PR/Issue 연동 생략 |
-| `GITLAB_TOKEN` | GitLab MR 조회 (계획) | MR 연동 생략 |
+| `GITHUB_TOKEN` | GitHub PR·Issue·첨부·코멘트 조회 (블레임·역추적) | PR/Issue 연동 생략 |
+| `GITLAB_TOKEN` | GitLab MR→Issue 조회 (블레임 일부) | MR 연동 생략 |
+| `BEDROCK_KNOWLEDGE_BASE_ID` | 역추적 semantic 검색용 KB ID | RAG 생략 (semantic 빈 결과) |
+| `BEDROCK_KB_MAX_RESULTS` | KB 조회 결과 수 | 기본 4 |
+| `DOC_INDEX_S3_BUCKET` / `DOC_INDEX_S3_PREFIX` | 온보딩 문서 KB 인덱싱용 S3 위치 | 인덱싱 no-op |
 | `CODEWHY_TEAM_MAP` | 작성자→팀 매핑 JSON 경로 | team 칸 생략 |
 | `CODEWHY_ATTACHMENT_DOMAINS` | 첨부로 인정할 외부 도메인 화이트리스트 (쉼표 구분, 예: `notion.so,confluence.atlassian.com`) | 확장자/사용자업로드 휴리스틱만 사용 |
 
@@ -510,13 +520,12 @@ alembic revision --autogenerate -m "..."  # 스키마 변경 시
 
 ## 10. TODO 리스트
 
-### 🔴 블로커 — 결정/정리 필요
+### ✅ 블로커 해소 — 역추적 아키텍처 갈래 결정 (2026-06)
 
-- [ ] **역추적 아키텍처 갈래 결정 (문서 ↔ 코드 불일치)**
-  - 현상: §1·§6·§7에 적힌 "GitHub Issue 첨부 실시간 조회" 방향과, 실제 코드(`features/traceability/`가 `documents`/`document_links` 테이블에 의존)가 정반대.
-  - 선택지 A: 역추적을 블레임처럼 GitHub Issue 첨부 조회로 전환 → `_by_issue` matchType 신설, `documents`/`document_links`/`features/documents/`/`backfill._link_passages` 삭제, 응답 스키마(`name`/`downloadUrl` → `title`/`url`)도 동시 조정.
-  - 선택지 B: 현 Document 저장소 기반을 정식 방안으로 유지 → §1·§6·§7 본문을 그에 맞춰 보정하고, "GitHub Issue 전환" 결정을 철회.
-  - 어느 쪽을 택하든 한 번에 결정해야 §1, §6 역추적, §7, §10이 다시 일관됨.
+- [x] **역추적을 GitHub Issue 체인으로 전환 (선택지 A 채택·구현 완료)**
+  - 역추적이 블레임과 동일한 `commit → PR → Issue` 체인을 사용. matchType `issue`/`ticket`/`semantic` 신설.
+  - `documents`/`document_links` 테이블·ORM 제거, `commit_issues` 영구 캐시 신설, 응답 스키마 `title`/`url` 기반으로 전환.
+  - `features/documents/` 데드코드 폴더 삭제 완료 (2026-06-20).
 
 ---
 
@@ -537,12 +546,10 @@ alembic revision --autogenerate -m "..."  # 스키마 변경 시
 
 #### 🟡 P1 — 품질·기능 공백
 
-- [ ] **'라인 수정 이력' 이슈 배지 → 실제 이슈 이동 링크 연결 (이슈 기능 개발 후)**
-  - 현상: 사이드바 하단 '라인 수정 이력' 각 커밋 행에 '이슈 N' 배지를 표시(커밋 메시지 `#N` 개수 기준, GitHub API 0회). 배지 클릭 시 지금은 임시 안내(`onOpenIssueTodo` → `showInformationMessage`)만 뜨고 실제 이동은 없음 — 이슈 기능이 개발 중이라 이동 대상이 미정.
-  - 진행 시 범위:
-    1. 백엔드: 커밋 메시지의 `#N`을 GitHub/GitLab 이슈 URL 로 해석. 블레임은 이미 `core/vcs.py::find_issues_from_commit_message`로 `Issue`(번호·URL) 객체를 보유하므로 재사용 가능. `schemas.py::LineHistoryEntry`에 `issueUrl`(단건) 또는 `issueRefs:[{number,url}]`(다건) 필드 추가 → `service.py::_build_line_history`에서 채움.
-    2. 프론트: `sidebar.ts::renderHistory`의 배지 `data-action`을 임시 `openIssueTodo` → 기존 `openIssue`(+`payload.url`)로 전환. extension 측은 이미 있는 `onOpenIssue`(→`vscode.env.openExternal`) 재사용 → 임시 `onOpenIssueTodo` 핸들러 제거.
-  - 관련 위치: 프론트 `src/features/contextBlame/sidebar.ts`(renderHistory 배지·`openIssueTodo` 분기·`handleMessage`), `src/features/contextBlame/view.ts`(`onOpenIssueTodo`) / 백엔드 `backend/app/features/blame/service.py::_build_line_history` + `schemas.py::LineHistoryEntry`.
+- [x] **'라인 수정 이력' 이슈 배지 → 실제 이슈 이동 링크 연결** (#24/#33/#46)
+  - 사이드바 '라인 수정 이력' 각 행에 참조 이슈 수 배지(`issueCount`)와 실제 이동 링크(`issueUrl`) 연결 완료.
+  - 커밋별 사유 펼침(`POST /api/blame/reason`) 추가 — `/context`와 같은 `(file_id, commit_id)` 캐시 공유.
+  - 커밋↔이슈 매핑은 역추적과 같은 `commit_issues` 백본을 공유.
 
 - [x] **ask_followup 매 질문마다 전부 재계산** (이미 적용됨)
   - `service.py`의 `_CONTEXT_CACHE`(LRU 100건)로 `analyze_blame`이 만든 context를 `ask_followup`이 재사용. 캐시 미스 시에만 재빌드.
@@ -611,8 +618,9 @@ alembic revision --autogenerate -m "..."  # 스키마 변경 시
 
 ### 🟢 선택 — 비용/성능 최적화
 
-- [ ] 역추적 시맨틱 폴백 결과 캐시 (blame처럼 file_id/commit_id 키)
-- [ ] 타임라인 map 단계 Bedrock 호출 병렬화 (LangGraph `Send()` API)
+- [ ] 역추적 시맨틱(KB) 결과 캐시 (`commit_issues`처럼 영구 캐시 검토)
+- [x] ~~타임라인 map 단계 병렬화~~ — map-reduce 폐지·스트리밍 단일 호출 전환으로 무의미해짐
+- [ ] `langgraph` 의존성 정리 — `requirements.txt`에 남아 있으나 현재 코드 미사용
 - [x] **diff 토큰 관리 전략 통일 (블레임 측)** (2026-06-07)
   - `_truncate_diff`가 hunk 헤더(`@@ ... @@`) 우선 보존 — 통째로 살릴 수 있는 hunk 는 살리고, 잘린 hunk 들의 헤더만 `[잘린 hunks — 헤더만 보존]` 블록으로 끝에 모아 LLM 이 어느 영역이 잘렸는지 인지하게 함. patch 가 아니면 head+tail 폴백.
   - 타임라인 청크 전략 정렬은 별도 plan(타임라인 map 청크 사이즈 정책) 후속.
@@ -621,21 +629,15 @@ alembic revision --autogenerate -m "..."  # 스키마 변경 시
 
 ### 🔧 인프라·보안·배포
 
-- [ ] **공통 커밋 분류기 추출 (블레임/타임라인 공유)**
-  - 신규 파일: `backend/app/core/commit_classifier.py`
-  - 내용: `_classify_commit`(정규식 `^(\w+)(?:\[([^\]]+)\])?:\s*(.+)$`), `SKIP_TYPES = {"test", "chore", "docs"}`
-  - 현재 위치: `backend/app/features/timeline/graph.py` 내부 — 블레임이 import 불가
-  - 사용처: 타임라인 `compute_commit_set_hash`(별도 plan), 블레임 `analyze_blame` 노이즈 우회(§10 P1)
-  - 효과: §6 공통 처리 원칙 #2 정렬
+- [x] **공통 커밋 분류기 추출 (블레임/타임라인 공유)** — 완료
+  - `backend/app/core/commit_classifier.py` 신설: `classify_commit`(정규식 `^(\w+)(?:\[([^\]]+)\])?:\s*(.+)$`), `SKIP_TYPES = {"test","chore","docs"}`, `filter_meaningful`
+  - 사용처: 타임라인 `compute_commit_set_hash`·`filter_meaningful`, 블레임 `analyze_blame` 노이즈 우회
+  - 효과: §6 공통 처리 원칙 #2 정렬 완료
 
-- [ ] **`documents` / `document_links` 테이블 및 관련 코드 삭제 (결정만 됨, 미실행)**
-  - 전제: §10 블로커의 "역추적 아키텍처 갈래 결정"에서 선택지 A 채택 시에만 진행. 선택지 B면 이 항목은 폐기.
-  - ORM: `db/models.py`에서 `Document`/`DocumentLink` 모델 제거 — 현재 [models.py:178-229]에 잔존
-  - 라우터: `features/documents/` 폴더 전체 삭제, `main.py:55-59`의 `include_router(documents_router, ...)` 제거
-  - 백필: `features/onboarding/backfill.py::_link_passages`(99-135행)와 그 호출부 정리
-  - 역추적 서비스: `features/traceability/service.py`의 `_by_ticket`/`_by_backfill`(Document/DocumentLink 의존) 재설계
-  - 마이그레이션: Alembic revision 생성 (`DROP TABLE documents, document_links`)
-  - 환경변수: `DOCUMENTS_DIR` 참조 제거
+- [x] **`documents` / `document_links` 데드코드 삭제 — 완료 (2026-06-20)**
+  - `db/models.py`의 `Document`/`DocumentLink` ORM 제거, 역추적 서비스 GitHub Issue 체인(`commit_issues`)으로 재설계, `backfill`의 `_link_passages` 제거(공유 백본 upsert만 수행), `main.py`의 `documents_router` 미연결.
+  - `features/documents/` 폴더(라우터 `/search`·`/download` + service/schemas) 삭제 — `python -c "import app.main"` 정상 확인.
+  - 남은 점검: `config.py`의 `DOCUMENTS_DIR`/`get_documents_dir`·`doc_index`(KB 인덱싱) 등 업로드 문서 경로 참조가 더 필요한지 확인 후 정리.
 - [ ] CORS `allow_origins=["*"]` → 배포 시 확장 origin으로 제한
 - [ ] 에러 응답 표준화 (현재 기능별 `HTTPException(500, f"...: {e}")` 패턴)
 - [ ] 백엔드 단위 테스트 추가
@@ -663,14 +665,15 @@ alembic revision --autogenerate -m "..."  # 스키마 변경 시
 - [ ] `service.py`의 프롬프트 톤 조정
 
 #### 박성태 (Timeline Summary)
-- [x] 마일스톤 타임라인 시각화 (Webview) — `src/features/timelineSummary/view.ts`에 세로선/날짜 칩/설명 카드 구현됨
-- [x] `JSON 파싱 실패 시 폴백 처리` — `features/timeline/graph.py::apply_fallback`(LLM 원본 앞 300자 + 최근 커밋 5개), `_fallback_summary`(Bedrock 미연동) 2단 폴백 구현됨
-- [ ] map 단계 Bedrock 호출 병렬화 (LangGraph `Send()` API) — 현재 순차 실행, `graph.py` 주석에도 명시
+- [x] 마일스톤 타임라인 시각화 + 스트리밍 토큰 실시간 표시 — `src/features/timelineSummary/`(렌더링은 command 내부)
+- [x] SSE 스트리밍 전환 — `ai/timeline_file_graph.py::stream_file_summary`(async generator), 라우터 `text/event-stream`
+- [x] JSON 파싱 실패 폴백 — `parse_ai_response`가 원본 텍스트를 summary로 폴백
+- [x] 프로젝트 일괄 조회 — `GET /api/v1/project/timeline`(DB만, Bedrock 0회)
 
 #### 전준민 (Requirement Trace)
-- [ ] **선결**: §10 블로커의 "역추적 아키텍처 갈래 결정" — 선택지 A(GitHub Issue 전환) 시 아래 두 항목은 그 위에서 진행해야 의미가 있음
-- [ ] GitHub Issue 첨부 파일 목록을 UI에 보여주는 Webview 구현 (선택지 A 채택 시)
-- [~] matchType별 신뢰도 표시 UI — `src/features/requirementTrace/view.ts`의 QuickPick에 배지+% 부분 구현. Webview 상세 뷰로의 확장만 남음
+- [x] **선결 해소**: 역추적 GitHub Issue 체인 전환 완료 (선택지 A)
+- [x] GitHub Issue 첨부·코멘트·이벤트를 UI에 표시 — `AttachmentMatch`/`CommentMatch` 스키마 + 이슈 상세 펼침(#46)
+- [~] matchType별 신뢰도 표시 UI — `src/features/requirementTrace/command.ts`(렌더링 통합)에 배지+% 표시. 상세 뷰 다듬기만 남음
 - [ ] **`backendUrl` 설정이 역추적 패널에 즉시 반영되지 않음**
   - 현상: `command.ts`가 `codewhy.backendUrl`을 읽어 webview HTML에 문자열로 구워 넣음(`const BACKEND = '${backendUrl}'`, [command.ts:149]). 블레임·타임라인은 매 요청마다 `createHttpClient()`로 다시 읽어 즉시 반영되는 반면, 역추적은 **이미 열린 패널이 옛 URL을 그대로 사용**하고 명령을 다시 실행해 패널을 새로 열어야 새 값이 적용됨.
   - 개선: backendUrl을 HTML에 굽지 말고 `panel.webview.postMessage`로 전달하거나, fetch를 확장(extension) 측에서 대행(`createHttpClient` 경유)하도록 변경 → 다른 두 기능과 "항상 최신 설정값" 동작 통일.
