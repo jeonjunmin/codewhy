@@ -728,19 +728,18 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     /* ── 이슈 페인 (요구사항 역추적) ─────────────────────────────── */
     #is-list-view { display: flex; flex-direction: column; gap: 11px; }
 
-    /* 목록 헤더: '요구사항 추적' + 파일 칩 */
+    /* 목록 헤더: 파일 칩 (파일명을 제목 자리에 크게 노출) */
     .is-l-head { display: flex; flex-direction: column; gap: 8px; }
-    .is-l-head__title { color: var(--fg); font-size: 14px; font-weight: 700; letter-spacing: -0.01em; }
     .is-l-file {
-        display: inline-flex; align-items: center; gap: 6px; align-self: flex-start;
-        color: var(--fg-dim); font-size: 12px;
+        display: inline-flex; align-items: center; gap: 7px; align-self: flex-start;
+        color: var(--fg-dim); font-size: 14px;
     }
     .is-l-file__kind {
-        width: 16px; height: 16px; flex-shrink: 0;
+        width: 18px; height: 18px; flex-shrink: 0;
         display: inline-flex; align-items: center; justify-content: center;
-        background: #6D28D9; color: #fff; border-radius: 3px; font-size: 10px; font-weight: 700;
+        background: #6D28D9; color: #fff; border-radius: 3px; font-size: 11px; font-weight: 700;
     }
-    .is-l-file .mono { color: var(--fg); }
+    .is-l-file .mono { color: var(--fg); font-weight: 600; }
 
     /* 검색 박스 */
     .is-search {
@@ -792,13 +791,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .is-item__state.draft { color: var(--accent-violet); }
     .is-item__state.draft::before { background: var(--accent-violet); }
     .is-item__num { color: var(--fg-mute); font-size: 11px; font-weight: 600; }
-    .is-item__badge {
-        flex-shrink: 0; font-size: 10.5px; padding: 2px 7px; border-radius: 6px;
-        border: 1px solid var(--line);
-    }
-    .is-item__head .is-item__badge { margin-left: auto; }
-    .is-item__badge.ok { color: var(--accent-cyan); border-color: rgba(103,232,249,0.4); }
-    .is-item__badge.guess { color: var(--fg-mute); }
     .is-item__title {
         color: var(--fg); font-size: 13px; font-weight: 600; line-height: 1.4;
         display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
@@ -889,17 +881,22 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .is-d-meta dt { color: var(--fg-mute); }
     .is-d-meta dd { margin: 0; color: var(--fg-dim); }
     .is-d-meta dd strong { color: var(--fg); font-weight: 600; }
-    .is-d-meta .avatar {
-        display: inline-flex; align-items: center; justify-content: center;
-        width: 16px; height: 16px; border-radius: 50%; background: var(--accent-violet);
-        color: #18181B; font-size: 9px; font-weight: 700; margin-right: 5px; vertical-align: -3px;
-    }
+    .is-d-meta dd .is-avatar { margin-right: 5px; vertical-align: -4px; }
 
     .is-d-body { color: var(--fg-dim); font-size: 12.5px; line-height: 1.7; word-break: break-word; }
     .is-d-body code { background: var(--code-bg); color: var(--code-fg); padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
+    .is-d-quote {
+        margin: 9px 0; padding: 9px 13px; border-left: 2px solid var(--accent-violet);
+        background: var(--surface); border-radius: 0 8px 8px 0; color: var(--fg-dim); font-size: 12px; line-height: 1.65;
+    }
 
-    .is-d-sec-title { color: var(--fg-mute); font-size: 11px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
-    .is-d-atts { display: flex; flex-direction: column; gap: 6px; margin-top: -4px; }
+    /* 섹션 헤더(첨부/활동) — 위에 구분선을 둬 본문과 또렷이 가른다. */
+    .is-d-sec-title {
+        margin-top: 5px; padding-top: 15px; border-top: 1px solid var(--line);
+        color: var(--fg); font-size: 12.5px; font-weight: 700; letter-spacing: -0.01em;
+        display: flex; align-items: center; gap: 6px;
+    }
+    .is-d-atts { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
     .is-d-att {
         display: flex; align-items: center; gap: 10px;
         padding: 9px 12px; background: var(--surface); border: 1px solid var(--line);
@@ -913,6 +910,29 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
     .is-d-att__name { color: var(--fg); font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .is-d-att__meta { color: var(--fg-mute); font-size: 10.5px; margin-top: 1px; }
+
+    /* ── 활동 타임라인 (코멘트 + 시스템 이벤트) ─────────────────── */
+    .is-d-feed { display: flex; flex-direction: column; gap: 12px; }
+    /* 시스템 이벤트 줄 — 작은 점 + 흐린 한 줄. */
+    .is-d-ev { display: flex; align-items: baseline; gap: 8px; padding-left: 2px; }
+    .is-d-ev__dot {
+        flex-shrink: 0; width: 5px; height: 5px; border-radius: 50%;
+        background: var(--line); transform: translateY(-2px);
+    }
+    .is-d-ev__txt { color: var(--fg-mute); font-size: 11.5px; line-height: 1.6; word-break: break-word; }
+    .is-d-ev__txt b { color: var(--fg-dim); font-weight: 600; }
+    .is-d-ev__txt code { background: var(--code-bg); color: var(--code-fg); padding: 0 4px; border-radius: 4px; font-size: 10.5px; }
+    .is-d-ev__date { color: var(--fg-mute); }
+    /* 사람 코멘트 카드 */
+    .is-cmt {
+        display: flex; flex-direction: column; gap: 7px;
+        padding: 11px 13px; background: var(--surface); border: 1px solid var(--line); border-radius: 9px;
+    }
+    .is-cmt__head { display: flex; align-items: center; gap: 7px; }
+    .is-cmt__name { color: var(--fg); font-size: 12px; font-weight: 600; }
+    .is-cmt__date { margin-left: auto; color: var(--fg-mute); font-size: 10.5px; }
+    .is-cmt__body { color: var(--fg-dim); font-size: 12.5px; line-height: 1.65; word-break: break-word; }
+    .is-cmt__body code { background: var(--code-bg); color: var(--code-fg); padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
 
     /* ── 로딩 스피너 ─────────────────────────────────────────────── */
     .spinner {
@@ -1005,7 +1025,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         <div id="is-body" class="body hidden">
             <div id="is-list-view">
                 <div class="is-l-head">
-                    <span class="is-l-head__title">요구사항 추적</span>
                     <span class="is-l-file"><span class="is-l-file__kind" id="is-l-kind">K</span><span class="mono" id="is-l-fname"></span></span>
                 </div>
                 <div class="is-search">
@@ -1168,6 +1187,26 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     function renderBold(t) {
         return decorate(t).replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
     }
+    // 이슈 본문 → HTML. 연속된 "> …" 줄은 인용 박스(.is-d-quote)로 묶고,
+    // 나머지 줄은 renderBold(=decorate+굵게)로 그린다. (마크다운 최소 지원)
+    function renderIssueBodyHTML(text) {
+        const lines = String(text).split('\\n');   // 실제 개행으로 분리
+        let html = '';
+        let quote = [];
+        const flush = () => {
+            if (quote.length) {
+                html += '<blockquote class="is-d-quote">' + quote.map(renderBold).join('<br/>') + '</blockquote>';
+                quote = [];
+            }
+        };
+        lines.forEach(ln => {
+            const m = /^\\s*>\\s?(.*)$/.exec(ln);
+            if (m) { quote.push(m[1]); }
+            else { flush(); html += ln.trim() ? (renderBold(ln) + '<br/>') : '<br/>'; }
+        });
+        flush();
+        return html;
+    }
 
     // ─────────────────── 이슈 렌더 ───────────────────
     function isShow(which) {
@@ -1180,11 +1219,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         if (message) { document.getElementById('is-empty').innerHTML = decorate(message); }
         isShow('empty');
     }
-    const IS_BADGE = {
-        issue:    { label: '✓ Issue 연결', cls: 'ok' },
-        ticket:   { label: '✓ 티켓 정확', cls: 'ok' },
-        semantic: { label: '≈ 추정(검색)', cls: 'guess' },
-    };
     // 이슈 탭 상태 — 목록과 상세를 한 데이터(isDocs)로 공유하고 isIndex 로 상세 대상을 가린다.
     // isQuery(검색어)·isFilter(상태 탭)는 목록 뷰 상태로, 데이터 재요청 없이 클라이언트에서만 거른다.
     let isDocs = [];
@@ -1337,6 +1371,44 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         const m = String(s).slice(0, 10);
         return /^\\d{4}-\\d{2}-\\d{2}$/.test(m) ? m : String(s);
     }
+    // 느슨한 날짜 파싱 — ISO8601 / "YYYY-MM-DD" / 유닉스초. 실패 시 null.
+    function isParseDate(s) {
+        if (!s) { return null; }
+        if (/^\\d{9,11}$/.test(String(s))) { return new Date(Number(s) * 1000); }
+        const d = new Date(s);
+        return isNaN(d.getTime()) ? null : d;
+    }
+    // 코멘트/이벤트 날짜 — "M월 D일". 파싱 실패 시 원본 앞 10자.
+    function isMonthDay(s) {
+        const d = isParseDate(s);
+        return d ? ((d.getMonth() + 1) + '월 ' + d.getDate() + '일') : isDateOnly(s);
+    }
+    // 메타 '업데이트' 칸 — "방금 / N분 전 / N시간 전 …" 상대 시각. 실패 시 isDateOnly.
+    function isRelative(s) {
+        const d = isParseDate(s);
+        if (!d) { return isDateOnly(s); }
+        const sec = Math.floor((Date.now() - d.getTime()) / 1000);
+        if (sec < 60) { return '방금'; }
+        const min = Math.floor(sec / 60);
+        if (min < 60) { return min + '분 전'; }
+        const hour = Math.floor(min / 60);
+        if (hour < 24) { return hour + '시간 전'; }
+        const day = Math.floor(hour / 24);
+        if (day < 7) { return day + '일 전'; }
+        const week = Math.floor(day / 7);
+        if (week < 5) { return week + '주 전'; }
+        const month = Math.floor(day / 30);
+        if (month < 12) { return month + '개월 전'; }
+        return Math.floor(day / 365) + '년 전';
+    }
+    // 한글 조사 — 받침 있으면 withFinal, 없으면 withoutFinal. (시스템 이벤트 문장 조립용)
+    function isJosa(word, withFinal, withoutFinal) {
+        const ch = String(word || '').trim().slice(-1);
+        if (!ch) { return withoutFinal; }
+        const code = ch.charCodeAt(0);
+        if (code < 0xac00 || code > 0xd7a3) { return withoutFinal; }
+        return (code - 0xac00) % 28 !== 0 ? withFinal : withoutFinal;
+    }
     function openIssueDetail(i) {
         if (!isDocs.length) { return; }
         isIndex = Math.max(0, Math.min(i, isDocs.length - 1));
@@ -1376,9 +1448,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         const bucket = issueBucket(d);
         const stateCls = bucket;
         const stateLabel = (IS_STATE[bucket] || IS_STATE.open).label;
-        const type = d.matchType || 'semantic';
-        const badge = IS_BADGE[type] || IS_BADGE.semantic;
-        const pct = (d.confidence != null) ? ' · ' + Math.round(d.confidence * 100) + '%' : '';
 
         // 네비게이션 (목록으로 / n·총건수)
         const nav = document.createElement('div');
@@ -1415,7 +1484,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         title.textContent = d.title || '(제목 없음)';
         wrap.appendChild(title);
 
-        // 라벨 칩 + 매치 신뢰도 배지
+        // 라벨 칩 (매치 신뢰도 배지는 노출하지 않는다)
         const labelWrap = document.createElement('div');
         labelWrap.className = 'is-d-labels';
         (d.labels || []).forEach(name => {
@@ -1424,29 +1493,31 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             chip.textContent = (String(name).charAt(0) === '#' ? '' : '#') + name;
             labelWrap.appendChild(chip);
         });
-        const mb = document.createElement('span');
-        mb.className = 'is-item__badge ' + badge.cls;
-        mb.textContent = badge.label + pct;
-        labelWrap.appendChild(mb);
-        wrap.appendChild(labelWrap);
+        if (labelWrap.childNodes.length) { wrap.appendChild(labelWrap); }
 
-        // 메타 (담당자 / 연결된 코드 / 개설 / 업데이트)
+        // 메타 (담당자 / 개설 / 업데이트) — '연결된 코드' 행은 노출하지 않는다.
         const meta = document.createElement('dl');
         meta.className = 'is-d-meta';
         const assignee = d.assignee || '';
-        appendMetaRow(meta, '담당자', assignee ? ('@' + assignee) : '미지정', !!assignee);
-        appendMetaRow(meta, '연결된 코드', isFileName || ('L' + (isLine || '?')), true);
+        // 담당자: 아바타 + 이름 (미지정이면 평문). appendMetaRow 와 달리 아바타를 끼운다.
+        const dtA = document.createElement('dt'); dtA.textContent = '담당자';
+        const ddA = document.createElement('dd');
+        if (assignee) {
+            ddA.appendChild(makeAvatar(assignee));
+            const nm = document.createElement('strong'); nm.textContent = assignee; ddA.appendChild(nm);
+        } else { ddA.textContent = '미지정'; }
+        meta.appendChild(dtA); meta.appendChild(ddA);
         const created = isDateOnly(d.createdAt);
-        const updated = isDateOnly(d.updatedAt);
+        const updated = isRelative(d.updatedAt);
         if (created) { appendMetaRow(meta, '개설', created, false); }
         if (updated) { appendMetaRow(meta, '업데이트', updated, false); }
         wrap.appendChild(meta);
 
-        // 본문
+        // 본문 — 마크다운 인용(> …)은 인용 박스로, 나머지는 decorate 로 그린다.
         if (d.body) {
             const body = document.createElement('div');
             body.className = 'is-d-body';
-            body.innerHTML = decorate(d.body);   // decorate 가 먼저 escape → 안전
+            body.innerHTML = renderIssueBodyHTML(d.body);
             wrap.appendChild(body);
         }
 
@@ -1462,6 +1533,116 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             atts.forEach(a => list.appendChild(renderAttachment(a)));
             wrap.appendChild(list);
         }
+
+        // 활동 타임라인 (코멘트 + 시스템 이벤트)
+        renderComments(wrap, d.comments || []);
+    }
+
+    // ── 활동 타임라인 (코멘트 + 시스템 이벤트) ─────────────────────────
+    // 시간순 list 를 훑으며: 사람 코멘트는 카드로, 같은 행위자의 연속 '메타' 이벤트
+    // (라벨/담당자/열고닫기)는 한 문장으로 묶어 한 줄로, 커밋/참조/노트는 단독 줄로 그린다.
+    const IS_META_EVENTS = { labeled: 1, assigned: 1, closed: 1, reopened: 1 };
+    function renderComments(wrap, list) {
+        if (!list || !list.length) { return; }
+        const sec = document.createElement('div');
+        sec.className = 'is-d-sec-title';
+        sec.textContent = '💬 활동 ' + list.length;
+        wrap.appendChild(sec);
+
+        const feed = document.createElement('div');
+        feed.className = 'is-d-feed';
+        let i = 0;
+        while (i < list.length) {
+            const it = list[i];
+            if (it.kind === 'comment') { feed.appendChild(renderCommentCard(it)); i++; continue; }
+            if (IS_META_EVENTS[it.event]) {
+                // 같은 행위자의 연속 메타 이벤트를 한 묶음으로 모은다.
+                const group = [it];
+                let j = i + 1;
+                while (j < list.length && list[j].kind === 'event' && IS_META_EVENTS[list[j].event]
+                       && (list[j].author || '') === (it.author || '')) {
+                    group.push(list[j]); j++;
+                }
+                feed.appendChild(renderEventLine(it.author, describeEventGroup(group), it.createdAt));
+                i = j;
+                continue;
+            }
+            // 커밋/참조/노트 — 단독 줄.
+            if (it.event === 'committed' || it.event === 'referenced') {
+                feed.appendChild(renderCommitLine(it));
+            } else {
+                feed.appendChild(renderEventLine(it.author, (it.body || '').trim(), it.createdAt));
+            }
+            i++;
+        }
+        wrap.appendChild(feed);
+    }
+
+    // 묶인 메타 이벤트 → 한국어 한 문장. 예: "spec, P1 라벨을 추가하고 홍길동님을 담당자로 지정"
+    // (행위자 "…님이" 접두는 renderEventLine 이 붙인다.)
+    function describeEventGroup(group) {
+        const labels = group.filter(e => e.event === 'labeled').map(e => e.label).filter(Boolean);
+        const assignees = group.filter(e => e.event === 'assigned').map(e => e.assignee).filter(Boolean);
+        const phrases = [];
+        if (labels.length) { phrases.push(labels.join(', ') + ' 라벨을 추가'); }
+        if (assignees.length) { phrases.push(assignees.join(', ') + isJosa(assignees[assignees.length - 1], '을', '를') + ' 담당자로 지정'); }
+        if (group.some(e => e.event === 'closed')) { phrases.push('이슈를 닫음'); }
+        if (group.some(e => e.event === 'reopened')) { phrases.push('이슈를 다시 엶'); }
+        // 마지막 구절만 종결형, 앞 구절은 "…하고" 로 잇는다.
+        return phrases.map((p, k) => k < phrases.length - 1 ? p + '하고' : p).join(' ');
+    }
+
+    // 시스템 이벤트 한 줄 — 작은 점 + "{행위자}님이 {설명} · {날짜}".
+    function renderEventLine(author, text, date) {
+        const el = document.createElement('div');
+        el.className = 'is-d-ev';
+        el.innerHTML = '<span class="is-d-ev__dot"></span><span class="is-d-ev__txt"></span>';
+        const txt = el.querySelector('.is-d-ev__txt');
+        if (author) { const b = document.createElement('b'); b.textContent = author; txt.appendChild(b);
+            txt.appendChild(document.createTextNode('님이 ')); }
+        txt.appendChild(document.createTextNode(text || ''));
+        const dt = document.createElement('span'); dt.className = 'is-d-ev__date';
+        dt.textContent = ' · ' + isMonthDay(date); txt.appendChild(dt);
+        return el;
+    }
+
+    // 커밋/참조 이벤트 한 줄 — "{행위자}님이 {sha} — {커밋요약} · {날짜}".
+    function renderCommitLine(it) {
+        const el = document.createElement('div');
+        el.className = 'is-d-ev';
+        el.innerHTML = '<span class="is-d-ev__dot"></span><span class="is-d-ev__txt"></span>';
+        const txt = el.querySelector('.is-d-ev__txt');
+        if (it.author) { const b = document.createElement('b'); b.textContent = it.author; txt.appendChild(b);
+            txt.appendChild(document.createTextNode('님이 ')); }
+        const sha = (it.commitSha || '').slice(0, 6);
+        if (sha) { const c = document.createElement('code'); c.textContent = sha; txt.appendChild(c); }
+        if (it.commitSummary) { txt.appendChild(document.createTextNode(' — ' + it.commitSummary)); }
+        const dt = document.createElement('span'); dt.className = 'is-d-ev__date';
+        dt.textContent = ' · ' + isMonthDay(it.createdAt); txt.appendChild(dt);
+        return el;
+    }
+
+    // 사람 코멘트 카드 — 아바타 + 이름 + 날짜 / 본문 / 첨부.
+    function renderCommentCard(c) {
+        const author = c.author || '익명';
+        const el = document.createElement('div');
+        el.className = 'is-cmt';
+        const head = document.createElement('div');
+        head.className = 'is-cmt__head';
+        head.appendChild(makeAvatar(author));
+        const nm = document.createElement('span'); nm.className = 'is-cmt__name'; nm.textContent = author;
+        head.appendChild(nm);
+        const dt = document.createElement('span'); dt.className = 'is-cmt__date'; dt.textContent = isMonthDay(c.createdAt);
+        head.appendChild(dt);
+        el.appendChild(head);
+        if (c.body) {
+            const body = document.createElement('div');
+            body.className = 'is-cmt__body';
+            body.innerHTML = renderBold(c.body);
+            el.appendChild(body);
+        }
+        (c.attachments || []).forEach(a => el.appendChild(renderAttachment(a)));
+        return el;
     }
 
     // 커밋 이력이 없는 라인(미커밋 파일 등) — 깨져 보이는 메타 카드 대신 안내 문구만 깔끔히

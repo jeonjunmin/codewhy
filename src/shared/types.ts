@@ -221,6 +221,20 @@ export interface IssueAttachment {
     pageCount?: number | null;   // PDF 등 페이지 수(미상이면 null)
 }
 
+/** 이슈 활동 타임라인 한 항목 — 사람 코멘트 또는 시스템 이벤트. */
+export interface IssueComment {
+    kind: 'comment' | 'event';
+    author?: string | null;        // 작성자(comment) / 행위자(event)
+    createdAt?: string | null;     // ISO8601
+    body?: string | null;          // comment 본문 (gitlab system note 는 event 본문)
+    event?: string | null;         // labeled/assigned/committed/referenced/closed/reopened/note
+    label?: string | null;         // labeled 이벤트의 라벨명
+    assignee?: string | null;      // assigned 이벤트의 담당자
+    commitSha?: string | null;     // committed/referenced 이벤트의 커밋 해시
+    commitSummary?: string | null; // 커밋 메시지 첫 줄
+    attachments?: IssueAttachment[];
+}
+
 export interface DocumentMatch {
     title: string;           // Issue 제목
     url: string;             // Issue URL
@@ -238,6 +252,7 @@ export interface DocumentMatch {
     commentCount?: number | null;  // 코멘트 수
     body?: string | null;          // 이슈 본문 전문
     attachments?: IssueAttachment[];
+    comments?: IssueComment[];     // 활동 타임라인(코멘트+시스템 이벤트, 시간순)
 }
 
 export interface TraceResult {

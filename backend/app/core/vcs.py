@@ -72,6 +72,29 @@ class Attachment:
 
 
 @dataclass
+class Comment:
+    """이슈 활동 타임라인 한 항목 — 사람 코멘트와 시스템 이벤트를 한 모델로 담는다.
+
+    kind 으로 종류를 가른다:
+      - "comment": 사람이 단 코멘트. author/body/created_at/attachments 사용.
+      - "event"  : 시스템 이벤트. author(=행위자)/created_at + event 종류별 필드 사용.
+                   event 값: labeled / assigned / committed / referenced / closed / reopened
+    프론트는 같은 행위자의 연속 event 를 한 문장으로 묶어 그리므로(예: "…라벨을 추가하고
+    …담당자로 지정"), 백엔드는 한글 문장을 만들지 않고 구조화된 필드만 싣는다.
+    """
+    kind: str                                    # "comment" | "event"
+    author: str = ""                             # 작성자(comment) 또는 행위자(event)
+    created_at: str = ""                         # ISO8601
+    body: str = ""                               # comment 본문
+    event: str = ""                              # event 종류
+    label: str = ""                              # labeled 이벤트의 라벨명
+    assignee: str = ""                           # assigned 이벤트의 담당자
+    commit_sha: str = ""                         # committed/referenced 이벤트의 커밋 해시
+    commit_summary: str = ""                     # 커밋 메시지 첫 줄
+    attachments: list[Attachment] = field(default_factory=list)
+
+
+@dataclass
 class Issue:
     """커밋에 연결된 GitHub Issue 한 건."""
     number: int
@@ -86,6 +109,7 @@ class Issue:
     created_at: str = ""                         # ISO8601 (개설일)
     updated_at: str = ""                         # ISO8601 (최근 수정)
     comment_count: int = 0                       # 코멘트 수(본문은 미페치)
+    comments: list[Comment] = field(default_factory=list)  # 활동 타임라인(코멘트+이벤트)
 
 
 def detect_remote(repo_path: str) -> Remote | None:
@@ -255,11 +279,112 @@ def _github_pr_files(base: str, owner: str, repo: str, number: int) -> tuple[dic
     return tuple(collected)
 
 
-@lru_cache(maxsize=_VCS_CACHE_SIZE)
 def _github_issue(base: str, owner: str, repo: str, number: int) -> dict:
-    """Issue 본문/첨부 페치. 실패 시 빈 dict."""
+    """Issue 본문/메타(상태/라벨/담당자/코멘트수) 페치. 실패 시 빈 dict.
+
+    ⚠️ 캐시하지 않는다. 같은 응답에 본문(거의 불변)과 가변 메타(담당자/라벨/상태)가
+    함께 오는데, service.trace_file·fetch_issues_batch 는 메타가 '매 요청 최신'이라고
+    약속한다. 캐시하면 담당자를 나중에 지정해도 옛 결과가 고정돼 '미지정'으로 보인다.
+    """
     payload = _get_json(f"{base}/repos/{owner}/{repo}/issues/{number}", _github_headers())
     return payload if isinstance(payload, dict) else {}
+
+
+# 상세 화면 타임라인에 그릴 이벤트만 추린다(닫힘/재오픈/라벨/담당자/커밋).
+# 그 외(subscribed, mentioned, renamed 등)는 노이즈라 버린다.
+_GH_TIMELINE_EVENTS = {"commented", "labeled", "assigned", "committed", "referenced", "closed", "reopened"}
+
+
+def _github_issue_timeline(base: str, owner: str, repo: str, number: int) -> list:
+    """이슈 활동 타임라인(코멘트+이벤트)을 페치해 Comment 리스트로 반환.
+
+    GitHub Timeline API(/issues/{n}/timeline)는 코멘트와 시스템 이벤트를 시간순
+    한 배열로 준다 — 상세 화면의 활동 피드와 정확히 일치한다. 실패하면 빈 리스트.
+
+    ⚠️ 의도적으로 캐시하지 않는다. 코멘트는 본문/첨부(거의 불변, lru_cache 대상)와 달리
+    빈번히 추가되므로, 캐시하면 코멘트를 단 직후 재조회해도 옛 결과가 돌아온다(신선도 우선).
+    """
+    headers = {**_github_headers(), "Accept": "application/vnd.github+json"}
+    url = f"{base}/repos/{owner}/{repo}/issues/{number}/timeline?per_page=100"
+    try:
+        payload = _get_json(url, headers)
+    except (urllib.error.URLError, KeyError, ValueError, TimeoutError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    out: list[Comment] = []
+    for ev in payload:
+        if not isinstance(ev, dict):
+            continue
+        parsed = _github_timeline_entry(ev)
+        if parsed is None:
+            continue
+        # referenced 는 sha 만 주므로, 커밋 메시지 첫 줄을 가볍게 보강한다(이미지의 "… 반영" 줄).
+        if parsed.event == "referenced" and parsed.commit_sha and not parsed.commit_summary:
+            parsed.commit_summary = _github_commit_summary(base, owner, repo, parsed.commit_sha)
+        out.append(parsed)
+    return out
+
+
+def _github_timeline_entry(ev: dict) -> "Comment | None":
+    """Timeline payload 한 항목 → Comment. 관심 없는 이벤트면 None."""
+    kind = ev.get("event")
+    if kind not in _GH_TIMELINE_EVENTS:
+        return None
+
+    if kind == "commented":
+        body = ev.get("body") or ""
+        return Comment(
+            kind="comment",
+            author=_github_actor_login(ev.get("user")),
+            created_at=ev.get("created_at", ""),
+            body=body,
+            attachments=_extract_attachments(body),
+        )
+
+    actor = _github_actor_login(ev.get("actor"))
+    if kind == "labeled":
+        label = ev.get("label") or {}
+        return Comment(kind="event", event="labeled", author=actor,
+                       created_at=ev.get("created_at", ""),
+                       label=label.get("name", "") if isinstance(label, dict) else str(label))
+    if kind == "assigned":
+        return Comment(kind="event", event="assigned", author=actor,
+                       created_at=ev.get("created_at", ""),
+                       assignee=_github_actor_login(ev.get("assignee")))
+    if kind in ("closed", "reopened"):
+        return Comment(kind="event", event=kind, author=actor, created_at=ev.get("created_at", ""))
+    if kind == "committed":
+        # 'committed' 는 author/committer 가 git 신원(dict, login 없음), 메시지 전문을 준다.
+        author_meta = ev.get("author") or {}
+        message = ev.get("message") or ""
+        return Comment(kind="event", event="committed",
+                       author=author_meta.get("name", "") if isinstance(author_meta, dict) else "",
+                       created_at=author_meta.get("date", "") if isinstance(author_meta, dict) else "",
+                       commit_sha=ev.get("sha", ""), commit_summary=message.splitlines()[0] if message else "")
+    if kind == "referenced":
+        # 커밋이 이슈를 참조 — sha 만 있고 메시지는 없다(추가 페치 없이 sha 만 표기).
+        return Comment(kind="event", event="referenced", author=actor,
+                       created_at=ev.get("created_at", ""), commit_sha=ev.get("commit_id", ""))
+    return None
+
+
+def _github_actor_login(actor: object) -> str:
+    return actor.get("login", "") if isinstance(actor, dict) else ""
+
+
+@lru_cache(maxsize=_VCS_CACHE_SIZE)
+def _github_commit_summary(base: str, owner: str, repo: str, sha: str) -> str:
+    """커밋 메시지 첫 줄만 가볍게 페치(referenced 이벤트는 sha 만 줘서 보강용). 실패 시 ""."""
+    if not sha:
+        return ""
+    try:
+        payload = _get_json(f"{base}/repos/{owner}/{repo}/commits/{sha}", _github_headers())
+    except (urllib.error.URLError, KeyError, ValueError, TimeoutError):
+        return ""
+    commit = payload.get("commit") if isinstance(payload, dict) else None
+    message = commit.get("message", "") if isinstance(commit, dict) else ""
+    return message.splitlines()[0] if message else ""
 
 
 # ─── GitLab ─────────────────────────────────────────────────────────
@@ -382,6 +507,20 @@ def find_issues_from_commit_message(remote: Remote, commit_message: str) -> list
     return _fetch_issues(remote, numbers)
 
 
+def _pick_login(single: object, multi: object, key: str) -> str:
+    """담당자 1명을 고른다 — 단일 필드(assignee)가 비면 배열(assignees) 첫 명으로 폴백.
+
+    GitHub/GitLab 모두 담당자를 단일+배열 두 필드로 준다. 보통 단일에도 첫 명이
+    들어가지만, 멀티 지정 등으로 단일이 비는 케이스를 대비해 배열을 폴백으로 본다.
+    """
+    if isinstance(single, dict) and single.get(key):
+        return single[key]
+    for cand in (multi or []):
+        if isinstance(cand, dict) and cand.get(key):
+            return cand[key]
+    return ""
+
+
 def _issue_from_github(payload: dict, number: int) -> Issue:
     """GitHub Issue/Search payload → Issue. 상세 화면 메타까지 채운다."""
     body = payload.get("body") or ""
@@ -389,7 +528,6 @@ def _issue_from_github(payload: dict, number: int) -> Issue:
         (lab.get("name") if isinstance(lab, dict) else str(lab))
         for lab in (payload.get("labels") or [])
     ]
-    assignee = payload.get("assignee") or {}
     return Issue(
         number=number,
         title=payload.get("title", ""),
@@ -398,7 +536,7 @@ def _issue_from_github(payload: dict, number: int) -> Issue:
         attachments=_extract_attachments(body),
         state=payload.get("state", ""),
         labels=[l for l in labels if l],
-        assignee=assignee.get("login", "") if isinstance(assignee, dict) else "",
+        assignee=_pick_login(payload.get("assignee"), payload.get("assignees"), "login"),
         created_at=payload.get("created_at", ""),
         updated_at=payload.get("updated_at", ""),
         comment_count=int(payload.get("comments") or 0),
@@ -408,7 +546,6 @@ def _issue_from_github(payload: dict, number: int) -> Issue:
 def _issue_from_gitlab(payload: dict, iid: int) -> Issue:
     """GitLab Issue payload → Issue. 상세 화면 메타까지 채운다."""
     body = payload.get("description") or ""
-    assignee = payload.get("assignee") or {}
     return Issue(
         number=iid,
         title=payload.get("title", ""),
@@ -417,7 +554,7 @@ def _issue_from_gitlab(payload: dict, iid: int) -> Issue:
         attachments=_extract_attachments(body),
         state=payload.get("state", ""),
         labels=[str(l) for l in (payload.get("labels") or []) if l],
-        assignee=assignee.get("username", "") if isinstance(assignee, dict) else "",
+        assignee=_pick_login(payload.get("assignee"), payload.get("assignees"), "username"),
         created_at=payload.get("created_at", ""),
         updated_at=payload.get("updated_at", ""),
         comment_count=int(payload.get("user_notes_count") or 0),
@@ -433,23 +570,62 @@ def _fetch_issues(remote: Remote, numbers: list[int]) -> list[Issue]:
                 payload = _github_issue(remote.base, remote.owner, remote.repo, n)
                 if not payload:
                     continue
-                issues.append(_issue_from_github(payload, n))
+                issue = _issue_from_github(payload, n)
+                issue.comments = _github_issue_timeline(remote.base, remote.owner, remote.repo, n)
+                issues.append(issue)
             elif remote.host == "gitlab":
                 payload = _gitlab_issue(remote.base, remote.owner, remote.repo, n)
                 if not payload:
                     continue
-                issues.append(_issue_from_gitlab(payload, n))
+                issue = _issue_from_gitlab(payload, n)
+                issue.comments = _gitlab_issue_notes(remote.base, remote.owner, remote.repo, n)
+                issues.append(issue)
         except (urllib.error.URLError, KeyError, ValueError, TimeoutError):
             continue
     return issues
 
 
-@lru_cache(maxsize=_VCS_CACHE_SIZE)
 def _gitlab_issue(base: str, owner: str, repo: str, iid: int) -> dict:
-    """GitLab Issue 본문/첨부 페치. 실패 시 빈 dict."""
+    """GitLab Issue 본문/메타 페치. 실패 시 빈 dict.
+
+    ⚠️ _github_issue 와 같은 이유로 캐시하지 않는다 — 담당자/라벨/상태 메타 신선도 우선.
+    """
     project_id = urllib.parse.quote(f"{owner}/{repo}", safe="")
     payload = _get_json(f"{base}/projects/{project_id}/issues/{iid}", _gitlab_headers())
     return payload if isinstance(payload, dict) else {}
+
+
+def _gitlab_issue_notes(base: str, owner: str, repo: str, iid: int) -> list:
+    """GitLab Issue notes(코멘트+시스템 노트) → Comment 리스트(시간순). 실패 시 빈 리스트.
+
+    GitLab 은 라벨/담당자 변경도 system==True 인 note 로 남긴다(본문이 한글이 아닌
+    영어 평문). GitHub timeline 처럼 구조가 분해돼 있지 않으므로, 시스템 노트는
+    event="note" 로 두고 본문을 그대로 싣는다(프론트가 평문 한 줄로 그린다).
+
+    ⚠️ GitHub 타임라인과 같은 이유로 캐시하지 않는다 — 코멘트 신선도 우선.
+    """
+    project_id = urllib.parse.quote(f"{owner}/{repo}", safe="")
+    url = f"{base}/projects/{project_id}/issues/{iid}/notes?sort=asc&order_by=created_at&per_page=100"
+    try:
+        payload = _get_json(url, _gitlab_headers())
+    except (urllib.error.URLError, KeyError, ValueError, TimeoutError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    out: list[Comment] = []
+    for note in payload:
+        if not isinstance(note, dict):
+            continue
+        author = note.get("author") or {}
+        login = author.get("username", "") if isinstance(author, dict) else ""
+        body = note.get("body") or ""
+        if note.get("system"):
+            out.append(Comment(kind="event", event="note", author=login,
+                               created_at=note.get("created_at", ""), body=body))
+        else:
+            out.append(Comment(kind="comment", author=login, created_at=note.get("created_at", ""),
+                               body=body, attachments=_extract_attachments(body)))
+    return out
 
 
 def _extract_issue_numbers(text: str) -> list[int]:

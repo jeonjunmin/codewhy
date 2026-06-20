@@ -39,6 +39,25 @@ class AttachmentMatch(BaseModel):
     pageCount: int | None = None  # PDF 등 페이지 수(미상이면 None)
 
 
+class CommentMatch(BaseModel):
+    """이슈 활동 타임라인 한 항목(사람 코멘트 또는 시스템 이벤트).
+
+    프론트(src/shared/types.ts IssueComment)와 키가 일치해야 한다. kind 으로 분기:
+      - "comment": author/body/createdAt/attachments
+      - "event"  : author(행위자)/createdAt + event 종류별 필드
+    """
+    kind: Literal["comment", "event"] = "comment"
+    author: str = ""
+    createdAt: str | None = None
+    body: str | None = None
+    event: str | None = None          # labeled/assigned/committed/referenced/closed/reopened/note
+    label: str | None = None
+    assignee: str | None = None
+    commitSha: str | None = None
+    commitSummary: str | None = None
+    attachments: list[AttachmentMatch] = []
+
+
 class DocumentMatch(BaseModel):
     """역추적된 GitHub/GitLab Issue 한 건 (이슈 상세 화면의 단위).
 
@@ -61,6 +80,7 @@ class DocumentMatch(BaseModel):
     commentCount: int | None = None   # 코멘트 수
     body: str | None = None           # 이슈 본문 전문(상세 화면 표시용)
     attachments: list[AttachmentMatch] = []  # 첨부 문서 목록
+    comments: list[CommentMatch] = []        # 활동 타임라인(코멘트+시스템 이벤트, 시간순)
 
 
 class TraceResponse(BaseModel):
