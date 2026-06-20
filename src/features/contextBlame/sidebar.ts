@@ -38,7 +38,10 @@ type BlameStreamState =
 type IssueState =
     | { kind: 'loading' }
     | { kind: 'result'; line: number; fileName: string; result: TraceResult }
-    | { kind: 'empty'; message?: string };
+    | { kind: 'empty'; message?: string }
+    // 커밋 스코프(라인 수정 이력의 '이슈 N' 배지) — 파일 검색과 달리 한 커밋이 참조한 이슈만.
+    | { kind: 'commitLoading'; hash: string; subject: string }
+    | { kind: 'commitResult'; hash: string; subject: string; result: TraceResult; empty?: string };
 
 export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     private view?: vscode.WebviewView;
@@ -60,8 +63,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             onOpenCommit: (commitHash: string, repoPath: string) => void;
             onSwitchTab: (tab: string) => void;
             onOpenIssue: (url: string) => void;
-            // 이슈 기능 개발 전까지 '이슈 N' 배지 클릭의 임시 동작(안내). 실제 이동은 TODO.
+            // 라인 이슈 롤업 칩 등 URL 이 아직 해석되지 않은 항목 클릭의 임시 동작(안내).
             onOpenIssueTodo: () => void;
+            // '라인 수정 이력'의 '이슈 N' 배지 클릭 — 이슈 탭에서 그 커밋의 연관 이슈를 연다.
+            onOpenCommitIssues: (hash: string, filePath: string, repoPath: string) => void;
             // 라인 수정 이력 항목 펼침 — 그 커밋의 변경 사유를 지연 생성한다.
             onExpandHistory: (hash: string, filePath: string, repoPath: string) => void;
         },
@@ -265,6 +270,23 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         this.postIssue(this.lastIssue);
     }
 
+    // ── 커밋 스코프(라인 수정 이력의 '이슈 N' 배지) ─────────────────────────
+    /** 그 커밋의 이슈를 역추적하는 동안 — 배너+스피너를 보여준다. */
+    issueCommitLoading(hash: string, subject: string) {
+        this.lastIssue = { kind: 'commitLoading', hash, subject };
+        this.postIssue(this.lastIssue);
+    }
+    /** 역추적 결과 — 그 커밋이 참조한 이슈 목록을 커밋 배너와 함께 그린다. */
+    issueCommitResult(hash: string, subject: string, result: TraceResult) {
+        this.lastIssue = { kind: 'commitResult', hash, subject, result };
+        this.postIssue(this.lastIssue);
+    }
+    /** 결과 없음/실패 — 배너는 유지한 채 목록 자리에 안내 문구만. */
+    issueCommitEmpty(hash: string, subject: string, message?: string) {
+        this.lastIssue = { kind: 'commitResult', hash, subject, result: { documents: [] }, empty: message };
+        this.postIssue(this.lastIssue);
+    }
+
     private postIssue(s: IssueState) {
         const wv = this.view?.webview;
         if (!wv || !this.ready) { return; }
@@ -272,6 +294,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             wv.postMessage({ type: 'isLoading' });
         } else if (s.kind === 'result') {
             wv.postMessage({ type: 'isResult', payload: { line: s.line, fileName: s.fileName, documents: s.result.documents } });
+        } else if (s.kind === 'commitLoading') {
+            wv.postMessage({ type: 'isCommitLoading', payload: { hash: s.hash, subject: s.subject } });
+        } else if (s.kind === 'commitResult') {
+            wv.postMessage({ type: 'isCommitResult', payload: { hash: s.hash, subject: s.subject, documents: s.result.documents, empty: s.empty } });
         } else {
             wv.postMessage({ type: 'isEmpty', payload: { message: s.message } });
         }
@@ -306,9 +332,18 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             }
             return;
         }
-        // '라인 수정 이력' 이슈 배지 클릭 — 이슈 기능 미완이라 실제 URL 이 없어 임시 안내만 한다.
+        // 라인 이슈 롤업 칩 등 URL 미해석 항목 클릭 — 임시 안내만 한다.
         if (msg.type === 'openIssueTodo') {
             this.handlers.onOpenIssueTodo();
+            return;
+        }
+        // '라인 수정 이력'의 '이슈 N' 배지 클릭 — 현재 블레임 파일/레포 맥락으로 그 커밋의 이슈를 연다.
+        if (msg.type === 'openCommitIssues') {
+            const hash = msg.payload?.hash;
+            const ctx = this.last?.ctx ?? this.lastBlameStream?.ctx;
+            if (typeof hash === 'string' && hash && ctx) {
+                this.handlers.onOpenCommitIssues(hash, ctx.filePath, ctx.repoPath);
+            }
             return;
         }
         // 라인 수정 이력 항목 펼침 — 현재 표시 중인 블레임 파일/레포 맥락으로 그 커밋 사유를 요청.
@@ -741,6 +776,35 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
     .is-l-file .mono { color: var(--fg); font-weight: 600; }
 
+    /* 커밋 스코프 배너 — 파일 검색과 구분되는 보라색 콜아웃 톤. */
+    .is-cbanner {
+        display: flex; flex-direction: column; gap: 8px;
+        padding: 11px 13px; border-radius: 11px;
+        background: var(--callout-bg);
+        border: 1px solid var(--line-soft);
+    }
+    .is-cbanner__back {
+        align-self: flex-start;
+        background: none; border: none; padding: 0; cursor: pointer;
+        color: var(--fg-dim); font-family: inherit; font-size: 11.5px;
+    }
+    .is-cbanner__back:hover { color: var(--fg); }
+    .is-cbanner__label {
+        display: inline-flex; align-items: center; gap: 6px;
+        color: var(--accent-violet); font-size: 11.5px; font-weight: 600;
+    }
+    .is-cbanner__label span { display: inline-flex; }
+    .is-cbanner__commit {
+        display: flex; align-items: baseline; gap: 8px; min-width: 0;
+    }
+    .is-cbanner__hash {
+        flex-shrink: 0; color: var(--accent-violet); font-size: 12px; font-weight: 600;
+    }
+    .is-cbanner__subject {
+        color: var(--fg); font-size: 12.5px; min-width: 0;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
     /* 검색 박스 */
     .is-search {
         display: flex; align-items: center; gap: 8px;
@@ -1024,6 +1088,16 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         <div id="is-loading" class="empty hidden"><span class="spinner"></span> 연관 이슈 찾는 중…</div>
         <div id="is-body" class="body hidden">
             <div id="is-list-view">
+                <!-- 커밋 스코프 배너 — '라인 수정 이력'의 '이슈 N' 배지로 들어왔을 때만 노출.
+                     파일 검색(아래 파일 칩/검색/필터)과 시각적으로 또렷이 구분한다. -->
+                <div id="is-commit-banner" class="is-cbanner hidden">
+                    <button class="is-cbanner__back" data-action="issueBackToFile">‹ 파일 전체 이슈</button>
+                    <div class="is-cbanner__label"><span id="ico-is-cbanner"></span> 이 커밋이 참조한 이슈</div>
+                    <div class="is-cbanner__commit">
+                        <span class="is-cbanner__hash mono" id="is-cb-hash"></span>
+                        <span class="is-cbanner__subject" id="is-cb-subject"></span>
+                    </div>
+                </div>
                 <div class="is-l-head">
                     <span class="is-l-file"><span class="is-l-file__kind" id="is-l-kind">K</span><span class="mono" id="is-l-fname"></span></span>
                 </div>
@@ -1086,6 +1160,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         setIcon('ico-hero-spark', ICON.sparkBig);
         setIcon('ico-hero-check', ICON.check);
         setIcon('ico-is-search', ICON.search);
+        setIcon('ico-is-cbanner', ICON.issue);
     } catch (err) {
         vscode.postMessage({ type: 'webview-error', payload: '아이콘 초기화 실패: ' + String(err) });
     }
@@ -1118,6 +1193,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             case 'isLoading': isLoading(); break;
             case 'isResult': isResult(msg.payload); break;
             case 'isEmpty': isEmpty(msg.payload && msg.payload.message); break;
+            case 'isCommitLoading': isCommitLoading(msg.payload); break;
+            case 'isCommitResult': isCommitResult(msg.payload); break;
         }
     });
 
@@ -1227,6 +1304,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     let isIndex = 0;
     let isQuery = '';
     let isFilter = 'all';   // all | open | closed | draft
+    let isScope = 'file';   // 'file'(파일 검색) | 'commit'(라인 이력의 '이슈 N' 배지)
 
     // 이슈 상태를 필터 버킷으로 분류한다. 백엔드 state(open/closed)에 더해
     // 'draft'(초안)도 받을 수 있게 열어 둔다(미전송 시 초안 탭은 0건).
@@ -1238,6 +1316,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     function isResult(p) {
+        isScope = 'file';
+        setIssueScope('file');
         isDocs = p.documents || [];
         isLine = p.line || 0;
         isFileName = p.fileName || '';
@@ -1249,6 +1329,50 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         document.getElementById('is-l-fname').textContent = isFileName;
         document.getElementById('is-l-kind').textContent = fileKind(isFileName);
         renderIssueList();
+        showIssueList();
+        isShow('body');
+    }
+
+    // 이슈 페인 스코프 토글 — 커밋 스코프에선 파일 칩/검색/필터를 숨기고 커밋 배너만 노출한다.
+    function setIssueScope(scope) {
+        const commit = scope === 'commit';
+        document.getElementById('is-commit-banner').classList.toggle('hidden', !commit);
+        document.querySelector('.is-l-head').classList.toggle('hidden', commit);
+        document.querySelector('.is-search').classList.toggle('hidden', commit);
+        document.getElementById('is-filters').classList.toggle('hidden', commit);
+    }
+    function fillCommitBanner(hash, subject) {
+        document.getElementById('is-cb-hash').textContent = (hash || '').slice(0, 7);
+        document.getElementById('is-cb-subject').textContent = subject || '';
+    }
+    // 커밋 스코프 로딩 — 배너를 먼저 띄우고 목록 자리에 스피너만.
+    function isCommitLoading(p) {
+        isScope = 'commit';
+        fillCommitBanner(p.hash, p.subject);
+        setIssueScope('commit');
+        document.getElementById('is-list').innerHTML =
+            '<div class="empty"><span class="spinner"></span> 이 커밋의 연관 이슈 찾는 중…</div>';
+        document.getElementById('is-list-empty').classList.add('hidden');
+        showIssueList();
+        isShow('body');
+    }
+    // 커밋 스코프 결과 — 파일 검색과 같은 카드 렌더를 재사용하되, 헤더만 커밋 배너로 바꾼다.
+    function isCommitResult(p) {
+        isScope = 'commit';
+        isDocs = p.documents || [];
+        isIndex = 0;
+        fillCommitBanner(p.hash, p.subject);
+        setIssueScope('commit');
+        const list = document.getElementById('is-list');
+        const listEmpty = document.getElementById('is-list-empty');
+        list.innerHTML = '';
+        if (!isDocs.length) {
+            listEmpty.classList.remove('hidden');
+            listEmpty.innerHTML = decorate(p.empty || '이 커밋과 연관된 이슈가 없습니다.');
+        } else {
+            listEmpty.classList.add('hidden');
+            isDocs.forEach((d, i) => list.appendChild(renderIssueItem(d, i)));
+        }
         showIssueList();
         isShow('body');
     }
@@ -1287,7 +1411,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             list.appendChild(renderIssueItem(d, i));
             shown++;
         });
-        document.getElementById('is-list-empty').classList.toggle('hidden', shown > 0);
+        // 커밋-스코프 빈 결과가 덮어썼을 수 있으니 파일 검색 기본 문구로 복원한다.
+        const listEmpty = document.getElementById('is-list-empty');
+        listEmpty.textContent = '검색 결과가 없습니다.';
+        listEmpty.classList.toggle('hidden', shown > 0);
     }
     // 상태 버킷 → 표시 라벨/클래스 (열림/닫힘/초안).
     const IS_STATE = {
@@ -1803,9 +1930,9 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         el.dataset.action = 'openCommitHash';
         el.dataset.hash = h.hash || '';
         // 배지는 자체 data-action 을 가져, 클릭 위임의 closest() 가 행(openCommitHash) 대신
-        // 배지(openIssueTodo)를 먼저 잡는다 → 배지=이슈, 나머지 행=커밋 열기로 분기된다.
+        // 배지(openCommitIssues)를 먼저 잡는다 → 배지=이슈 탭 이동, 나머지 행=커밋 열기로 분기된다.
         const badge = (h.issueCount && h.issueCount > 0)
-            ? '<span class="hist-item__issues" data-action="openIssueTodo" title="연관 이슈 보기 (준비 중)"><span class="ico">' + ICON.issue + '</span>이슈 ' + h.issueCount + '</span>'
+            ? '<span class="hist-item__issues" data-action="openCommitIssues" title="이 커밋이 참조한 이슈 보기"><span class="ico">' + ICON.issue + '</span>이슈 ' + h.issueCount + '</span>'
             : '<span></span>';
         // 캐럿/이유 박스는 자체 data-action(expandHistory)을 가져, 클릭 위임의 closest() 가
         // 행(openCommitHash)보다 먼저 잡는다 → 캐럿=펼침, 배지=이슈, 나머지 행=커밋 열기로 분기.
@@ -1829,6 +1956,9 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         // 펼침/이유 요청이 자기 커밋 해시를 싣도록 캐럿·이유 박스에도 해시를 단다.
         el.querySelector('.hist-item__caret').dataset.hash = h.hash || '';
         el.querySelector('.hist-item__reason').dataset.hash = h.hash || '';
+        // '이슈 N' 배지도 자기 커밋 해시를 실어, 클릭 시 그 커밋의 이슈만 역추적하게 한다.
+        const issuesBadge = el.querySelector('.hist-item__issues');
+        if (issuesBadge) { issuesBadge.dataset.hash = h.hash || ''; }
         return el;
     }
 
@@ -1971,6 +2101,16 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         // 이슈 목록 항목 선택 — 외부로 열지 않고 상세 화면으로 전환한다.
         if (el.dataset.action === 'openIssueDetail') {
             openIssueDetail(parseInt(el.dataset.index, 10) || 0);
+            return;
+        }
+        // '라인 수정 이력'의 '이슈 N' 배지 — 이슈 탭으로 전환해 그 커밋의 이슈만 보여준다.
+        if (el.dataset.action === 'openCommitIssues') {
+            vscode.postMessage({ type: 'openCommitIssues', payload: { hash: el.dataset.hash } });
+            return;
+        }
+        // 커밋 스코프 배너의 '파일 전체 이슈로' — 파일 단위 이슈 검색을 다시 띄운다.
+        if (el.dataset.action === 'issueBackToFile') {
+            vscode.postMessage({ type: 'switchTab', payload: { tab: 'issue' } });
             return;
         }
         // 상세 화면 네비게이션

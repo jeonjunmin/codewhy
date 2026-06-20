@@ -44,7 +44,11 @@ def trace(commit_hash: str, commit_message: str, *, branch: str, remote) -> list
     if not issues:
         return []
 
-    return _format_results(issues, match_type)
+    # 상세 화면 파리티 — 티켓/시맨틱 경로는 GitHub Search API 결과라 코멘트 타임라인·본문
+    # 전문이 비어 온다. 파일 단위 추적(trace_file)과 동일하게 번호로 전체 메타를 다시 읽어
+    # 상세 화면(활동 피드 등)이 두 스코프에서 같게 나오도록 보강한다. 실패 시 원본으로 폴백.
+    refreshed = vcs.fetch_issues_batch(remote, [i.number for i in issues])
+    return [_format_one(refreshed.get(i.number, i), match_type) for i in issues]
 
 
 async def trace_file(
@@ -180,11 +184,6 @@ def _confidence_for(match_type: str) -> float | None:
     if match_type == "issue":
         return None
     return 0.8 if match_type == "ticket" else 0.5
-
-
-def _format_results(issues: list[Issue], match_type: str) -> list[dict]:
-    """동일 match_type 의 Issue 목록을 DocumentMatch 형식으로 변환한다(단일-커밋 경로)."""
-    return [_format_one(issue, match_type) for issue in issues]
 
 
 def _format_one(issue: Issue, match_type: str) -> dict:

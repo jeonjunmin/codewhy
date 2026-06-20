@@ -2,7 +2,7 @@ import { execSync } from 'child_process';
 import * as vscode from 'vscode';
 import { EditorContext, getEditorContext } from '../../shared/editor';
 import * as localGit from '../../shared/git';
-import { BlameRequest, BlameResult, CommitInput, ReasonRequest, TraceRequest } from '../../shared/types';
+import { BlameRequest, BlameResult, CommitInput, GitCommitMeta, ReasonRequest, TraceRequest } from '../../shared/types';
 import { fetchRequirementTrace } from '../requirementTrace/api';
 import { streamTimelineSummary } from '../timelineSummary/api';
 import { fetchCommitReason, streamContextBlame } from './api';
@@ -89,10 +89,12 @@ function ensureInitialized(context: vscode.ExtensionContext) {
             vscode.commands.executeCommand('codewhy.blame.openCommit', { commitHash, repoPath }),
         onSwitchTab: (tab) => handleSwitchTab(tab),
         onOpenIssue: (url) => { vscode.env.openExternal(vscode.Uri.parse(url)); },
-        // 이슈 기능 개발 전까지 '이슈 N' 배지는 임시 안내만 — 실제 이동은 DEVELOPMENT_GUIDE.md TODO 참고.
+        // 라인 이슈 롤업 칩 등 URL 이 아직 해석되지 않은 항목은 임시 안내만.
         onOpenIssueTodo: () => {
             vscode.window.showInformationMessage('연관 이슈 보기는 이슈 기능 연동 후 제공될 예정입니다.');
         },
+        // '라인 수정 이력'의 '이슈 N' 배지 클릭 — 이슈 탭으로 전환 후 그 커밋이 참조한 이슈만 보여준다.
+        onOpenCommitIssues: (hash, filePath, repoPath) => handleOpenCommitIssues(hash, filePath, repoPath),
         // 라인 수정 이력 항목 펼침 → 그 커밋의 변경 사유를 지연 생성해 사이드바에 주입.
         onExpandHistory: (hash, filePath, repoPath) => handleExpandHistory(hash, filePath, repoPath),
     });
@@ -303,6 +305,59 @@ export async function runIssueTab() {
     } catch (err) {
         sidebar.issueEmpty(`요구사항 역추적 실패: ${(err as Error).message}`);
     }
+}
+
+/**
+ * '라인 수정 이력'의 '이슈 N' 배지 클릭 처리 — 이슈 탭으로 전환하고,
+ * 클릭한 그 커밋 '한 건'이 참조하는 이슈만 역추적해 커밋 스코프 목록으로 그린다.
+ *
+ * 파일 단위 이슈 검색(runIssueTab)과 달리 추적 단위가 '커밋'이라, 백엔드의 단일-커밋
+ * 경로(service.trace)를 깨우는 요청을 만든다(buildCommitTraceRequest 참고).
+ * 알림 스피너 대신 패널 안 배너+스피너로 진행을 보여주므로 fire-and-forget 으로 둔다.
+ */
+async function handleOpenCommitIssues(hash: string, filePath: string, repoPath: string) {
+    if (!sidebar) { return; }
+    sidebar.activateTab('issue');
+
+    const { meta } = localGit.getCommitInfo(repoPath, filePath, hash);
+    // 배너에 보일 커밋 제목 — 메시지 첫 줄, 없으면 7자리 해시로 폴백.
+    const subject = (meta?.message ?? '').split('\n')[0].trim() || hash.slice(0, 7);
+    sidebar.issueCommitLoading(hash, subject);
+
+    if (!meta) {
+        sidebar.issueCommitEmpty(hash, subject, '이 커밋의 정보를 찾지 못했습니다.');
+        return;
+    }
+    try {
+        const result = await fetchRequirementTrace(buildCommitTraceRequest(filePath, repoPath, meta));
+        if (!result.documents || result.documents.length === 0) {
+            sidebar.issueCommitEmpty(hash, subject, '이 커밋과 연관된 이슈를 찾지 못했습니다.');
+            return;
+        }
+        sidebar.issueCommitResult(hash, subject, result);
+    } catch (err) {
+        sidebar.issueCommitEmpty(hash, subject, `커밋 이슈 조회 실패: ${(err as Error).message}`);
+    }
+}
+
+/**
+ * 커밋 스코프 이슈 역추적(/trace)의 요청 본문을 조립한다.
+ *
+ * ⚠️ 추적 단위가 '커밋'이라는 점이 핵심이다. 라우터는 commits 가 비어 있을 때만
+ * 단일-커밋 경로(service.trace)를 타고, commits 가 있으면 파일 전체 이슈를 모으는
+ * trace_file 로 빠진다. 따라서 클릭한 커밋만 보여주려면 commits 는 반드시 비우고,
+ * 그 커밋 메타를 blame 으로 실어 보낸다.
+ */
+function buildCommitTraceRequest(filePath: string, repoPath: string, meta: GitCommitMeta): TraceRequest {
+    return {
+        filePath,
+        line: 0,                 // 커밋 스코프라 라인 의미 없음(파일 단위 추적의 잔재 필드)
+        repoPath,
+        blame: meta,             // 이 커밋 한 건 → 라우터의 단일-커밋 경로(service.trace)
+        commits: [],             // 비워서 파일 단위 trace_file 경로를 회피한다
+        branch: localGit.getCurrentBranch(repoPath),
+        remoteUrl: localGit.getRemoteUrl(repoPath),
+    };
 }
 
 /**
