@@ -855,6 +855,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .is-item__state.draft { color: var(--accent-violet); }
     .is-item__state.draft::before { background: var(--accent-violet); }
     .is-item__num { color: var(--fg-mute); font-size: 11px; font-weight: 600; }
+    /* 등록일 — 머리 줄 오른쪽 끝에 옅게. */
+    .is-item__date { margin-left: auto; color: var(--fg-mute); font-size: 10.5px; }
+    /* 메타 칩 안의 SVG 아이콘(코멘트/첨부) 정렬 보정. */
+    .is-item__metaright span svg { display: block; }
     .is-item__title {
         color: var(--fg); font-size: 13px; font-weight: 600; line-height: 1.4;
         display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
@@ -1146,6 +1150,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         check:'<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 8.5l3.2 3.2L13 4.5"/></svg>',
         shieldBig: '<svg width="30" height="30" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.1"><path d="M8 1l6 2v5c0 4-2.8 6.6-6 7-3.2-.4-6-3-6-7V3l6-2z"/><path d="M5.5 8l1.8 1.8L11 6" stroke-width="1.3"/></svg>',
         sparkBig: '<svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l1.5 4.5L14 7l-4.5 1.5L8 13l-1.5-4.5L2 7l4.5-1.5L8 1z"/></svg>',
+        // 코멘트 수 칩 — 이모지(💬) 대신 SVG 말풍선(웹뷰 폰트에서 깨지지 않음).
+        comment: '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M2 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H6.5L4 13.5V11H3a1 1 0 0 1-1-1V4z"/></svg>',
+        // 첨부 수 칩 — 이모지(📎) 대신 SVG 클립.
+        clip: '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 7.2l-5 5a2.8 2.8 0 0 1-4-4l5.2-5.2a1.8 1.8 0 0 1 2.6 2.6l-5.2 5.2a.8.8 0 0 1-1.2-1.2l4.6-4.6"/></svg>',
     };
     // 아이콘 주입은 보조 장식이므로, 한 요소가 없더라도 핸드셰이크(ready)까지 죽지 않게 격리한다.
     try {
@@ -1305,6 +1313,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     let isQuery = '';
     let isFilter = 'all';   // all | open | closed | draft
     let isScope = 'file';   // 'file'(파일 검색) | 'commit'(라인 이력의 '이슈 N' 배지)
+    // 현재 목록에 '보이는' 항목들의 원본 isDocs 인덱스(필터+검색 적용 순서).
+    // 상세 이전/다음은 isDocs 전체가 아니라 이 부분집합 안에서만 이동해야 한다(버그 #4).
+    let isVisible = [];
+    // 비었으면(예: 커밋 스코프) 전체를 보이는 것으로 간주한다.
+    function visibleList() { return isVisible.length ? isVisible : isDocs.map((_, i) => i); }
 
     // 이슈 상태를 필터 버킷으로 분류한다. 백엔드 state(open/closed)에 더해
     // 'draft'(초안)도 받을 수 있게 열어 둔다(미전송 시 초안 탭은 0건).
@@ -1361,6 +1374,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         isScope = 'commit';
         isDocs = p.documents || [];
         isIndex = 0;
+        isVisible = [];   // 커밋 스코프는 필터 UI가 없으니 전체를 순회 대상으로(visibleList 폴백).
         fillCommitBanner(p.hash, p.subject);
         setIssueScope('commit');
         const list = document.getElementById('is-list');
@@ -1399,8 +1413,9 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         });
 
         // 검색어(제목/번호/라벨) + 상태 필터로 거른다. 원본 인덱스를 유지해 상세 이동이 어긋나지 않게 한다.
+        // 보이는 항목의 원본 인덱스를 isVisible 에 같은 순서로 쌓아, 상세 이전/다음이 이 부분집합만 돌게 한다.
         const q = isQuery.trim().toLowerCase();
-        let shown = 0;
+        isVisible = [];
         isDocs.forEach((d, i) => {
             if (isFilter !== 'all' && issueBucket(d) !== isFilter) { return; }
             if (q) {
@@ -1409,8 +1424,9 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
                 if (hay.indexOf(q) === -1) { return; }
             }
             list.appendChild(renderIssueItem(d, i));
-            shown++;
+            isVisible.push(i);
         });
+        const shown = isVisible.length;
         // 커밋-스코프 빈 결과가 덮어썼을 수 있으니 파일 검색 기본 문구로 복원한다.
         const listEmpty = document.getElementById('is-list-empty');
         listEmpty.textContent = '검색 결과가 없습니다.';
@@ -1452,9 +1468,12 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         head.className = 'is-item__head';
         head.innerHTML =
             '<span class="is-item__state ' + st.cls + '"></span>' +
-            '<span class="is-item__num"></span>';
+            '<span class="is-item__num"></span>' +
+            '<span class="is-item__date"></span>';
         head.querySelector('.is-item__state').textContent = st.label;
         head.querySelector('.is-item__num').textContent = (d.issueNumber != null) ? ('#' + d.issueNumber) : '';
+        // 등록일(개설일) — "M월 D일". 백엔드 미전송 시 빈칸.
+        head.querySelector('.is-item__date').textContent = d.createdAt ? isMonthDay(d.createdAt) : '';
         el.appendChild(head);
 
         // 제목(최대 2줄)
@@ -1482,10 +1501,14 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         right.className = 'is-item__metaright';
         if (d.assignee) { right.appendChild(makeAvatar(d.assignee)); }
         if (d.commentCount) {
-            const c = document.createElement('span'); c.textContent = '💬 ' + d.commentCount; right.appendChild(c);
+            const c = document.createElement('span');
+            c.innerHTML = ICON.comment; c.appendChild(document.createTextNode(String(d.commentCount)));
+            right.appendChild(c);
         }
         if (attCount) {
-            const a = document.createElement('span'); a.textContent = '📎 ' + attCount; right.appendChild(a);
+            const a = document.createElement('span');
+            a.innerHTML = ICON.clip; a.appendChild(document.createTextNode(String(attCount)));
+            right.appendChild(a);
         }
         bottom.appendChild(right);
         el.appendChild(bottom);
@@ -1552,6 +1575,19 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         renderIssueDetail();
         showIssueDetail();
     }
+
+    // 상세 이전/다음 이동 — '보이는 목록'(visibleList: 필터+검색이 적용된 부분집합) 안에서만 움직인다.
+    // delta: -1(이전) | +1(다음). 현재 항목(isIndex)의 보이는-목록 내 위치를 찾아 delta 만큼 옮긴 뒤,
+    // 그 위치의 원본 인덱스로 openIssueDetail 을 호출한다(버그 #4).
+    function stepIssue(delta) {
+        const vis = visibleList();                       // 화면에 보이는 항목의 원본 인덱스들(순서 보존)
+        if (!vis.length) { return; }
+        const pos = vis.indexOf(isIndex);                // 현재 항목이 그 안에서 몇 번째 칸인가(없으면 -1)
+        // 필터에 안 걸린 항목을 보고 있으면(pos === -1) 보이는 목록의 첫 칸으로 진입.
+        const next = pos === -1 ? 0 : pos + delta;
+        if (next < 0 || next >= vis.length) { return; }  // 양 끝을 벗어나면 멈춤(clamp) — 페이저 disabled 와 일치.
+        openIssueDetail(vis[next]);
+    }
     function appendMetaRow(dl, term, value, strong) {
         const dt = document.createElement('dt'); dt.textContent = term;
         const dd = document.createElement('dd');
@@ -1596,9 +1632,12 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
                 '<span class="pos"></span>' +
                 '<button data-action="issueNext">›</button>' +
             '</span>';
-        nav.querySelector('.pos').textContent = (isIndex + 1) + ' / ' + isDocs.length;
-        nav.querySelector('[data-action="issuePrev"]').disabled = isIndex === 0;
-        nav.querySelector('[data-action="issueNext"]').disabled = isIndex >= isDocs.length - 1;
+        // 페이저는 '보이는 목록' 기준 — 필터로 가려진 항목은 총건수/위치에서 빠진다(버그 #4).
+        const vis = visibleList();
+        const pos = vis.indexOf(isIndex);
+        nav.querySelector('.pos').textContent = ((pos === -1 ? 0 : pos) + 1) + ' / ' + vis.length;
+        nav.querySelector('[data-action="issuePrev"]').disabled = pos <= 0;
+        nav.querySelector('[data-action="issueNext"]').disabled = pos === -1 || pos >= vis.length - 1;
         wrap.appendChild(nav);
 
         // 헤더: 상태 배지 + 이슈 번호 + AI 질문
@@ -1663,7 +1702,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         if (atts.length) {
             const sec = document.createElement('div');
             sec.className = 'is-d-sec-title';
-            sec.textContent = '📎 첨부파일 ' + atts.length;
+            sec.innerHTML = ICON.clip; sec.appendChild(document.createTextNode(' 첨부파일 ' + atts.length));
             wrap.appendChild(sec);
             const list = document.createElement('div');
             list.className = 'is-d-atts';
@@ -1683,7 +1722,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         if (!list || !list.length) { return; }
         const sec = document.createElement('div');
         sec.className = 'is-d-sec-title';
-        sec.textContent = '💬 활동 ' + list.length;
+        sec.innerHTML = ICON.comment; sec.appendChild(document.createTextNode(' 활동 ' + list.length));
         wrap.appendChild(sec);
 
         const feed = document.createElement('div');
@@ -2115,8 +2154,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         }
         // 상세 화면 네비게이션
         if (el.dataset.action === 'issueBack') { showIssueList(); return; }
-        if (el.dataset.action === 'issuePrev') { openIssueDetail(isIndex - 1); return; }
-        if (el.dataset.action === 'issueNext') { openIssueDetail(isIndex + 1); return; }
+        if (el.dataset.action === 'issuePrev') { stepIssue(-1); return; }
+        if (el.dataset.action === 'issueNext') { stepIssue(1); return; }
         // AI 질문 — 아직 미연동, '준비 중' 안내만(openIssueTodo 재사용).
         if (el.dataset.action === 'issueAiAsk') {
             vscode.postMessage({ type: 'openIssueTodo' });
@@ -2133,6 +2172,18 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             return;
         }
         vscode.postMessage({ type: el.dataset.action });
+    });
+
+    // ── 마우스 '뒤로' 사이드 버튼 → 이슈 상세에서 목록으로 ─────────────────
+    // 다수 마우스의 뒤로(back) 버튼은 button 3 으로 들어온다(앞으로는 4). 이슈 상세가
+    // 떠 있을 때만 가로채 목록으로 되돌리고, 그 외 화면에선 기본 동작에 맡긴다.
+    window.addEventListener('mouseup', (e) => {
+        if (e.button !== 3) { return; }
+        const detail = document.getElementById('is-detail-view');
+        if (detail && !detail.classList.contains('hidden')) {
+            e.preventDefault();
+            showIssueList();
+        }
     });
 
     // ── 핸드셰이크: 리스너가 모두 등록된 지금 시점에 extension 으로 'ready' 통지 ──
