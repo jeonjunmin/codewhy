@@ -28,6 +28,7 @@ from app.core.config import (
     get_attachment_domain_allowlist,
     get_github_token,
     get_gitlab_token,
+    get_self_hosted_gitlab_hosts,
 )
 
 _TIMEOUT = 6  # 초 — 호스팅 API 가 느려도 블레임 응답을 오래 잡지 않는다
@@ -171,21 +172,34 @@ def find_pr_for_commit(repo_path: str, commit_hash: str) -> PullRequest | None:
 
 
 # ─── URL 파싱 ───────────────────────────────────────────────────────
+def _host_matches(domain: str, base: str) -> bool:
+    """domain 이 base 와 정확히 같거나 base 의 정식 하위 도메인일 때만 True.
+
+    `"github" in domain` 같은 substring 매칭은 'github.com.attacker.com' 같은 위장 도메인을
+    통과시켜, 서버 토큰(Bearer/PRIVATE-TOKEN)을 공격자 호스트로 흘릴 수 있다(SSRF·토큰 유출).
+    정확 일치 또는 '.'+base 로 끝나는 정식 하위 도메인만 인정해 이를 차단한다.
+    """
+    return domain == base or domain.endswith("." + base)
+
+
 def _parse_remote_url(url: str) -> Remote | None:
     # git@github.com:owner/repo.git  또는  https://github.com/owner/repo(.git)
     m = re.match(r"(?:git@|https?://)([^/:]+)[/:](.+?)(?:\.git)?/?$", url)
     if not m:
         return None
-    domain, path = m.group(1), m.group(2)
+    domain, path = m.group(1).lower(), m.group(2)
     parts = path.split("/")
     if len(parts) < 2:
         return None
     repo = parts[-1]
     owner = "/".join(parts[:-1])
 
-    if "github" in domain:
-        return Remote("github", owner, repo, f"https://api.{domain}")
-    if "gitlab" in domain:
+    # 호스트 판별은 정확 일치/정식 하위 도메인만 — 위장 도메인으로의 토큰 유출 차단.
+    # GitHub API 는 github.com 의 api 서브도메인 하나뿐이라 base 를 리터럴로 고정한다.
+    if _host_matches(domain, "github.com"):
+        return Remote("github", owner, repo, "https://api.github.com")
+    # GitLab 은 gitlab.com(+하위 도메인)을 기본 인정하고, 사내 호스트는 화이트리스트로만 허용.
+    if _host_matches(domain, "gitlab.com") or domain in get_self_hosted_gitlab_hosts():
         return Remote("gitlab", owner, repo, f"https://{domain}/api/v4")
     return None
 

@@ -81,8 +81,7 @@ cd codewhy/backend
 cp .env.example .env
 vi .env
 #   DATABASE_URL=postgresql+asyncpg://<user>:<pass>@<rds-endpoint>:5432/codewhy
-#   BEDROCK_MODEL_ID=...
-#   ANTHROPIC_API_KEY=...   (blame/trace 기능 사용 시)
+#   BEDROCK_MODEL_ID=...   (AI 호출은 Bedrock 한 경로로만)
 
 # (1) DB 마이그레이션 — 최초 1회 + 스키마 변경 시
 docker compose run --rm migrate
