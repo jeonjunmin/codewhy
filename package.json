@@ -1,7 +1,7 @@
 {
   "name": "codewhy",
   "displayName": "CodeWhy",
-  "description": "AI 기반 코드 컨텍스트 분석 - 컨텍스트 블레임, 타임라인 요약, 요구사항 역추적",
+  "description": "AI 기반 코드 컨텍스트 분석 - 돋보기, 타임라인 요약, 요구사항 역추적",
   "version": "0.0.1",
   "icon": "images/icon-128.png",
   "repository": {
@@ -42,7 +42,7 @@
     "commands": [
       {
         "command": "codewhy.contextBlame",
-        "title": "CodeWhy: 이 코드, 왜 바꿨어? (Context Blame)"
+        "title": "CodeWhy: 이 코드, 왜 바꿨어? (돋보기)"
       },
       {
         "command": "codewhy.timelineSummary",
@@ -58,7 +58,7 @@
       },
       {
         "command": "codewhy.blame.pin",
-        "title": "CodeWhy: 현재 라인 블레임 고정/해제"
+        "title": "CodeWhy: 현재 라인 돋보기 고정/해제"
       },
       {
         "command": "codewhy.openSettings",
@@ -108,7 +108,7 @@
         "codewhy.hover.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "분석된 라인 위에 마우스를 올렸을 때 블레임 요약 팝업 표시 여부"
+          "description": "분석된 라인 위에 마우스를 올렸을 때 돋보기 요약 팝업 표시 여부"
         },
         "codewhy.backendUrl": {
           "type": "string",

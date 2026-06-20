@@ -1051,7 +1051,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
     <nav class="tabs hidden">
-        <button class="tab active" data-tab="blame"><span class="tab__ico" id="ico-tab-blame"></span>블레임</button>
+        <button class="tab active" data-tab="blame"><span class="tab__ico" id="ico-tab-blame"></span>돋보기</button>
         <button class="tab" data-tab="timeline"><span class="tab__ico" id="ico-tab-timeline"></span>타임라인</button>
         <button class="tab" data-tab="issue"><span class="tab__ico" id="ico-tab-issue"></span>이슈</button>
     </nav>
@@ -1198,7 +1198,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         const setIcon = (id, svg) => { const el = document.getElementById(id); if (el) { el.innerHTML = svg; } };
         setIcon('ico-callout', ICON.spark);
         setIcon('ico-info', ICON.spark);
-        setIcon('ico-tab-blame', ICON.doc);
+        setIcon('ico-tab-blame', ICON.search);   // '돋보기' 탭 — 용어에 맞춰 돋보기 아이콘
         setIcon('ico-tab-timeline', ICON.clock);
         setIcon('ico-tab-issue', ICON.branch);
         setIcon('ico-tl-spark', ICON.spark);

@@ -236,8 +236,8 @@ function streamBlameInto(args: { filePath: string; line: number; repoPath: strin
             if (metaSeen) { sidebar!.blameResult(ctx, result); }
             else { pushToSidebar(ctx, result); }
         },
-        onError: (message) => vscode.window.showErrorMessage(`Context Blame 실패: ${message}`),
-    }).catch((err) => vscode.window.showErrorMessage(`Context Blame 실패: ${(err as Error).message}`));
+        onError: (message) => vscode.window.showErrorMessage(`돋보기 실패: ${message}`),
+    }).catch((err) => vscode.window.showErrorMessage(`돋보기 실패: ${(err as Error).message}`));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
