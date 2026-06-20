@@ -42,9 +42,6 @@ class Settings(BaseSettings):
     # 런타임(asyncpg): postgresql+asyncpg://user:pass@host:5432/codewhy
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/codewhy"
 
-    # ── Anthropic ─────────────────────────────────────────────────────────────
-    ANTHROPIC_API_KEY: str = ""
-
     # ── 기타 ──────────────────────────────────────────────────────────────────
     # 업로드된 기획 문서 바이너리를 보관할 서버 디렉터리 (역추적 다운로드용)
     DOCUMENTS_DIR: str = "./uploaded_documents"
@@ -91,9 +88,6 @@ def get_database_url() -> str:
 
 
 # ── 하위 호환 헬퍼 ────────────────────────────────────────────────────────────
-
-def get_anthropic_api_key() -> str:
-    return get_settings().ANTHROPIC_API_KEY
 
 def get_aws_region() -> str:
     return get_settings().AWS_DEFAULT_REGION
@@ -175,6 +169,22 @@ def get_github_token() -> str:
 
 def get_gitlab_token() -> str:
     return os.getenv("GITLAB_TOKEN", "")
+
+
+def get_self_hosted_gitlab_hosts() -> tuple[str, ...]:
+    """자체 호스팅 GitLab 호스트 화이트리스트(소문자, 정확 일치).
+
+    vcs._parse_remote_url 은 기본적으로 gitlab.com(과 그 하위 도메인)만 GitLab 으로 인정한다.
+    `git.example.com` 처럼 'gitlab' 이 들어가지 않는 사내 GitLab 을 쓰면 여기에 등록해야
+    PRIVATE-TOKEN 이 그 호스트로 전송된다. 미설정이면 gitlab.com 외에는 토큰을 보내지 않는다
+    (위장 도메인으로의 토큰 유출 차단).
+
+    env: CODEWHY_GITLAB_HOSTS="git.example.com,gitlab.internal.corp"
+    """
+    raw = os.getenv("CODEWHY_GITLAB_HOSTS", "")
+    if not raw.strip():
+        return ()
+    return tuple(d.strip().lower() for d in raw.split(",") if d.strip())
 
 
 def get_attachment_domain_allowlist() -> tuple[str, ...]:

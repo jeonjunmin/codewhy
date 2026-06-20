@@ -1,6 +1,6 @@
-"""_extract_issue_numbers / _extract_attachments 정규식 견고성."""
+"""_extract_issue_numbers / _extract_attachments 정규식 + 호스트 판별 견고성."""
 
-from app.core.vcs import _extract_attachments, _extract_issue_numbers
+from app.core.vcs import _extract_attachments, _extract_issue_numbers, _parse_remote_url
 
 
 def test_extracts_closes_and_fixes_keywords():
@@ -69,3 +69,46 @@ def test_dedup_attachments_by_url():
 
 def test_empty_body_returns_empty():
     assert _extract_attachments("") == []
+
+
+# ─── 호스트 판별 (SSRF·토큰 유출 방어) ──────────────────────────────────────
+
+def test_github_https_and_ssh_parsed():
+    for url in (
+        "https://github.com/owner/repo.git",
+        "git@github.com:owner/repo.git",
+        "https://github.com/group/sub/repo",
+    ):
+        remote = _parse_remote_url(url)
+        assert remote is not None and remote.host == "github"
+        # base 는 항상 정규 API 호스트로 고정 — 도메인 문자열이 끼어들지 않는다.
+        assert remote.base == "https://api.github.com"
+
+
+def test_gitlab_com_parsed():
+    remote = _parse_remote_url("https://gitlab.com/owner/repo.git")
+    assert remote is not None and remote.host == "gitlab"
+    assert remote.base == "https://gitlab.com/api/v4"
+
+
+def test_lookalike_domain_rejected():
+    # 'github'/'gitlab' 이 substring 으로 들어간 위장 도메인은 인정하지 않는다(토큰 유출 차단).
+    for url in (
+        "https://github.com.attacker.com/owner/repo.git",
+        "https://gitlab.com.evil.example/owner/repo.git",
+        "https://notgithub.com/owner/repo.git",
+        "https://my-gitlab-mirror.io/owner/repo.git",
+    ):
+        assert _parse_remote_url(url) is None
+
+
+def test_self_hosted_gitlab_requires_allowlist(monkeypatch):
+    url = "https://git.example.com/owner/repo.git"
+    # 화이트리스트 미설정이면 거부.
+    monkeypatch.delenv("CODEWHY_GITLAB_HOSTS", raising=False)
+    assert _parse_remote_url(url) is None
+    # 화이트리스트에 등록하면 허용(대소문자 무시).
+    monkeypatch.setenv("CODEWHY_GITLAB_HOSTS", "git.example.com")
+    remote = _parse_remote_url("https://GIT.EXAMPLE.COM/owner/repo.git")
+    assert remote is not None and remote.host == "gitlab"
+    assert remote.base == "https://git.example.com/api/v4"

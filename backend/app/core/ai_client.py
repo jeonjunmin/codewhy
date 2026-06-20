@@ -1,43 +1,22 @@
-"""LLM 클라이언트 래퍼.
+"""LLM 클라이언트 래퍼 — AWS Bedrock 전용.
 
 각 기능의 service.py 가 자기 도메인에 맞는 프롬프트를 만들어 호출한다.
 프롬프트 자체는 각 기능 폴더에서 관리하므로 이 파일은 모델/토큰 설정만 담당한다.
 
-두 경로를 지원한다:
- - call_claude  : Anthropic 직접 API (타임라인 요약 등 기존 기능)
- - call_bedrock : AWS Bedrock Converse API (컨텍스트 블레임 RAG)
+보안 원칙: **AI 호출은 AWS Bedrock(사내 계정 격리) 하나로만 나간다.**
+외부 SaaS LLM(Anthropic 직접 API 등)으로는 코드·이력을 보내지 않는다.
+스트리밍 경로는 langchain_aws.ChatBedrock(`core/bedrock.py`)을 쓴다.
 """
 
-import anthropic
 import boto3
+
 from app.core.config import (
-    get_anthropic_api_key,
     get_aws_credentials,
     get_aws_region,
     get_bedrock_model_id,
 )
 
-_client: anthropic.Anthropic | None = None
 _bedrock_runtime = None
-
-DEFAULT_MODEL = "claude-opus-4-7"
-
-
-def _get_client() -> anthropic.Anthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.Anthropic(api_key=get_anthropic_api_key())
-    return _client
-
-
-def call_claude(prompt: str, *, max_tokens: int = 600, model: str = DEFAULT_MODEL) -> str:
-    """단발성 프롬프트를 Anthropic 직접 API 로 보내고 텍스트 응답을 반환한다."""
-    message = _get_client().messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return message.content[0].text
 
 
 def _get_bedrock_runtime():
