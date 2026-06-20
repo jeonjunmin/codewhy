@@ -44,7 +44,8 @@ _TYPE_PERSPECTIVE: dict[str, str] = {
 class TimelineState(TypedDict):
     """노드 간 공유되는 전역 상태 객체."""
     file_path: str
-    commits_text: str
+    groups_text: str       # 결정론적 묶음 포맷 (service 가 group_commits_into_milestones 로 생성)
+    num_groups: int        # 묶음 수 — LLM 에게 milestones 개수를 명시할 때 사용
     commit_type: str
     commit_domain: str
     raw_response: str      # LLM 누적 출력 (analyze 노드가 채움)
@@ -104,7 +105,8 @@ async def _analyze_node(state: TimelineState) -> dict:
     llm = get_bedrock_llm(max_tokens=800)
     prompt = _build_prompt(
         file_path=state["file_path"],
-        commits_text=state["commits_text"],
+        groups_text=state["groups_text"],
+        num_groups=state["num_groups"],
         commit_type=state["commit_type"],
         commit_domain=state["commit_domain"],
     )
@@ -340,7 +342,8 @@ async def stream_file_summary(
     """
     initial: TimelineState = {
         "file_path":    file_path,
-        "commits_text": commits_text,
+        "groups_text":  groups_text,
+        "num_groups":   num_groups,
         "commit_type":  commit_type,
         "commit_domain": commit_domain,
         "raw_response": "",

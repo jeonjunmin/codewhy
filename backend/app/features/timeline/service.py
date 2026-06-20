@@ -23,7 +23,8 @@ from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.timeline_file_graph import stream_file_summary
-from app.core.commit_classifier import filter_meaningful
+from app.core.commit_classifier import classify_commit, filter_meaningful
+from app.core.tickets import extract_ticket
 from app.features.timeline import crud
 
 logger = logging.getLogger(__name__)
@@ -271,20 +272,14 @@ async def stream_summary(db: AsyncSession, ctx: dict) -> AsyncGenerator[str, Non
         yield f"data: {json.dumps({'error': str(exc)}, ensure_ascii=False)}\n\n"
         return
 
-<<<<<<< HEAD
-    # LangGraph on_chain_end 를 못 받은 경우의 폴백.
-    # full_text 는 이제 _SummaryExtractor 가 걸러낸 순수 summary 텍스트이므로
-    # parse_ai_response(JSON 파서) 가 아닌 직접 dict 로 구성한다.
-    if not result:
-        result = {"summary": full_text, "milestones": []}
-
+    # full_text 는 _SummaryExtractor 가 걸러낸 순수 summary 텍스트이므로
+    # parse_ai_response(JSON 파서) 대신 on_chain_end result 를 사용한다.
+    # 어느 경우든 마일스톤 날짜는 git 기준으로 정합해 LLM 환각을 차단한다.
+    if result:
+        result["milestones"] = _reconcile_milestones(result.get("milestones", []), groups)
+    else:
+        result = {"summary": full_text, "milestones": _reconcile_milestones([], groups)}
     logger.info("[timeline] 그래프 완료 — summary=%d자  milestones=%d건",
-=======
-    # 스트림 종료 → 누적 텍스트 파싱 + 마일스톤 날짜를 git 기준으로 정합(환각 차단) + 캐시 저장.
-    result = parse_ai_response(full_text)
-    result["milestones"] = _reconcile_milestones(result.get("milestones", []), groups)
-    logger.info("[timeline] Bedrock 스트리밍 완료 — summary=%d자  milestones=%d건",
->>>>>>> 6da12c4ead666db5f947604ccbafb3acf90f0788
                 len(result.get("summary", "")), len(result.get("milestones", [])))
 
     await crud.save_summary(db, file.id, set_hash, result)
