@@ -16,6 +16,7 @@ git 으로 라인 단위 마지막 커밋(diff + 커밋 메시지)을 가져오�
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -291,12 +292,12 @@ async def stream_blame(
     }
     yield f"data: {json.dumps({'done': True, **result}, ensure_ascii=False)}\n\n"
 
-    # ⑤ 캐시 저장 — degraded(폴백)는 제외. 멀티 리비전 줄은 설명이 '라인 스코프'(이력 반영)라
-    #    커밋×파일 단위 캐시에 담으면 같은 커밋의 다른 줄에 잘못 적중하므로 저장하지 않는다.
-    is_line_scoped = len(line_history) > 1
-    if commit is not None and file is not None and not degraded and not is_line_scoped:
+    # ⑤ 캐시 저장 — degraded(폴백)는 제외. 멀티 리비전 줄은 '라인 스코프' 설명(이력 반영)이라
+    #    라인 이력 해시 키로 저장해 같은 커밋의 다른 줄과 분리한다(단일 리비전은 '' = 커밋 스코프).
+    hash_key = line_scope_hash(line_history, info.message)
+    if commit is not None and file is not None and not degraded:
         try:
-            await crud.save_blame(db, file.id, commit.id, result)
+            await crud.save_blame(db, file.id, commit.id, result, hash_key)
         except Exception:
             logger.warning("blame 캐시 저장 실패 (응답에는 영향 없음)", exc_info=True)
 
@@ -315,6 +316,27 @@ def is_noise_commit(message: str) -> bool:
     노이즈는 Bedrock·GitHub 호출 없이 정형 응답으로 즉시 끝나므로, 스트리밍할 필요가 없다.
     """
     return _classify_type(message) in SKIP_TYPES
+
+
+def compute_line_history_hash(line_history: list[dict]) -> str:
+    """라인 이력(확장이 보낸 커밋 해시 순서)으로 캐시 키(SHA-256 hex)를 만든다.
+
+    타임라인 compute_commit_set_hash 와 같은 발상의 라인 스코프 버전. 줄 내용이 바뀌어
+    이력 커밋 구성이 달라지면 해시가 달라져 자동 캐시 미스 → 재생성된다(stale 방지).
+    """
+    serialized = "\n".join(c.get("hash", "") for c in line_history)
+    return hashlib.sha256(serialized.encode()).hexdigest()
+
+
+def line_scope_hash(line_history: list[dict], message: str) -> str:
+    """블레임 캐시의 라인 스코프 키를 정한다(라우터·stream_blame 공용 — 단일 진실원).
+
+    멀티 리비전(여러 번 수정된) 줄이면서 노이즈 커밋이 아닐 때만 라인 이력 해시를 쓴다.
+    그 외(단일 리비전/노이즈)는 '' = 커밋×파일 스코프(같은 커밋의 줄들이 설명 1개 공유).
+    """
+    if len(line_history) > 1 and not is_noise_commit(message):
+        return compute_line_history_hash(line_history)
+    return ""
 
 
 def _remember_context(repo_path: str, file_path: str, commit_hash: str, context: str) -> None:
