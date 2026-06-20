@@ -15,6 +15,7 @@
 """
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -141,6 +142,8 @@ def _extract_links_for_commits(remote, targets: list[tuple[int, str, str]]) -> d
     반환: {commit_id: [{"issue_number","link_source","confidence"}, ...]} — 0건 커밋도 키로 포함.
     PR 직결(issue)을 티켓보다 먼저 등록해, 같은 이슈가 두 경로로 잡히면 더 강한 근거를 남긴다.
     """
+    if not targets:
+        return {}
     links: dict[int, list[dict]] = {cid: [] for cid, _h, _s in targets}
     seen: dict[int, set[int]] = {cid: set() for cid, _h, _s in targets}
 
@@ -153,16 +156,26 @@ def _extract_links_for_commits(remote, targets: list[tuple[int, str, str]]) -> d
     # ── 직접 참조 경로(issue, 확정) — 커밋 메시지의 #N + 머지된 PR 본문의 #N. ──
     #    커밋 메시지가 "#46 ..." 형태면 토큰 없이도 /issues/N 으로 메타를 읽으므로
     #    티켓(PAY-xxx)을 안 쓰는 저장소에서도 동작한다. 가장 강한 근거라 먼저 등록.
-    for cid, commit_hash, subject in targets:
+    #    커밋 메시지의 #N 은 로컬 파싱이라 먼저 순차로 처리한다.
+    for cid, _commit_hash, subject in targets:
         for n in extract_issue_numbers(subject or ""):
             add(cid, n, "issue", None)
+
+    # PR 조회는 커밋마다 GitHub 왕복이라 순차로 돌면 커밋 수만큼 누적된다.
+    # 커밋끼리 독립적이라 스레드 풀로 동시에 띄우고, 결과(PR 본문의 #N)만 모아 순차 반영한다.
+    def _pr_for(target):
+        cid, commit_hash, _subject = target
         try:
-            pr = vcs.find_pr_for_remote(remote, commit_hash)
+            return cid, vcs.find_pr_for_remote(remote, commit_hash)
         except Exception:
-            pr = None
-        if pr and pr.body:
-            for n in extract_issue_numbers(pr.body):
-                add(cid, n, "issue", None)
+            return cid, None
+
+    workers = min(vcs._FETCH_WORKERS, len(targets))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for cid, pr in ex.map(_pr_for, targets):
+            if pr and pr.body:
+                for n in extract_issue_numbers(pr.body):
+                    add(cid, n, "issue", None)
 
     # ── 티켓 경로(ticket) — 미인덱싱 커밋 전체의 티켓을 모아 OR 쿼리로 한 번에 검색. ──
     ticket_to_commits: dict[str, list[int]] = {}

@@ -112,20 +112,25 @@ class CommitFile(Base):
 class BlameExplanation(Base):
     """컨텍스트 블레임 AI 결과 캐시.
 
-    UNIQUE(file_id, commit_id) — "왜 바뀌었나"는 줄(line)이 아니라 커밋이 그 파일에 가한
-    변경의 속성이다. 줄은 그 커밋을 찾기 위한 포인터(git blame)일 뿐이므로, 같은 커밋이 바꾼
-    여러 줄은 설명 1개를 공유한다(커밋×파일 단위 dedup). 라인이 밀려 blamed 커밋이 달라지면
-    (file_id, commit_id) 가 달라져 자동 캐시 미스 → 재계산되어 stale 응답을 막는다.
+    UNIQUE(file_id, commit_id, line_history_hash) — 두 스코프를 한 테이블에 담는다:
+      · line_history_hash='' → 커밋×파일 스코프. "왜 바뀌었나"는 줄이 아니라 커밋이 그 파일에
+        가한 변경의 속성이므로, 같은 커밋이 바꾼 여러 줄(단일 리비전)은 설명 1개를 공유한다.
+      · line_history_hash=<해시> → 라인 스코프. 여러 번 수정된 줄(멀티 리비전)은 '이력 반영'
+        설명이 줄마다 달라야 하므로, 그 줄의 이력 해시로 분리 저장한다(같은 커밋의 다른 줄과 충돌 X).
+    라인이 밀려 blamed 커밋이 달라지거나 줄 이력이 바뀌면 키가 달라져 자동 미스 → 재계산(stale 방지).
     """
 
     __tablename__ = "blame_explanations"
     __table_args__ = (
-        UniqueConstraint("file_id", "commit_id", name="uq_blame_file_commit"),
+        UniqueConstraint("file_id", "commit_id", "line_history_hash", name="uq_blame_file_commit_line"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     file_id: Mapped[int] = mapped_column(ForeignKey("files.id", ondelete="CASCADE"), nullable=False)
     commit_id: Mapped[int] = mapped_column(ForeignKey("commits.id", ondelete="CASCADE"), nullable=False)
+    # 라인 스코프 캐시 키. '' = 커밋 스코프(단일 리비전, 줄들이 설명 공유).
+    # 멀티 리비전 줄은 그 줄의 이력 해시를 담아 같은 커밋의 다른 줄과 분리한다.
+    line_history_hash: Mapped[str] = mapped_column(String(64), nullable=False, server_default="")
     explanation: Mapped[str] = mapped_column(Text, nullable=False)
     ai_suggestion: Mapped[str | None] = mapped_column(Text)
     source_ref: Mapped[str | None] = mapped_column(Text)             # 예: "Issue #12: 결제 취소 정책 변경"

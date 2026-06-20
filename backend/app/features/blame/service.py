@@ -16,6 +16,7 @@ git 으로 라인 단위 마지막 커밋(diff + 커밋 메시지)을 가져오�
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -143,8 +144,12 @@ def _compose_commit_result(
     ]
     related = _build_related_changes(issues, pr, followups, file_path)
 
+    if not ai_degraded:
+        explanation = _strip_markdown(explanation)
+    headline, _ = _split_headline(explanation) if not ai_degraded else ("", "")
     result = {
         "explanation": explanation,
+        "headline": headline or None,
         "aiDegraded": ai_degraded,
         "commitHash": info.commit_hash,
         "author": info.author,
@@ -236,10 +241,12 @@ async def stream_blame(
     _remember_context(repo_path, file_path, info.commit_hash, context)
 
     # ③ 설명 스트리밍 — 토큰이 생성되는 즉시 delta 프레임으로 전달.
+    #    여러 번 수정된 줄(멀티 리비전)이면 변천 이력을 프롬프트에 실어 '이력 반영' 요약을 받는다.
+    line_digest = _build_line_history_digest(decorated_history, line_issues)
     full_text = ""
     degraded = False
     try:
-        async for delta in _stream_explain_blame(info, issues, context=context):
+        async for delta in _stream_explain_blame(info, issues, context=context, line_digest=line_digest):
             full_text += delta
             yield f"data: {json.dumps({'delta': delta}, ensure_ascii=False)}\n\n"
     except Exception as e:
@@ -260,8 +267,12 @@ async def stream_blame(
         for issue in issues
         for a in issue.attachments
     ]
+    if not degraded:
+        full_text = _strip_markdown(full_text)
+    headline, _ = _split_headline(full_text) if not degraded else ("", "")
     result = {
         "explanation": full_text,
+        "headline": headline or None,
         "aiDegraded": degraded,
         "commitHash": info.commit_hash,
         "author": info.author,
@@ -281,10 +292,12 @@ async def stream_blame(
     }
     yield f"data: {json.dumps({'done': True, **result}, ensure_ascii=False)}\n\n"
 
-    # ⑤ degraded(폴백) 가 아니면 캐시에 저장 — analyze_blame/라우터의 캐시 정책과 동일.
+    # ⑤ 캐시 저장 — degraded(폴백)는 제외. 멀티 리비전 줄은 '라인 스코프' 설명(이력 반영)이라
+    #    라인 이력 해시 키로 저장해 같은 커밋의 다른 줄과 분리한다(단일 리비전은 '' = 커밋 스코프).
+    hash_key = line_scope_hash(line_history, info.message)
     if commit is not None and file is not None and not degraded:
         try:
-            await crud.save_blame(db, file.id, commit.id, result)
+            await crud.save_blame(db, file.id, commit.id, result, hash_key)
         except Exception:
             logger.warning("blame 캐시 저장 실패 (응답에는 영향 없음)", exc_info=True)
 
@@ -303,6 +316,27 @@ def is_noise_commit(message: str) -> bool:
     노이즈는 Bedrock·GitHub 호출 없이 정형 응답으로 즉시 끝나므로, 스트리밍할 필요가 없다.
     """
     return _classify_type(message) in SKIP_TYPES
+
+
+def compute_line_history_hash(line_history: list[dict]) -> str:
+    """라인 이력(확장이 보낸 커밋 해시 순서)으로 캐시 키(SHA-256 hex)를 만든다.
+
+    타임라인 compute_commit_set_hash 와 같은 발상의 라인 스코프 버전. 줄 내용이 바뀌어
+    이력 커밋 구성이 달라지면 해시가 달라져 자동 캐시 미스 → 재생성된다(stale 방지).
+    """
+    serialized = "\n".join(c.get("hash", "") for c in line_history)
+    return hashlib.sha256(serialized.encode()).hexdigest()
+
+
+def line_scope_hash(line_history: list[dict], message: str) -> str:
+    """블레임 캐시의 라인 스코프 키를 정한다(라우터·stream_blame 공용 — 단일 진실원).
+
+    멀티 리비전(여러 번 수정된) 줄이면서 노이즈 커밋이 아닐 때만 라인 이력 해시를 쓴다.
+    그 외(단일 리비전/노이즈)는 '' = 커밋×파일 스코프(같은 커밋의 줄들이 설명 1개 공유).
+    """
+    if len(line_history) > 1 and not is_noise_commit(message):
+        return compute_line_history_hash(line_history)
+    return ""
 
 
 def _remember_context(repo_path: str, file_path: str, commit_hash: str, context: str) -> None:
@@ -659,7 +693,7 @@ def _explain_blame(
 
     try:
         text = call_bedrock(
-            _EXPLAIN_INSTRUCTION, system=_SYSTEM_PROMPT, context=context, cache=True, max_tokens=300
+            _EXPLAIN_INSTRUCTION, system=_SYSTEM_PROMPT, context=context, cache=True, max_tokens=160
         ).strip()
         return text, False
     except Exception as e:
@@ -670,13 +704,96 @@ def _explain_blame(
 
 
 # 설명 추론 작업 지시문 — _explain_blame(동기)과 _stream_explain_blame(스트리밍)이 공유한다.
-_EXPLAIN_INSTRUCTION = """위 변경 맥락을 종합해, 개발자가 이 코드를 왜 변경했는지 한국어로 1~2문장으로 설명하세요.
-기술적 커밋 메시지가 아니라, 연관 이슈와 첨부된 요구사항 문서가 알려주는 '비즈니스상의 진짜 이유'를 우선해 설명하세요.
-이슈 본문이나 첨부 라벨에 근거가 있으면 핵심 표현을 큰따옴표("…")로 인용하세요."""
+# 첫 문장을 짧은 '핵심 한 줄'로 쓰게 해, _split_headline 이 헤드라인으로 떼어 쓰게 한다.
+_EXPLAIN_INSTRUCTION = """위 변경 맥락을 종합해, 개발자가 이 코드를 왜 변경했는지 한국어로 아주 간결하게 설명하세요.
+첫 문장은 40자 이내의 핵심 요약 한 문장으로 쓰세요(예: "해외 결제 수수료 누락을 막으려고 추가했습니다.").
+보충이 꼭 필요할 때만 짧게 한 문장만 더 쓰고, 전체 2문장을 넘기지 마세요. 길게 늘어놓지 마세요.
+기술적 커밋 메시지가 아니라 연관 이슈·요구사항이 알려주는 '진짜 이유'를 우선하고, 마크다운 기호(#, *, -, --- 등)는 절대 쓰지 마세요."""
+
+
+# 첫 문장(핵심 한 줄)을 본문에서 분리하는 정규식 — 한국어 종결('…다.'/'…요.') + 일반 문장부호.
+_HEADLINE_RE = re.compile(r"^(.*?(?:다\.|요\.|[.!?]))\s*([\s\S]*)$")
+
+# 모델이 간혹 흘리는 마크다운 흔적 제거용 — 콜아웃은 평문만 렌더하므로 평문으로 정리한다.
+_MD_HR_RE = re.compile(r"(?m)^\s*-{3,}\s*$")
+_MD_HEAD_RE = re.compile(r"(?m)^\s*#{1,6}\s*")
+_MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_MD_LIST_RE = re.compile(r"(?m)^\s*(?:[-*]\s+|\d+\.\s+)")
+_MD_BLANKS_RE = re.compile(r"\n{3,}")
+
+
+def _strip_markdown(text: str) -> str:
+    """제목/굵게/구분선/목록 같은 마크다운 흔적을 떼어 평문으로 만든다.
+
+    프롬프트가 마크다운을 금지하지만, 모델이 가끔 흘리거나 옛 캐시에 남은 경우를 위한 안전망.
+    """
+    t = text or ""
+    t = _MD_HR_RE.sub("", t)
+    t = _MD_HEAD_RE.sub("", t)
+    t = _MD_BOLD_RE.sub(r"\1", t)
+    t = _MD_LIST_RE.sub("", t)
+    t = _MD_BLANKS_RE.sub("\n\n", t)
+    return t.strip()
+
+
+def extract_headline(text: str) -> str | None:
+    """공개 헬퍼 — 설명에서 핵심 한 줄을 뽑는다(캐시 적중 경로 등 외부에서 재사용)."""
+    head, _ = _split_headline(text or "")
+    return head or None
+
+
+# 멀티 리비전(여러 번 수정된) 줄에만 덧붙이는 지시 — 요구사항 변천을 한 문장으로 언급하게 한다.
+_HISTORY_CLAUSE = (
+    "\n이 줄은 여러 번 수정됐으니, 둘째 문장에서 요구사항 변천을 이슈 번호 흐름으로만 짧게"
+    "(예: \"#12 → #34\") 한 번 언급하세요. 그래도 전체 2문장을 넘기지 마세요."
+)
+
+_HISTORY_STATUS_LABEL = {"current": "현재", "past": "과거", "reverted": "되돌림"}
+
+
+def _build_line_history_digest(history: list[dict], line_issues: list[dict]) -> str:
+    """멀티 리비전 줄의 변천을 프롬프트용 블록으로 요약(최신순). 단일 리비전이면 빈 문자열.
+
+    설명 프롬프트에 '이 줄이 여러 번 어떻게 바뀌어 왔는지'의 재료를 제공한다.
+    커밋 단위 context(캐시 프리픽스)는 건드리지 않고, 라인 스코프 블록으로만 덧붙인다.
+    """
+    if len(history) <= 1:
+        return ""
+    rows = []
+    for c in history[:6]:  # 토큰 폭발 방지 상한
+        subject = (c.get("subject", "") or "").strip()
+        rows.append(f"- {c.get('date', '')} {subject}".rstrip())
+    issue_bits = [
+        f"#{it['number']}({_HISTORY_STATUS_LABEL.get(it['status'], it['status'])})"
+        for it in line_issues
+    ]
+    block = "[이 줄의 변천 이력 — 최신순]\n" + "\n".join(rows)
+    if issue_bits:
+        block += "\n[연관 이슈] " + ", ".join(issue_bits)
+    return block
+
+
+def _split_headline(text: str) -> tuple[str, str]:
+    """설명에서 첫 문장(핵심 한 줄)과 나머지 본문을 분리한다.
+
+    프롬프트가 첫 문장을 짧은 요약으로 쓰게 하므로 보통 첫 문장이 곧 헤드라인이다.
+    첫 문장이 비정상적으로 길면(런온) 헤드라인으로 부적합해 빈 문자열을 돌려준다
+    — 이 경우 프론트가 자체 휴리스틱으로 폴백한다.
+    반환: (headline, body). headline 이 빈 문자열이면 헤드라인 없음.
+    """
+    t = (text or "").strip()
+    if not t:
+        return "", ""
+    m = _HEADLINE_RE.match(t)
+    if m:
+        head = m.group(1).strip()
+        if len(head) <= 60:
+            return head, m.group(2).strip()
+    return "", t
 
 
 async def _stream_explain_blame(
-    info: git.BlameInfo, issues: list[Issue], *, context: str | None = None
+    info: git.BlameInfo, issues: list[Issue], *, context: str | None = None, line_digest: str = ""
 ) -> AsyncGenerator[str, None]:
     """_explain_blame 의 스트리밍 버전 — Bedrock 응답을 토큰(델타) 단위로 즉시 yield 한다.
 
@@ -688,10 +805,16 @@ async def _stream_explain_blame(
     if context is None:
         context = _build_context(info, issues)
 
-    llm = get_bedrock_llm(max_tokens=300)
+    # 멀티 리비전 줄이면 변천 이력 블록 + 이력 반영 지시를 덧붙인다(단일 리비전이면 line_digest="").
+    if line_digest:
+        human = f"{context}\n\n{line_digest}\n\n{_EXPLAIN_INSTRUCTION}{_HISTORY_CLAUSE}"
+    else:
+        human = f"{context}\n\n{_EXPLAIN_INSTRUCTION}"
+
+    llm = get_bedrock_llm(max_tokens=160)
     messages = [
         SystemMessage(content=_SYSTEM_PROMPT),
-        HumanMessage(content=f"{context}\n\n{_EXPLAIN_INSTRUCTION}"),
+        HumanMessage(content=human),
     ]
     async for chunk in llm.astream(messages):
         piece = chunk.content

@@ -15,11 +15,14 @@ git 로컬 정보만으로는 알 수 없는 'PR(MR) 단위' 맥락을 호스팅
 import json
 import re
 import subprocess
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from functools import lru_cache
+from functools import lru_cache, wraps
 
 from app.core.config import (
     get_attachment_domain_allowlist,
@@ -33,6 +36,11 @@ _TIMEOUT = 6  # 초 — 호스팅 API 가 느려도 블레임 응답을 오래 �
 # 라인 클릭마다 같은 PR·Issue 를 재조회하는 비용을 차단한다. 128은 한 세션의
 # 활성 PR/Issue 수보다 넉넉히 큰 값. 프로세스 재시작 시 자연 무효화.
 _VCS_CACHE_SIZE = 128
+
+# 이슈/커밋별 GitHub 왕복을 동시에 묶을 스레드 수. 각 호출은 urllib 블로킹이라
+# 순차로 돌면 건수만큼 누적되는데, 동시에 띄우면 사실상 가장 느린 한 건에 수렴한다.
+# 8은 GitHub 2차 rate limit(동시 요청 과다)을 자극하지 않는 보수적인 상한.
+_FETCH_WORKERS = 8
 
 
 @dataclass
@@ -189,6 +197,46 @@ def _get_json(url: str, headers: dict) -> object:
         return json.loads(resp.read().decode("utf-8"))
 
 
+# ─── 단기 TTL 캐시 ────────────────────────────────────────────────────
+# 이슈 메타/타임라인은 가변(상태·라벨·담당자·코멘트)이라 lru_cache 로 영구 캐시할 수 없다.
+# 하지만 IDE 사이드바 열람 시나리오에선 초 단위 staleness 가 체감되지 않으므로,
+# '항상 최신(0초)' 대신 짧은 TTL 로 웜 경로(재조회·스크롤 재렌더·이슈 간 이동)를 즉답화한다.
+_META_TTL = 30        # 초 — 이슈 메타/타임라인 캐시 수명
+_META_CACHE_MAX = 256  # 항목 상한 — 만료분부터, 그래도 차면 가장 오래된 것부터 제거
+
+
+def _ttl_cache(ttl: float, maxsize: int = _META_CACHE_MAX):
+    """인자(args) 기준 TTL 메모이즈 데코레이터.
+
+    lru_cache 와 달리 ttl 초가 지나면 다시 조회한다. _FETCH_WORKERS 스레드 풀에서
+    동시 호출되므로 락으로 보호한다(콜드 레이스 시 중복 페치가 날 순 있으나 무해).
+    """
+    def decorator(fn):
+        store: dict = {}
+        lock = threading.Lock()
+
+        @wraps(fn)
+        def wrapper(*args):
+            now = time.monotonic()
+            with lock:
+                hit = store.get(args)
+                if hit is not None and now - hit[0] < ttl:
+                    return hit[1]
+            value = fn(*args)
+            with lock:
+                if len(store) >= maxsize:
+                    for k in [k for k, (ts, _v) in store.items() if now - ts >= ttl]:
+                        del store[k]
+                    if len(store) >= maxsize:
+                        del store[min(store, key=lambda k: store[k][0])]
+                store[args] = (now, value)
+            return value
+
+        wrapper.cache_clear = store.clear  # 테스트/디버그용
+        return wrapper
+    return decorator
+
+
 # ─── GitHub ─────────────────────────────────────────────────────────
 def _github_headers() -> dict:
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "codewhy"}
@@ -279,12 +327,13 @@ def _github_pr_files(base: str, owner: str, repo: str, number: int) -> tuple[dic
     return tuple(collected)
 
 
+@_ttl_cache(_META_TTL)
 def _github_issue(base: str, owner: str, repo: str, number: int) -> dict:
     """Issue 본문/메타(상태/라벨/담당자/코멘트수) 페치. 실패 시 빈 dict.
 
-    ⚠️ 캐시하지 않는다. 같은 응답에 본문(거의 불변)과 가변 메타(담당자/라벨/상태)가
-    함께 오는데, service.trace_file·fetch_issues_batch 는 메타가 '매 요청 최신'이라고
-    약속한다. 캐시하면 담당자를 나중에 지정해도 옛 결과가 고정돼 '미지정'으로 보인다.
+    같은 응답에 본문(거의 불변)과 가변 메타(담당자/라벨/상태)가 함께 온다. 영구 캐시하면
+    담당자를 나중에 지정해도 옛 결과가 고정돼 '미지정'으로 보이므로, _META_TTL(초) 만큼만
+    캐시해 신선도를 유지하면서 웜 경로 재조회를 즉답화한다.
     """
     payload = _get_json(f"{base}/repos/{owner}/{repo}/issues/{number}", _github_headers())
     return payload if isinstance(payload, dict) else {}
@@ -295,14 +344,15 @@ def _github_issue(base: str, owner: str, repo: str, number: int) -> dict:
 _GH_TIMELINE_EVENTS = {"commented", "labeled", "assigned", "committed", "referenced", "closed", "reopened"}
 
 
+@_ttl_cache(_META_TTL)
 def _github_issue_timeline(base: str, owner: str, repo: str, number: int) -> list:
     """이슈 활동 타임라인(코멘트+이벤트)을 페치해 Comment 리스트로 반환.
 
     GitHub Timeline API(/issues/{n}/timeline)는 코멘트와 시스템 이벤트를 시간순
     한 배열로 준다 — 상세 화면의 활동 피드와 정확히 일치한다. 실패하면 빈 리스트.
 
-    ⚠️ 의도적으로 캐시하지 않는다. 코멘트는 본문/첨부(거의 불변, lru_cache 대상)와 달리
-    빈번히 추가되므로, 캐시하면 코멘트를 단 직후 재조회해도 옛 결과가 돌아온다(신선도 우선).
+    코멘트는 본문/첨부(거의 불변)와 달리 빈번히 추가되므로 영구 캐시할 수 없다.
+    _META_TTL(초) 만큼만 캐시해, 단 직후가 아니면 최신을 보장하면서 재렌더를 즉답화한다.
     """
     headers = {**_github_headers(), "Accept": "application/vnd.github+json"}
     url = f"{base}/repos/{owner}/{repo}/issues/{number}/timeline?per_page=100"
@@ -563,40 +613,56 @@ def _issue_from_gitlab(payload: dict, iid: int) -> Issue:
     )
 
 
+def _fetch_one_issue(remote: Remote, n: int) -> "Issue | None":
+    """이슈 한 건의 본문·첨부·타임라인을 채워 Issue 로 반환. 실패/빈 결과면 None.
+
+    이슈끼리 독립적인 네트워크 왕복이라 _fetch_issues 가 이 함수를 스레드로 병렬 호출한다.
+    """
+    try:
+        if remote.host == "github":
+            payload = _github_issue(remote.base, remote.owner, remote.repo, n)
+            if not payload:
+                return None
+            issue = _issue_from_github(payload, n)
+            issue.comments = _github_issue_timeline(remote.base, remote.owner, remote.repo, n)
+            return issue
+        if remote.host == "gitlab":
+            payload = _gitlab_issue(remote.base, remote.owner, remote.repo, n)
+            if not payload:
+                return None
+            issue = _issue_from_gitlab(payload, n)
+            issue.comments = _gitlab_issue_notes(remote.base, remote.owner, remote.repo, n)
+            return issue
+    except (urllib.error.URLError, KeyError, ValueError, TimeoutError):
+        return None
+    return None
+
+
 def _fetch_issues(remote: Remote, numbers: list[int]) -> list[Issue]:
-    """이슈 번호 목록으로 GitHub/GitLab 에서 본문·첨부를 채워 Issue 객체로 반환."""
-    issues: list[Issue] = []
-    for n in numbers:
-        try:
-            if remote.host == "github":
-                payload = _github_issue(remote.base, remote.owner, remote.repo, n)
-                if not payload:
-                    continue
-                issue = _issue_from_github(payload, n)
-                issue.comments = _github_issue_timeline(remote.base, remote.owner, remote.repo, n)
-                issues.append(issue)
-            elif remote.host == "gitlab":
-                payload = _gitlab_issue(remote.base, remote.owner, remote.repo, n)
-                if not payload:
-                    continue
-                issue = _issue_from_gitlab(payload, n)
-                issue.comments = _gitlab_issue_notes(remote.base, remote.owner, remote.repo, n)
-                issues.append(issue)
-        except (urllib.error.URLError, KeyError, ValueError, TimeoutError):
-            continue
-    return issues
+    """이슈 번호 목록으로 GitHub/GitLab 에서 본문·첨부를 채워 Issue 객체로 반환.
+
+    번호당 (이슈 메타 + 타임라인) 왕복이 발생하므로 순차로 돌면 건수만큼 누적된다.
+    이슈끼리 독립적이라 스레드 풀로 동시에 띄워 전체 지연을 가장 느린 한 건 수준으로 줄인다.
+    """
+    if not numbers:
+        return []
+    workers = min(_FETCH_WORKERS, len(numbers))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return [issue for issue in ex.map(lambda n: _fetch_one_issue(remote, n), numbers) if issue]
 
 
+@_ttl_cache(_META_TTL)
 def _gitlab_issue(base: str, owner: str, repo: str, iid: int) -> dict:
     """GitLab Issue 본문/메타 페치. 실패 시 빈 dict.
 
-    ⚠️ _github_issue 와 같은 이유로 캐시하지 않는다 — 담당자/라벨/상태 메타 신선도 우선.
+    _github_issue 와 같은 이유로 _META_TTL(초) 만큼만 캐시한다 — 메타 신선도와 웜 경로 속도의 타협.
     """
     project_id = urllib.parse.quote(f"{owner}/{repo}", safe="")
     payload = _get_json(f"{base}/projects/{project_id}/issues/{iid}", _gitlab_headers())
     return payload if isinstance(payload, dict) else {}
 
 
+@_ttl_cache(_META_TTL)
 def _gitlab_issue_notes(base: str, owner: str, repo: str, iid: int) -> list:
     """GitLab Issue notes(코멘트+시스템 노트) → Comment 리스트(시간순). 실패 시 빈 리스트.
 
@@ -604,7 +670,7 @@ def _gitlab_issue_notes(base: str, owner: str, repo: str, iid: int) -> list:
     영어 평문). GitHub timeline 처럼 구조가 분해돼 있지 않으므로, 시스템 노트는
     event="note" 로 두고 본문을 그대로 싣는다(프론트가 평문 한 줄로 그린다).
 
-    ⚠️ GitHub 타임라인과 같은 이유로 캐시하지 않는다 — 코멘트 신선도 우선.
+    GitHub 타임라인과 같은 이유로 _META_TTL(초) 만큼만 캐시한다 — 코멘트 신선도와 속도의 타협.
     """
     project_id = urllib.parse.quote(f"{owner}/{repo}", safe="")
     url = f"{base}/projects/{project_id}/issues/{iid}/notes?sort=asc&order_by=created_at&per_page=100"

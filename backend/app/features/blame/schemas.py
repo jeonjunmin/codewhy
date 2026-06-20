@@ -102,6 +102,7 @@ class LineIssue(BaseModel):
 
 class BlameResponse(BaseModel):
     explanation: str
+    headline: str | None = None      # 핵심 한 줄 요약(콜아웃 첫 줄 강조용). 첫 문장에서 추출.
     commitHash: str
     author: str
     date: str

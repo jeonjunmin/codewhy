@@ -204,7 +204,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
                 type: 'blResult',
                 payload: {
                     explanation: (r.explanation ?? '').trim(),
+                    headline: r.headline ?? null,
                     sourceRef: r.sourceRef ?? r.specRef ?? null,
+                    team: r.team ?? null,
+                    ticket: r.ticket ?? null,
                     changeStats: r.changeStats,
                     prInfo: r.prInfo,
                 },
@@ -391,6 +394,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             fileName,
             line: ctx.line,
             explanation: (r.explanation ?? '').trim(),
+            headline: r.headline ?? null,
             author: r.author,
             team: r.team,
             commitShort: (r.commitHash || '').slice(0, 7),
@@ -550,40 +554,80 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .callout {
         background: var(--callout-bg);
         border: 1px solid var(--line-soft);
-        border-radius: 12px;
-        padding: 12px 14px;
+        border-radius: 14px;
+        padding: 14px 16px;
     }
-    .callout__title {
+    /* 작성자 행 — 아바타 + 이름 + 날짜 */
+    .callout__author { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; }
+    .callout__avatar {
+        flex-shrink: 0; width: 30px; height: 30px; border-radius: 50%;
+        display: inline-flex; align-items: center; justify-content: center;
+        background: var(--grad); color: #fff;
+        font-size: 11px; font-weight: 700; letter-spacing: 0.3px;
+    }
+    .callout__who { display: flex; flex-direction: column; line-height: 1.3; min-width: 0; }
+    .callout__name { color: var(--fg); font-size: 12.5px; font-weight: 600; }
+    .callout__when { color: var(--fg-mute); font-size: 11px; }
+    /* 핵심 한 줄 — 굵게, 가장 먼저 눈에 들어오는 결론 */
+    .callout__lead { color: var(--fg); font-size: 13.5px; line-height: 1.62; font-weight: 600; }
+    /* 자세한 배경 */
+    .callout__detail { margin-top: 13px; }
+    .callout__detail-label { color: var(--fg-mute); font-size: 11px; font-weight: 500; margin-bottom: 5px; }
+    .callout__detail-body { color: var(--fg-dim); font-size: 12.5px; line-height: 1.65; }
+    /* 핵심 구절 강조(마커) — 백엔드 **강조** 구절을 옅은 보라 형광펜으로.
+       작성자 이름(.callout__name)도 <strong> 이므로, 본문 영역으로만 범위를 좁힌다. */
+    .callout__lead strong, .callout__lead b,
+    .callout__detail-body strong, .callout__detail-body b {
+        font-weight: 700; color: var(--fg);
+        background: rgba(167,139,250,0.16);
+        border-radius: 3px; padding: 0 3px;
+        -webkit-box-decoration-break: clone; box-decoration-break: clone;
+    }
+    .callout__more {
         display: inline-flex; align-items: center; gap: 6px;
-        color: var(--accent-violet);
-        font-size: 11.5px; font-weight: 600;
-        margin-bottom: 6px;
+        margin-top: 13px; padding: 0; background: none; border: none;
+        color: var(--fg-mute); font-size: 11.5px; cursor: pointer; font-family: inherit;
     }
-    .callout__body {
-        color: var(--fg); font-size: 13px; line-height: 1.6;
+    .callout__more::before {
+        content: ''; width: 0; height: 0;
+        border-left: 4px solid transparent; border-right: 4px solid transparent;
+        border-top: 5px solid currentColor;
     }
-    .callout__body .ca-author { color: var(--accent-violet); font-weight: 700; }
-    .callout__body code {
+    /* 펼친 상태(접기) — 셰브론을 위로 뒤집는다 */
+    .callout__more.expanded::before {
+        border-top: none; border-bottom: 5px solid currentColor;
+    }
+    .callout__more:hover { color: var(--fg-dim); }
+    /* 출처/팀/PR 칩 — 메타 표에 묻혀 있던 핵심을 콜아웃 옆에서 한눈에. */
+    .callout__chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+    .ca-chip {
+        display: inline-flex; align-items: center; gap: 4px;
+        font-size: 11px; padding: 2px 8px; border-radius: 6px;
+        background: var(--surface); border: 1px solid var(--line); color: var(--fg-dim);
+    }
+    .ca-chip svg { opacity: 0.8; }
+    .ca-chip--src { color: var(--accent-violet); border-color: var(--line-soft); }
+    .callout code {
         background: var(--code-bg); color: var(--code-fg);
         padding: 1px 5px; border-radius: 4px; font-size: 11.5px;
     }
 
-    /* ── 파일 브레드크럼 ─────────────────────────────────────────── */
+    /* ── 파일 헤더(상단) ─────────────────────────────────────────── */
     .crumb {
-        display: flex; align-items: center; gap: 6px;
-        padding: 6px 0; border-bottom: 1px solid var(--line);
-        color: var(--fg-dim); font-size: 12px;
+        display: flex; align-items: center; gap: 8px;
+        padding: 2px 2px 12px;
+        color: var(--fg-dim); font-size: 12.5px;
     }
-    .crumb__icon {
-        width: 16px; height: 16px;
-        display: inline-flex; align-items: center; justify-content: center;
-        background: #6D28D9; color: #fff; border-radius: 3px;
-        font-size: 10px; font-weight: 700;
+    .crumb__file { color: var(--fg-dim); }
+    .crumb__line {
+        color: var(--accent-violet);
+        background: rgba(167,139,250,0.12);
+        border: 1px solid var(--line-soft);
+        padding: 1px 7px; border-radius: 6px;
+        font-size: 11px; font-weight: 600;
     }
-    .crumb__sep { color: var(--fg-mute); }
-    .crumb__line { color: var(--fg-dim); }
     .crumb__dot {
-        margin-left: auto; width: 7px; height: 7px;
+        margin-left: auto; width: 8px; height: 8px;
         background: var(--accent-cyan); border-radius: 50%;
         box-shadow: 0 0 8px rgba(103,232,249,0.55);
     }
@@ -718,26 +762,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .pane.hidden { display: none !important; }
 
     /* ── 타임라인 페인 ───────────────────────────────────────────── */
-    .file-chip {
-        display: inline-flex; align-items: center; gap: 5px;
-        font-size: 11px; color: var(--fg-dim);
-        background: var(--surface); border: 1px solid var(--line);
-        border-radius: 6px; padding: 3px 9px;
-        max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    }
-    .file-chip-name { font-weight: 600; color: var(--fg); }
-    .ai-card {
-        background: var(--callout-bg);
-        border: 1px solid var(--line-soft);
-        border-radius: 12px; padding: 12px 14px;
-    }
-    .ai-card__label {
-        display: inline-flex; align-items: center; gap: 6px;
-        color: var(--accent-violet); font-size: 11.5px; font-weight: 600;
-        margin-bottom: 6px;
-    }
-    .ai-card__text { color: var(--fg); font-size: 12.5px; line-height: 1.7; }
-    .ai-card__text strong { color: #fff; font-weight: 700; }
+    /* 요약 카드·헤더는 블레임과 동일한 .callout / .crumb 스타일을 공유한다. */
     .caret {
         display: inline-block; width: 2px; height: 1em; margin-left: 2px;
         vertical-align: text-bottom; background: var(--accent-violet);
@@ -820,7 +845,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
     .is-search input::placeholder { color: var(--fg-mute); }
 
-    /* 상태 필터 탭 (전체/열림/닫힘/초안) */
+    /* 상태 필터 탭 (전체/열림/닫힘) */
     .is-filters { display: flex; gap: 4px; }
     .is-filter {
         display: inline-flex; align-items: center; gap: 5px;
@@ -853,8 +878,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .is-item__state.open::before { background: #4ADE80; box-shadow: 0 0 5px rgba(74,222,128,0.6); }
     .is-item__state.closed { color: #F87171; }
     .is-item__state.closed::before { background: #F87171; }
-    .is-item__state.draft { color: var(--accent-violet); }
-    .is-item__state.draft::before { background: var(--accent-violet); }
     .is-item__num { color: var(--fg-mute); font-size: 11px; font-weight: 600; }
     /* 등록일 — 머리 줄 오른쪽 끝에 옅게. */
     .is-item__date { margin-left: auto; color: var(--fg-mute); font-size: 10.5px; }
@@ -881,7 +904,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .is-item__metaright {
         margin-left: auto; flex-shrink: 0;
         display: inline-flex; align-items: center; gap: 9px;
-        color: var(--fg-mute); font-size: 10.5px;
+        color: var(--fg-mute); font-size: 11.5px;
     }
     .is-item__metaright span { display: inline-flex; align-items: center; gap: 3px; }
     /* 담당자 아바타 (이름 첫 글자) */
@@ -920,8 +943,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .is-d-state.open::before { background: #4ADE80; box-shadow: 0 0 6px rgba(74,222,128,0.6); }
     .is-d-state.closed { color: #F87171; border-color: rgba(248,113,113,0.4); }
     .is-d-state.closed::before { background: #F87171; }
-    .is-d-state.draft { color: var(--accent-violet); border-color: var(--line-soft); }
-    .is-d-state.draft::before { background: var(--accent-violet); }
     .is-d-num { color: var(--fg-mute); font-size: 12px; font-weight: 600; }
     .is-d-ai {
         flex-shrink: 0; display: inline-flex; align-items: center; gap: 5px;
@@ -1073,28 +1094,28 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div id="content" class="body hidden">
-        <section class="callout">
-            <div class="callout__title">
-                <span id="ico-callout"></span> 이 라인이 추가된 이유
-            </div>
-            <div class="callout__body" id="narrative"></div>
-        </section>
-
         <div class="crumb">
-            <span class="crumb__icon" id="file-kind">K</span>
-            <span class="mono" id="file-name"></span>
-            <span class="crumb__sep">›</span>
+            <span class="mono crumb__file" id="file-name"></span>
             <span class="crumb__line mono" id="file-line"></span>
             <span class="crumb__dot"></span>
         </div>
 
-        <dl class="meta">
-            <dt>작성자</dt><dd class="author"><strong id="author-name"></strong><span id="author-team-wrap" class="hidden">&nbsp;·&nbsp;<span id="author-team"></span></span></dd>
-            <dt>커밋</dt><dd><a class="link mono" id="meta-commit" data-action="openCommit"></a><span id="meta-ticket-wrap" class="hidden"> — <span class="ticket" id="meta-ticket"></span></span></dd>
-            <dt>날짜</dt><dd><span id="meta-date"></span><span id="meta-relative-wrap" class="hidden"> <span style="color:var(--fg-mute)">(<span id="meta-relative"></span>)</span></span></dd>
-            <dt>변경</dt><dd id="meta-change">—</dd>
-            <dt>출처</dt><dd id="meta-source">—</dd>
-        </dl>
+        <section class="callout">
+            <div class="callout__author">
+                <span class="callout__avatar" id="ca-avatar"></span>
+                <span class="callout__who">
+                    <strong class="callout__name" id="ca-name"></strong>
+                    <span class="callout__when" id="ca-when"></span>
+                </span>
+            </div>
+            <div class="callout__lead" id="narrative"></div>
+            <section class="callout__detail hidden" id="ca-detail-sec">
+                <div class="callout__detail-label">자세한 배경</div>
+                <div class="callout__detail-body" id="ca-detail"></div>
+            </section>
+            <button class="callout__more expanded hidden" id="callout-more" data-action="toggleCallout">접기</button>
+            <div class="callout__chips hidden" id="callout-chips"></div>
+        </section>
 
         <section id="lineissues-wrap" class="hidden">
             <div class="history__title">연관 이슈</div>
@@ -1112,11 +1133,18 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     <div id="pane-timeline" class="pane hidden">
         <div id="tl-empty" class="empty">파일을 연 뒤 <strong>타임라인</strong> 탭을 누르면<br/>이 파일의 변경 역사를 요약해 드립니다.</div>
         <div id="tl-body" class="body hidden">
-            <div class="file-chip"><span>📄</span><span class="file-chip-name" id="tl-file"></span></div>
-            <div class="ai-card">
-                <div class="ai-card__label"><span id="ico-tl-spark"></span> AI 요약</div>
-                <div class="ai-card__text" id="tl-summary"></div>
+            <div class="crumb">
+                <span class="mono crumb__file" id="tl-file"></span>
+                <span class="crumb__dot"></span>
             </div>
+            <section class="callout">
+                <div class="callout__lead" id="tl-summary"></div>
+                <section class="callout__detail hidden" id="tl-detail-sec">
+                    <div class="callout__detail-label">자세한 배경</div>
+                    <div class="callout__detail-body" id="tl-detail"></div>
+                </section>
+                <button class="callout__more expanded hidden" id="tl-more" data-action="toggleCallout">접기</button>
+            </section>
             <section id="tl-ms-wrap" class="hidden">
                 <div class="related__title">주요 마일스톤 <span id="tl-ms-count"></span></div>
                 <div class="tl-list" id="tl-list"></div>
@@ -1151,7 +1179,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
                     <button class="is-filter active" data-filter="all">전체 <span class="is-filter__n" data-count="all">0</span></button>
                     <button class="is-filter" data-filter="open">열림 <span class="is-filter__n" data-count="open">0</span></button>
                     <button class="is-filter" data-filter="closed">닫힘 <span class="is-filter__n" data-count="closed">0</span></button>
-                    <button class="is-filter" data-filter="draft">초안 <span class="is-filter__n" data-count="draft">0</span></button>
                 </div>
                 <div class="related__list" id="is-list"></div>
                 <div id="is-list-empty" class="empty hidden">검색 결과가 없습니다.</div>
@@ -1189,19 +1216,19 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         shieldBig: '<svg width="30" height="30" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.1"><path d="M8 1l6 2v5c0 4-2.8 6.6-6 7-3.2-.4-6-3-6-7V3l6-2z"/><path d="M5.5 8l1.8 1.8L11 6" stroke-width="1.3"/></svg>',
         sparkBig: '<svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l1.5 4.5L14 7l-4.5 1.5L8 13l-1.5-4.5L2 7l4.5-1.5L8 1z"/></svg>',
         // 코멘트 수 칩 — 이모지(💬) 대신 SVG 말풍선(웹뷰 폰트에서 깨지지 않음).
-        comment: '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M2 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H6.5L4 13.5V11H3a1 1 0 0 1-1-1V4z"/></svg>',
+        comment: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M2 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H6.5L4 13.5V11H3a1 1 0 0 1-1-1V4z"/></svg>',
         // 첨부 수 칩 — 이모지(📎) 대신 SVG 클립.
-        clip: '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 7.2l-5 5a2.8 2.8 0 0 1-4-4l5.2-5.2a1.8 1.8 0 0 1 2.6 2.6l-5.2 5.2a.8.8 0 0 1-1.2-1.2l4.6-4.6"/></svg>',
+        clip: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 7.2l-5 5a2.8 2.8 0 0 1-4-4l5.2-5.2a1.8 1.8 0 0 1 2.6 2.6l-5.2 5.2a.8.8 0 0 1-1.2-1.2l4.6-4.6"/></svg>',
+        // 팀 칩용 — 사람 둘.
+        users: '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="6" cy="5" r="2.2"/><path d="M2 13c0-2.2 1.8-3.6 4-3.6s4 1.4 4 3.6"/><path d="M10.6 3.2a2.2 2.2 0 0 1 0 4.1M11 9.6c1.8.2 3 1.5 3 3.4"/></svg>',
     };
     // 아이콘 주입은 보조 장식이므로, 한 요소가 없더라도 핸드셰이크(ready)까지 죽지 않게 격리한다.
     try {
         const setIcon = (id, svg) => { const el = document.getElementById(id); if (el) { el.innerHTML = svg; } };
-        setIcon('ico-callout', ICON.spark);
         setIcon('ico-info', ICON.spark);
         setIcon('ico-tab-blame', ICON.search);   // '돋보기' 탭 — 용어에 맞춰 돋보기 아이콘
         setIcon('ico-tab-timeline', ICON.clock);
         setIcon('ico-tab-issue', ICON.branch);
-        setIcon('ico-tl-spark', ICON.spark);
         setIcon('ico-hero-shield', ICON.shieldBig);
         setIcon('ico-hero-spark', ICON.sparkBig);
         setIcon('ico-hero-check', ICON.check);
@@ -1253,9 +1280,12 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     function tlStreaming(p) {
         tlText = p.text || '';
         document.getElementById('tl-file').textContent = p.fileName || '';
+        // 핵심/배경 분리·접기는 done(tlResult)에서 확정하고, 스트리밍 중엔 캐럿만 띄운다.
         document.getElementById('tl-summary').innerHTML = tlText
             ? renderBold(tlText) + '<span class="caret"></span>'
             : '<span class="spinner"></span>AI가 소스 코드를 분석 중입니다…';
+        document.getElementById('tl-detail-sec').classList.add('hidden');
+        document.getElementById('tl-more').classList.add('hidden');
         document.getElementById('tl-ms-wrap').classList.add('hidden');
         tlShow('body');
     }
@@ -1265,7 +1295,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
     function tlResult(p) {
         document.getElementById('tl-file').textContent = p.fileName || '';
-        document.getElementById('tl-summary').innerHTML = renderBold(p.summary || '');
+        // 요약을 핵심 한 줄 / 자세한 배경으로 가르고 캐럿을 거둔다(블레임 콜아웃과 동일).
+        tlFillSummary(p.summary || '');
         const wrap = document.getElementById('tl-ms-wrap');
         const list = document.getElementById('tl-list');
         list.innerHTML = '';
@@ -1383,7 +1414,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     let isFileName = '';
     let isIndex = 0;
     let isQuery = '';
-    let isFilter = 'all';   // all | open | closed | draft
+    let isFilter = 'all';   // all | open | closed
     let isScope = 'file';   // 'file'(파일 검색) | 'commit'(라인 이력의 '이슈 N' 배지)
     // 현재 목록에 '보이는' 항목들의 원본 isDocs 인덱스(필터+검색 적용 순서).
     // 상세 이전/다음은 isDocs 전체가 아니라 이 부분집합 안에서만 이동해야 한다(버그 #4).
@@ -1391,12 +1422,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     // 비었으면(예: 커밋 스코프) 전체를 보이는 것으로 간주한다.
     function visibleList() { return isVisible.length ? isVisible : isDocs.map((_, i) => i); }
 
-    // 이슈 상태를 필터 버킷으로 분류한다. 백엔드 state(open/closed)에 더해
-    // 'draft'(초안)도 받을 수 있게 열어 둔다(미전송 시 초안 탭은 0건).
+    // 이슈 상태를 필터 버킷으로 분류한다. 백엔드 state(open/closed) 기준.
     function issueBucket(d) {
         const s = String((d && d.state) || '').toLowerCase();
         if (s === 'closed') { return 'closed'; }
-        if (s === 'draft') { return 'draft'; }
         return 'open';
     }
 
@@ -1474,9 +1503,18 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         const list = document.getElementById('is-list');
         list.innerHTML = '';
 
-        // 상태별 건수 — 필터 탭 배지 갱신.
-        const counts = { all: isDocs.length, open: 0, closed: 0, draft: 0 };
-        isDocs.forEach(d => { counts[issueBucket(d)]++; });
+        // 검색어(제목/번호/라벨) 일치 여부 — 카운트와 목록이 같은 기준을 쓰게 헬퍼로 묶는다.
+        const q = isQuery.trim().toLowerCase();
+        const matchesQuery = (d) => {
+            if (!q) { return true; }
+            const hay = [d.title || '', d.issueNumber != null ? ('#' + d.issueNumber) : '', (d.labels || []).join(' ')]
+                .join(' ').toLowerCase();
+            return hay.indexOf(q) !== -1;
+        };
+
+        // 상태별 건수 — 필터 탭 배지 갱신. 검색어를 통과한 항목만 세어 탭 숫자와 실제 목록 건수를 일치시킨다.
+        const counts = { all: 0, open: 0, closed: 0 };
+        isDocs.forEach(d => { if (matchesQuery(d)) { counts.all++; counts[issueBucket(d)]++; } });
         document.querySelectorAll('#is-filters .is-filter__n').forEach(n => {
             n.textContent = counts[n.dataset.count] != null ? counts[n.dataset.count] : 0;
         });
@@ -1484,17 +1522,12 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             b.classList.toggle('active', b.dataset.filter === isFilter);
         });
 
-        // 검색어(제목/번호/라벨) + 상태 필터로 거른다. 원본 인덱스를 유지해 상세 이동이 어긋나지 않게 한다.
+        // 검색어 + 상태 필터로 거른다. 원본 인덱스를 유지해 상세 이동이 어긋나지 않게 한다.
         // 보이는 항목의 원본 인덱스를 isVisible 에 같은 순서로 쌓아, 상세 이전/다음이 이 부분집합만 돌게 한다.
-        const q = isQuery.trim().toLowerCase();
         isVisible = [];
         isDocs.forEach((d, i) => {
             if (isFilter !== 'all' && issueBucket(d) !== isFilter) { return; }
-            if (q) {
-                const hay = [d.title || '', d.issueNumber != null ? ('#' + d.issueNumber) : '', (d.labels || []).join(' ')]
-                    .join(' ').toLowerCase();
-                if (hay.indexOf(q) === -1) { return; }
-            }
+            if (!matchesQuery(d)) { return; }
             list.appendChild(renderIssueItem(d, i));
             isVisible.push(i);
         });
@@ -1504,11 +1537,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         listEmpty.textContent = '검색 결과가 없습니다.';
         listEmpty.classList.toggle('hidden', shown > 0);
     }
-    // 상태 버킷 → 표시 라벨/클래스 (열림/닫힘/초안).
+    // 상태 버킷 → 표시 라벨/클래스 (열림/닫힘).
     const IS_STATE = {
         open:   { label: '열림', cls: 'open' },
         closed: { label: '닫힘', cls: 'closed' },
-        draft:  { label: '초안', cls: 'draft' },
     };
     // 담당자 아바타 배경색 — 이름을 해시해 안정적으로 같은 색을 준다.
     const AVA_COLORS = ['#E05454', '#2CB8B8', '#8B5CF6', '#D97706', '#16A34A', '#3B82F6', '#EC4899', '#F97316'];
@@ -1958,8 +1990,116 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     // 타임라인 tlStreaming/tlDelta/tlResult 와 동일한 3단 흐름.
     // blStreaming: meta 로 메타표·이력을 즉시 그리고 콜아웃에 캐럿을 띄운다.
     // blDelta    : 설명 토큰을 콜아웃(#ca-exp)에 이어 붙인다.
-    // blResult   : 캐럿 제거 + 출처/변경(PR 포함) 확정.
+    // blResult   : 캐럿 제거 + 핵심 한 줄 강조 + 접기 + 칩 확정.
     let blExp = '';
+
+    // 설명을 '핵심 한 줄(lead)'과 '자세한 배경(rest)'으로 가른다.
+    // 백엔드 headline 이 있으면 그것을 핵심으로, 없으면 첫 문장(…다./…요./. ! ?)을 경계로 본다.
+    function splitLead(text, headline) {
+        const t = String(text || '').trim();
+        const h = String(headline || '').trim();
+        if (h) {
+            // 본문이 핵심 문장으로 시작하면 그 뒤만 배경으로(중복 방지), 아니면 본문 전체를 배경으로.
+            if (t && t.indexOf(h) === 0) {
+                return { lead: h, rest: t.slice(h.length).replace(/^[\\s,]+/, '').trim() };
+            }
+            return { lead: h, rest: t };
+        }
+        if (!t) { return { lead: '', rest: '' }; }
+        // 헤드라인이 없을 때의 폴백 — 첫 문장 끝까지를 핵심으로.
+        let m = t.match(/^[\\s\\S]*?(?:다\\.|요\\.|[.!?])/);
+        // 한 문장이 너무 길거나(런온) 종결부호가 없으면 첫 쉼표(절 경계)까지를 핵심으로 잡는다.
+        if (!m || m[0].length > 45) {
+            const c = t.match(/^[\\s\\S]{10,60}?,/);
+            if (c) { m = c; }
+        }
+        if (m) {
+            return {
+                lead: m[0].replace(/[\\s,]+$/, ''),
+                rest: t.slice(m[0].length).replace(/^[\\s,]+/, '').trim(),
+            };
+        }
+        return { lead: t, rest: '' };
+    }
+
+    // 작성자 이름 → 아바타 이니셜. "yejin-kb" → "YK", "홍길동" → "홍".
+    function initials(name) {
+        const parts = String(name || '').split(/[^A-Za-z0-9가-힣]+/).filter(Boolean);
+        if (!parts.length) { return '?'; }
+        const a = parts[0].charAt(0);
+        const b = parts.length > 1 ? parts[1].charAt(0) : '';
+        return (a + b).toUpperCase();
+    }
+
+    // "2026-06-07" → "2026년 6월 7일". 파싱 실패 시 원본 그대로.
+    function longDateKo(iso) {
+        const m = String(iso || '').match(/(\\d{4})-(\\d{1,2})-(\\d{1,2})/);
+        if (!m) { return iso || ''; }
+        return m[1] + '년 ' + Number(m[2]) + '월 ' + Number(m[3]) + '일';
+    }
+
+    // 작성자 행(아바타 + 이름 + 날짜)을 채운다. 메타(스트리밍)·결과(캐시) 양쪽에서 호출.
+    function fillAuthor(p) {
+        const av = document.getElementById('ca-avatar');
+        const nm = document.getElementById('ca-name');
+        const wh = document.getElementById('ca-when');
+        if (av) { av.textContent = initials(p.author); }
+        if (nm) { nm.textContent = p.author || '?'; }
+        if (wh) {
+            const d = longDateKo(p.dateFull);
+            wh.textContent = d + (p.relative ? ' · ' + p.relative + ' 수정' : '');
+        }
+    }
+
+    // 콜아웃 본문을 핵심 한 줄(lead)과 자세한 배경(detail)으로 갈라 채운다(요소 기반).
+    // 블레임·타임라인이 같은 .callout 구조를 공유하므로 ID 만 달리해 재사용한다.
+    function fillCalloutEls(ids, text, headline, fallback) {
+        const split = splitLead(text, headline);
+        const leadEl = document.getElementById(ids.lead);
+        leadEl.innerHTML = renderBold(split.lead || text || fallback);
+        const sec = document.getElementById(ids.detailSec);
+        const detail = document.getElementById(ids.detail);
+        const more = document.getElementById(ids.more);
+        if (split.rest) {
+            detail.innerHTML = renderBold(split.rest);
+            sec.classList.remove('hidden');
+            if (more) { more.classList.remove('hidden'); more.classList.add('expanded'); more.textContent = '접기'; }
+        } else {
+            detail.innerHTML = '';
+            sec.classList.add('hidden');
+            if (more) { more.classList.add('hidden'); }
+        }
+    }
+    // 블레임 콜아웃 — 핵심 한 줄(#narrative) / 자세한 배경(#ca-detail).
+    function fillCallout(text, headline) {
+        fillCalloutEls(
+            { lead: 'narrative', detailSec: 'ca-detail-sec', detail: 'ca-detail', more: 'callout-more' },
+            text, headline, '변경 사유를 분석할 수 없습니다.',
+        );
+    }
+    // 타임라인 요약 — 핵심 한 줄(#tl-summary) / 자세한 배경(#tl-detail).
+    function tlFillSummary(text) {
+        fillCalloutEls(
+            { lead: 'tl-summary', detailSec: 'tl-detail-sec', detail: 'tl-detail', more: 'tl-more' },
+            text, null, 'AI 요약을 생성하지 못했습니다.',
+        );
+    }
+    // 팀/티켓 칩 — 메타 표에 흩어진 핵심을 콜아웃 옆에 모은다. 없는 항목은 건너뛴다.
+    function renderCalloutChips(p) {
+        const box = document.getElementById('callout-chips');
+        if (!box) { return; }
+        box.innerHTML = '';
+        const add = (icon, text, extra) => {
+            if (!text) { return; }
+            const c = document.createElement('span');
+            c.className = 'ca-chip' + (extra ? ' ' + extra : '');
+            c.innerHTML = icon; c.appendChild(document.createTextNode(' ' + text));
+            box.appendChild(c);
+        };
+        add(ICON.users, p.team);
+        add(ICON.issue, p.ticket);
+        box.classList.toggle('hidden', !box.childNodes.length);
+    }
     function blStreaming(p) {
         showTab('blame');
         document.getElementById('empty').classList.add('hidden');
@@ -1967,32 +2107,20 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         document.getElementById('content').classList.remove('hidden');
         revealTabs(true);
 
-        // 콜아웃: "{작성자}님이 {월일}에 " 접두 + 타이핑될 설명(#ca-exp) + 깜빡이는 캐럿.
-        blExp = p.text || '';
-        const calloutEl = document.getElementById('narrative');
-        if (p.author && p.dateShort) {
-            calloutEl.innerHTML = '<span class="ca-author"></span>님이 ' + decorate(p.dateShort) + '에 <span id="ca-exp"></span><span class="caret"></span>';
-            calloutEl.querySelector('.ca-author').textContent = p.author;
-        } else {
-            calloutEl.innerHTML = '<span id="ca-exp"></span><span class="caret"></span>';
-        }
-        if (blExp) { document.getElementById('ca-exp').innerHTML = renderBold(blExp); }
-
-        // 메타/브레드크럼/이력 — render() 와 동일하게 채운다(출처/PR 은 done 에서 확정).
+        // 파일 헤더 + 작성자 행(아바타·이름·날짜)을 메타로 먼저 채운다.
         document.getElementById('file-name').textContent = p.fileName;
         document.getElementById('file-line').textContent = 'L' + p.line;
-        document.getElementById('file-kind').textContent = fileKind(p.fileName);
-        document.getElementById('author-name').textContent = p.author || '?';
-        toggle('author-team-wrap', !!p.team);
-        if (p.team) document.getElementById('author-team').textContent = p.team;
-        document.getElementById('meta-commit').textContent = p.commitShort || '—';
-        toggle('meta-ticket-wrap', !!p.ticket);
-        if (p.ticket) document.getElementById('meta-ticket').textContent = p.ticket;
-        document.getElementById('meta-date').textContent = p.dateFull || '—';
-        toggle('meta-relative-wrap', !!p.relative);
-        if (p.relative) document.getElementById('meta-relative').textContent = p.relative;
-        document.getElementById('meta-change').textContent = formatChange(p.changeStats, null) || '—';
-        document.getElementById('meta-source').textContent = '…';
+        fillAuthor(p);
+
+        // 콜아웃: 핵심 한 줄 자리(#narrative)에 타이핑될 설명(#ca-exp) + 깜빡이는 캐럿.
+        // 핵심/배경 분리·칩은 done(blResult)에서 확정한다.
+        blExp = p.text || '';
+        const calloutEl = document.getElementById('narrative');
+        calloutEl.innerHTML = '<span id="ca-exp"></span><span class="caret"></span>';
+        if (blExp) { document.getElementById('ca-exp').innerHTML = renderBold(blExp); }
+        document.getElementById('ca-detail-sec').classList.add('hidden');
+        document.getElementById('callout-more').classList.add('hidden');
+        document.getElementById('callout-chips').classList.add('hidden');
 
         const histWrap = document.getElementById('history-wrap');
         const histList = document.getElementById('history-list');
@@ -2011,20 +2139,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         if (exp) { exp.innerHTML = renderBold(blExp); }
     }
     function blResult(p) {
+        // 스트리밍으로 모인 전체 설명을 핵심 한 줄 / 자세한 배경으로 가르고 캐럿을 거둔다.
         blExp = (p.explanation || blExp || '').trim();
-        const calloutEl = document.getElementById('narrative');
-        const exp = document.getElementById('ca-exp');
-        if (exp) {
-            exp.innerHTML = renderBold(blExp);
-            const caret = calloutEl.querySelector('.caret');
-            if (caret) { caret.remove(); }
-        } else {
-            // 안전망: 콜아웃 구조가 없으면 설명만 통째로 그린다.
-            calloutEl.innerHTML = decorate(blExp);
-        }
-        // 출처/변경(PR 라인 포함)을 최종 확정.
-        document.getElementById('meta-source').textContent = p.sourceRef || '—';
-        document.getElementById('meta-change').textContent = formatChange(p.changeStats, p.prInfo) || '—';
+        fillCallout(blExp, p.headline);
+        renderCalloutChips(p);
     }
 
     function render(p) {
@@ -2033,36 +2151,12 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         document.getElementById('content').classList.remove('hidden');
         revealTabs(true);
 
-        // 콜아웃 본문 — "{작성자}님이 {월일}에 {설명}" 한 문장. 작성자만 보라색 강조.
-        // author/dateShort 가 없으면 설명만 노출한다.
-        const calloutEl = document.getElementById('narrative');
-        if (p.author && p.dateShort) {
-            calloutEl.innerHTML = '<span class="ca-author"></span>님이 ' + decorate(p.dateShort) + '에 ' + decorate(p.explanation || '');
-            calloutEl.querySelector('.ca-author').textContent = p.author;
-        } else {
-            calloutEl.innerHTML = decorate(p.explanation || '변경 사유를 분석할 수 없습니다.');
-        }
-
+        // 파일 헤더 + 작성자 행 + 콜아웃(핵심 한 줄 / 자세한 배경) — 스트리밍 없이 곧장 최종 상태.
         document.getElementById('file-name').textContent = p.fileName;
         document.getElementById('file-line').textContent = 'L' + p.line;
-        document.getElementById('file-kind').textContent = fileKind(p.fileName);
-
-        document.getElementById('author-name').textContent = p.author || '?';
-        toggle('author-team-wrap', !!p.team);
-        if (p.team) document.getElementById('author-team').textContent = p.team;
-
-        document.getElementById('meta-commit').textContent = p.commitShort || '—';
-        toggle('meta-ticket-wrap', !!p.ticket);
-        if (p.ticket) document.getElementById('meta-ticket').textContent = p.ticket;
-
-        document.getElementById('meta-date').textContent = p.dateFull || '—';
-        toggle('meta-relative-wrap', !!p.relative);
-        if (p.relative) document.getElementById('meta-relative').textContent = p.relative;
-
-        const change = formatChange(p.changeStats, p.prInfo);
-        document.getElementById('meta-change').textContent = change || '—';
-
-        document.getElementById('meta-source').textContent = p.sourceRef || '—';
+        fillAuthor(p);
+        fillCallout(p.explanation || '', p.headline);
+        renderCalloutChips(p);
 
         // 라인 수정 이력
         const histWrap = document.getElementById('history-wrap');
@@ -2178,13 +2272,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             .replace(/\\n/g, '<br/>');
     }
 
-    function formatChange(stats, pr) {
-        const parts = [];
-        if (stats) parts.push('+' + stats.added + ' -' + stats.removed);
-        if (pr) parts.push('동일 PR ' + pr.lines + ' 라인');
-        return parts.join(' · ');
-    }
-
     function fileKind(name) {
         const ext = (name.split('.').pop() || '?').toUpperCase();
         return ext.charAt(0);
@@ -2232,6 +2319,17 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             revealTabs(true);
             showTab('blame');
             vscode.postMessage({ type: 'switchTab', payload: { tab: 'blame' } });
+            return;
+        }
+        // 콜아웃 '더 보기/접기' — 같은 카드 안 '자세한 배경'을 통째로 접고/펼친다.
+        // 블레임·타임라인이 같은 버튼을 쓰므로, 클릭한 버튼이 속한 .callout 기준으로 찾는다.
+        if (el.dataset.action === 'toggleCallout') {
+            const card = el.closest('.callout');
+            const sec = card ? card.querySelector('.callout__detail') : null;
+            if (!sec) { return; }
+            const collapsed = sec.classList.toggle('hidden');
+            el.classList.toggle('expanded', !collapsed);
+            el.textContent = collapsed ? '더 보기' : '접기';
             return;
         }
         // 라인 수정 이력 캐럿/이유 박스 클릭 — 행을 펼치고(토글) 그 커밋 사유를 지연 로드한다.
