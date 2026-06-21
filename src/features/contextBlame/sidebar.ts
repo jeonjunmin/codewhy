@@ -347,6 +347,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             this.handlers.onOpenIssueTodo();
             return;
         }
+        // 타임라인 파일명 옆 휴지통 — 기존 명령을 재사용해 활성 파일의 타임라인 캐시를 비운다.
+        if (msg.type === 'clearTimelineCache') {
+            vscode.commands.executeCommand('codewhy.timeline.clearCache');
+            return;
+        }
         // 이슈 상세의 'AI 질문' — 블레임 결과(this.last) 유무와 무관하게 동작해야 한다.
         if (msg.type === 'issueChatAsk') {
             if (msg.payload?.issue && Array.isArray(msg.payload?.messages)) {
@@ -645,6 +650,15 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         background: var(--accent-cyan); border-radius: 50%;
         box-shadow: 0 0 8px rgba(103,232,249,0.55);
     }
+    /* 파일명 오른쪽 캐시 비우기 버튼 — 휴지통 아이콘. .crumb__dot 의 margin-left:auto 가
+       이 버튼 뒤에서 작동하므로 버튼은 파일명 바로 옆에, 점은 맨 오른쪽에 남는다. */
+    .tl-clear {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 22px; height: 22px; padding: 0;
+        background: none; border: none; border-radius: 6px;
+        color: var(--fg-mute); cursor: pointer;
+    }
+    .tl-clear:hover { background: var(--line-soft); color: var(--fg-dim); }
 
     /* ── 메타 테이블 ─────────────────────────────────────────────── */
     .meta {
@@ -797,8 +811,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .tl-item:last-child .tl-item__right { padding-bottom: 0; }
     .tl-item__date { font-size: 11px; color: var(--fg-mute); margin: 2px 0 4px; }
     .tl-item__date .mon { color: var(--fg-dim); font-weight: 700; }
-    .tl-item__title { font-size: 12.5px; font-weight: 600; color: var(--fg); line-height: 1.4; }
-    .tl-item__desc { font-size: 11.5px; color: var(--fg-dim); margin-top: 3px; line-height: 1.6; }
+    .tl-item__title { font-size: 12.5px; font-weight: 600; color: var(--fg); line-height: 1.4;
+        display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
+    .tl-item__desc { font-size: 11.5px; color: var(--fg-dim); margin-top: 3px; line-height: 1.6;
+        display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 
     /* ── 이슈 페인 (요구사항 역추적) ─────────────────────────────── */
     #is-list-view { display: flex; flex-direction: column; gap: 11px; }
@@ -1223,6 +1239,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         <div id="tl-body" class="body hidden">
             <div class="crumb">
                 <span class="mono crumb__file" id="tl-file"></span>
+                <button class="tl-clear" id="tl-clear" data-action="clearTimelineCache" title="이 파일의 타임라인 캐시 비우기"><span id="ico-tl-clear"></span></button>
                 <span class="crumb__dot"></span>
             </div>
             <section class="callout">
@@ -1321,6 +1338,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         clip: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 7.2l-5 5a2.8 2.8 0 0 1-4-4l5.2-5.2a1.8 1.8 0 0 1 2.6 2.6l-5.2 5.2a.8.8 0 0 1-1.2-1.2l4.6-4.6"/></svg>',
         // 팀 칩용 — 사람 둘.
         users: '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="6" cy="5" r="2.2"/><path d="M2 13c0-2.2 1.8-3.6 4-3.6s4 1.4 4 3.6"/><path d="M10.6 3.2a2.2 2.2 0 0 1 0 4.1M11 9.6c1.8.2 3 1.5 3 3.4"/></svg>',
+        // 타임라인 캐시 비우기 버튼용 — 휴지통(삭제).
+        trash: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.6 9a1 1 0 0 0 1 1h4.8a1 1 0 0 0 1-1L12 4M6.5 7v4M9.5 7v4"/></svg>',
     };
     // 아이콘 주입은 보조 장식이므로, 한 요소가 없더라도 핸드셰이크(ready)까지 죽지 않게 격리한다.
     try {
@@ -1334,6 +1353,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         setIcon('ico-hero-check', ICON.check);
         setIcon('ico-is-search', ICON.search);
         setIcon('ico-is-cbanner', ICON.issue);
+        setIcon('ico-tl-clear', ICON.trash);
     } catch (err) {
         vscode.postMessage({ type: 'webview-error', payload: '아이콘 초기화 실패: ' + String(err) });
     }
@@ -1402,7 +1422,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         const wrap = document.getElementById('tl-ms-wrap');
         const list = document.getElementById('tl-list');
         list.innerHTML = '';
-        const ms = (p.milestones || []).slice().sort((a, b) => String(a.date).localeCompare(String(b.date)));
+        const ms = (p.milestones || []).slice().sort((a, b) => String(b.date).localeCompare(String(a.date)));
         if (ms.length) {
             wrap.classList.remove('hidden');
             document.getElementById('tl-ms-count').textContent = ms.length + '건';
@@ -1423,11 +1443,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         el.className = 'tl-item';
         const color = TL_COLORS[i % TL_COLORS.length];
         const mon = KO_MONTHS[(parseInt(String(m.date).split('-')[1], 10) || 0) - 1] || '';
-        const s = String(m.description || '').trim();
-        const cut = s.search(/[.。,，\\n]/);
-        const hasSplit = cut > 0 && cut < 30;
-        const title = hasSplit ? s.slice(0, cut).trim() : s;
-        const body = hasSplit ? s.slice(cut + 1).trim() : '';
+        // 타이틀/내용 분리 — 줄바꿈 우선, 없으면 한 문장을 타이틀/내용으로 가른다(폴백).
+        const split = tlMilestoneSplit(m.description || '');
+        const title = split.lead;
+        const body = split.rest;
         el.innerHTML =
             '<div class="tl-item__left"><div class="tl-item__badge" style="background:' + color + '">' + (i + 1) + '</div><div class="tl-item__rail"></div></div>' +
             '<div class="tl-item__right">' +
@@ -2307,9 +2326,12 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     // 콜아웃 본문을 핵심 한 줄(lead)과 자세한 배경(detail)으로 갈라 채운다(요소 기반).
     // 블레임·타임라인이 같은 .callout 구조를 공유하므로 ID 만 달리해 재사용한다.
     function fillCalloutEls(ids, text, headline, fallback) {
-        const split = splitLead(text, headline);
+        fillCalloutSplit(ids, splitLead(text, headline), fallback, text);
+    }
+    // 이미 갈라진 {lead, rest} 를 콜아웃 요소에 채운다 — '어떻게 가를지'(split)와 '어디에 그릴지'(DOM)를 분리.
+    function fillCalloutSplit(ids, split, fallback, rawText) {
         const leadEl = document.getElementById(ids.lead);
-        leadEl.innerHTML = renderBold(split.lead || text || fallback);
+        leadEl.innerHTML = renderBold(split.lead || rawText || fallback);
         const sec = document.getElementById(ids.detailSec);
         const detail = document.getElementById(ids.detail);
         const more = document.getElementById(ids.more);
@@ -2323,6 +2345,41 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             if (more) { more.classList.add('hidden'); }
         }
     }
+    // 타임라인 요약을 '제목 / 상세'로 가른다 — 토막 방지가 핵심.
+    //  ① AI 가 첫 줄에 제목을 주고 줄바꿈으로 상세를 분리하면 그 줄바꿈만 믿는다(추정 없음).
+    //  ② 줄바꿈이 없으면(구버전 캐시 등) 첫 '문장 끝'까지를 제목으로 — 쉼표 중간에서 자르지 않는다.
+    function tlSplitSummary(text) {
+        const t = String(text || '').replace(/\\r/g, '').trim();
+        if (!t) { return { lead: '', rest: '' }; }
+        const nl = t.indexOf('\\n');
+        if (nl > 0) {
+            return { lead: t.slice(0, nl).trim(), rest: t.slice(nl + 1).replace(/^\\n+/, '').trim() };
+        }
+        const m = t.match(/^[\\s\\S]*?(?:다\\.|요\\.|[.!?])/);
+        if (m) { return { lead: m[0].trim(), rest: t.slice(m[0].length).trim() }; }
+        return { lead: t, rest: '' };
+    }
+    // 마일스톤 카드용 분리 — '타이틀 1줄 / 내용 2줄' 카드를 채운다.
+    //  ① AI 가 줄바꿈으로 타이틀/내용을 나눠 보내면 그 경계를 그대로 믿는다(tlSplitSummary).
+    //  ② 줄바꿈도 문장부호도 없는 한 토막(구버전 캐시 등)이면 → 아래 tlMilestoneFallback 으로 가른다.
+    function tlMilestoneSplit(text) {
+        const t = String(text || '').replace(/\\r/g, '').trim();
+        if (!t) { return { lead: '', rest: '' }; }
+        const split = tlSplitSummary(t);
+        // tlSplitSummary 가 본문(rest)을 못 만든 단일 토막이면 폴백으로 한 번 더 가른다.
+        if (split.rest) { return split; }
+        return tlMilestoneFallback(t);
+    }
+    // TODO(당신이 구현): 줄바꿈·문장부호가 없는 한 문장을 '타이틀 / 내용' 으로 가른다.
+    //   - 입력 t 예: "이슈 #54에 대응하는 신규 기능을 개발해 서비스 요구사항을 추가 충족함"
+    //   - 반환: { lead: <타이틀 1줄>, rest: <내용> }  (rest 가 비면 타이틀만 표시됨)
+    //   판단 포인트(UX 트레이드오프):
+    //     · 어디서 자를까? 연결어미('~해/~하고/~며/~로') 기준 첫 토막을 타이틀로? 글자 수(예: 18자)로?
+    //     · 자를 곳이 마땅찮으면 통째로 타이틀(rest='')로 둘지, 억지로 반 가를지?
+    function tlMilestoneFallback(t) {
+        // 여기를 구현하세요. 임시 동작: 분리 없이 통째로 타이틀.
+        return { lead: t, rest: '' };
+    }
     // 블레임 콜아웃 — 핵심 한 줄(#narrative) / 자세한 배경(#ca-detail).
     function fillCallout(text, headline) {
         fillCalloutEls(
@@ -2330,11 +2387,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             text, headline, '변경 사유를 분석할 수 없습니다.',
         );
     }
-    // 타임라인 요약 — 핵심 한 줄(#tl-summary) / 자세한 배경(#tl-detail).
+    // 타임라인 요약 — 제목(#tl-summary) / 상세(#tl-detail). AI 가 넣은 줄바꿈 기준으로 가른다(토막 방지).
     function tlFillSummary(text) {
-        fillCalloutEls(
+        fillCalloutSplit(
             { lead: 'tl-summary', detailSec: 'tl-detail-sec', detail: 'tl-detail', more: 'tl-more' },
-            text, null, 'AI 요약을 생성하지 못했습니다.',
+            tlSplitSummary(text || ''), 'AI 요약을 생성하지 못했습니다.', text || '',
         );
     }
     // 팀/티켓 칩 — 메타 표에 흩어진 핵심을 콜아웃 옆에 모은다. 없는 항목은 건너뛴다.
@@ -2572,6 +2629,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             revealTabs(true);
             showTab('blame');
             vscode.postMessage({ type: 'switchTab', payload: { tab: 'blame' } });
+            return;
+        }
+        // 타임라인 파일명 옆 휴지통 — 이 파일의 타임라인 캐시를 비운다(확장이 명령 실행).
+        if (el.dataset.action === 'clearTimelineCache') {
+            vscode.postMessage({ type: 'clearTimelineCache' });
             return;
         }
         // 콜아웃 '더 보기/접기' — 같은 카드 안 '자세한 배경'을 통째로 접고/펼친다.

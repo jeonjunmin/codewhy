@@ -8,6 +8,17 @@ export interface TimelineStreamHandlers {
 }
 
 /**
+ * POST /api/timeline/cache/clear — 현재 파일의 타임라인 요약 캐시를 백엔드에서 비운다.
+ * 반환값은 삭제된 캐시 행 수.
+ */
+export async function clearTimelineCache(
+    req: { filePath: string; repoPath: string },
+): Promise<number> {
+    const res = await createHttpClient().post('/api/timeline/cache/clear', req);
+    return (res.data?.deleted as number) ?? 0;
+}
+
+/**
  * POST /api/timeline/summary 를 호출해 결과를 스트리밍으로 전달한다.
  *
  * 백엔드는 캐시 적중 시 application/json, 미스 시 text/event-stream(SSE) 으로 응답한다.

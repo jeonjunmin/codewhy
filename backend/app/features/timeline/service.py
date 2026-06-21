@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.timeline_file_graph import parse_ai_response, stream_file_summary
 from app.core.commit_classifier import classify_commit, filter_meaningful
 from app.core.tickets import extract_ticket
+from app.db.postgres import AsyncSessionLocal, run_detached
 from app.features.timeline import crud
 
 logger = logging.getLogger(__name__)
@@ -216,7 +217,8 @@ async def prepare_summary(
     return {
         "cached": False,
         "ctx": {
-            "file": file,
+            # 스트림 제너레이터는 요청 세션과 분리되므로 ORM 객체(file) 대신 식별자만 넘긴다.
+            "file_id": file.id,
             "set_hash": set_hash,
             "repo_path": repo_path,
             "file_path": file_path,
@@ -225,13 +227,27 @@ async def prepare_summary(
     }
 
 
-async def stream_summary(db: AsyncSession, ctx: dict) -> AsyncGenerator[str, None]:
+async def clear_file_cache(db: AsyncSession, repo_path: str, file_path: str) -> int:
+    """현재 파일의 타임라인 요약 캐시를 비우고 삭제된 건수를 반환한다.
+
+    다음 타임라인 실행 때 캐시 미스가 나면서 최신 요약 형식으로 재생성된다.
+    """
+    deleted = await crud.clear_summaries_for_file(db, repo_path, file_path)
+    logger.info("[timeline] 🧹 캐시 삭제 — repo=%s file=%s 삭제=%d건", repo_path, file_path, deleted)
+    return deleted
+
+
+async def stream_summary(ctx: dict) -> AsyncGenerator[str, None]:
     """캐시 미스 시 Bedrock 토큰을 SSE(`data: ...\\n\\n`) 프레임으로 실시간 전달한다.
 
     스트림이 끝나면(요구사항 3) 누적 텍스트를 파싱해 timeline_summaries 캐시에
     저장하는 DB 적재 로직을 그대로 수행한다 — 캐시 히트 로직과의 정합성 유지.
+
+    DB 세션은 요청-스코프(Depends)와 분리해 캐시 저장 시점에만 잠깐 연다 —
+    클라이언트가 done 직후 소켓을 닫아 요청이 취소돼도, 스트림 도중엔 열린 세션이 없어
+    asyncpg 커넥션이 취소 범위에서 terminate 되는 noise(CancelledError)를 차단한다.
     """
-    file       = ctx["file"]
+    file_id    = ctx["file_id"]
     set_hash   = ctx["set_hash"]
     repo_path  = ctx["repo_path"]
     file_path  = ctx["file_path"]
@@ -272,7 +288,15 @@ async def stream_summary(db: AsyncSession, ctx: dict) -> AsyncGenerator[str, Non
     logger.info("[timeline] Bedrock 스트리밍 완료 — summary=%d자  milestones=%d건",
                 len(result.get("summary", "")), len(result.get("milestones", [])))
 
-    await crud.save_summary(db, file.id, set_hash, result)
-    logger.info("[timeline] 캐시 저장 완료 — file_id=%d  hash=%s", file.id, set_hash[:16] + "…")
+    # 요청 취소 범위 밖(독립 태스크)에서 자체 단명 세션으로 저장 — 클라이언트가 done 직후
+    # 연결을 끊어도 저장 커넥션이 취소에 휩쓸려 terminate 되지 않게 한다.
+    async def _persist() -> None:
+        try:
+            async with AsyncSessionLocal() as db:
+                await crud.save_summary(db, file_id, set_hash, result)
+            logger.info("[timeline] 캐시 저장 완료 — file_id=%d  hash=%s", file_id, set_hash[:16] + "…")
+        except Exception:
+            logger.warning("[timeline] 캐시 저장 실패 (응답에는 영향 없음)", exc_info=True)
+    run_detached(_persist())
 
     yield f"data: {json.dumps({'done': True, **result}, ensure_ascii=False)}\n\n"

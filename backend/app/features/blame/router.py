@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import git, vcs
 from app.core.tickets import extract_ticket
 from app.db import crud_common
-from app.db.postgres import get_db
+from app.db.postgres import AsyncSessionLocal, get_db
 from app.features.blame import crud, service
 from app.features.blame.schemas import (
     AskRequest,
@@ -62,7 +62,7 @@ def _to_blame_info(meta: GitCommitMeta) -> git.BlameInfo:
 
 
 @router.post("/context")
-async def context_blame(req: BlameRequest, db: AsyncSession = Depends(get_db)):
+async def context_blame(req: BlameRequest):
     # 0. blamed 커밋 — 확장이 로컬 git 으로 해석해 보낸다. 커밋 이력이 없으면(미커밋 파일/라인)
     #    분석 대상이 없으므로 500 대신 안내 응답으로 단락한다.
     if req.blame is None:
@@ -76,67 +76,76 @@ async def context_blame(req: BlameRequest, db: AsyncSession = Depends(get_db)):
     followups = [c.model_dump() for c in req.followups]
     remote = vcs.parse_remote(req.remoteUrl)
     line_history = [c.model_dump() for c in req.lineHistory]
-
-    # 1. 백본 행 확보 (캐시 키에 commit_id 포함)
-    try:
-        repo = await crud_common.get_or_create_repository(db, req.repoPath)
-        file = await crud_common.get_or_create_file(db, repo.id, req.filePath)
-        commit = await crud_common.upsert_commit(
-            db,
-            repo.id,
-            info.commit_hash,
-            author=info.author,
-            committed_date=_parse_date(info.date),
-            message=info.message,
-            ticket=ticket,
-        )
-        await crud_common.link_commit_file(db, commit.id, file.id, info.added, info.removed)
-        await db.commit()
-    except Exception:
-        logger.warning("blame 백본 준비 실패 — 캐시 없이 분석만 진행", exc_info=True)
-        commit = file = None
-
-    # 2. 캐시 조회.
-    #    - 단일 리비전 줄: 커밋×파일 스코프('' 키) — 같은 커밋의 다른 줄도 적중(설명 공유).
-    #    - 멀티 리비전 줄: 라인 이력 해시 키 — '이력 반영' 설명을 줄 단위로 따로 캐시/적중한다
-    #      (커밋 단위 캐시는 최신 변경 1건만 담아 이력을 반영하지 못하므로 분리).
     hash_key = service.line_scope_hash(line_history, info.message)
-    if commit is not None and file is not None:
-        cached = await crud.get_cached_blame(db, file.id, commit, hash_key)
-        if cached:
-            # 라인 스코프 필드(이력 + 이슈 롤업)는 캐시 컬럼에 없으므로 확장이 보낸 라인 이력으로 다시 조립해 덧붙인다.
-            cached.update(service.build_line_fields(line_history, info.commit_hash))
-            # headline 은 캐시 컬럼에 없으니 설명에서 다시 뽑아 채운다.
-            cached.setdefault("headline", service.extract_headline(cached.get("explanation", "")))
-            return BlameResponse(**cached)
 
-    # 3. 미스 → 분기:
-    #    - 노이즈 커밋(test/chore/docs): Bedrock·GitHub 호출이 없어 즉시 끝나므로 JSON 으로 응답.
-    #    - 의미있는 커밋: SSE(text/event-stream) 스트림으로 설명 토큰을 실시간 전달하고,
-    #      스트림 종료 시점에 service.stream_blame 이 캐시에 저장한다(타임라인 /summary 와 동일 패턴).
-    #    프런트는 응답 Content-Type 으로 두 경로를 구분한다(application/json vs text/event-stream).
-    if service.is_noise_commit(info.message):
+    # DB 작업(백본 확보·캐시 조회·노이즈 커밋 저장)은 스트림 시작 '전에' 끝내고 세션을 닫는다.
+    #   StreamingResponse 동안 Depends(get_db) 세션이 열린 채 남으면, 클라이언트가 done 직후
+    #   소켓을 닫을 때의 요청 취소가 그 세션 정리에 번져 커넥션이 terminate 되며 CancelledError
+    #   noise 가 난다. 그래서 Depends 대신 사전 작업용 세션을 직접 열고 닫는다(스트림 분기는
+    #   세션을 들고 가지 않고, 캐시 저장은 제너레이터가 자체 단명 세션으로 처리한다).
+    commit_id: int | None = None
+    file_id: int | None = None
+    async with AsyncSessionLocal() as db:
+        # 1. 백본 행 확보 (캐시 키에 commit_id 포함)
         try:
-            result = await asyncio.to_thread(
-                service.analyze_blame,
-                req.repoPath, req.filePath, info,
-                branch=branch, ticket=ticket,
-                followups=followups, remote=remote, line_history=line_history,
+            repo = await crud_common.get_or_create_repository(db, req.repoPath)
+            file = await crud_common.get_or_create_file(db, repo.id, req.filePath)
+            commit = await crud_common.upsert_commit(
+                db,
+                repo.id,
+                info.commit_hash,
+                author=info.author,
+                committed_date=_parse_date(info.date),
+                message=info.message,
+                ticket=ticket,
             )
-        except Exception as e:
-            logger.exception("context blame 분석 실패 — repo=%s file=%s line=%s", req.repoPath, req.filePath, req.line)
-            raise HTTPException(status_code=500, detail=f"context blame 실패: {e}")
-        if commit is not None and file is not None and not result.get("aiDegraded"):
-            try:
-                await crud.save_blame(db, file.id, commit.id, result)
-            except Exception:
-                logger.warning("blame 캐시 저장 실패 (응답에는 영향 없음)", exc_info=True)
-        return BlameResponse(**result)
+            await crud_common.link_commit_file(db, commit.id, file.id, info.added, info.removed)
+            await db.commit()
+            commit_id, file_id = commit.id, file.id
+        except Exception:
+            logger.warning("blame 백본 준비 실패 — 캐시 없이 분석만 진행", exc_info=True)
+            commit = file = None
 
+        # 2. 캐시 조회.
+        #    - 단일 리비전 줄: 커밋×파일 스코프('' 키) — 같은 커밋의 다른 줄도 적중(설명 공유).
+        #    - 멀티 리비전 줄: 라인 이력 해시 키 — '이력 반영' 설명을 줄 단위로 따로 캐시/적중한다
+        #      (커밋 단위 캐시는 최신 변경 1건만 담아 이력을 반영하지 못하므로 분리).
+        if commit is not None and file is not None:
+            cached = await crud.get_cached_blame(db, file.id, commit, hash_key)
+            if cached:
+                # 라인 스코프 필드(이력 + 이슈 롤업)는 캐시 컬럼에 없으므로 확장이 보낸 라인 이력으로 다시 조립해 덧붙인다.
+                cached.update(service.build_line_fields(line_history, info.commit_hash))
+                # headline 은 캐시 컬럼에 없으니 설명에서 다시 뽑아 채운다.
+                cached.setdefault("headline", service.extract_headline(cached.get("explanation", "")))
+                return BlameResponse(**cached)
+
+        # 3. 미스 → 노이즈 커밋(test/chore/docs): Bedrock·GitHub 호출이 없어 즉시 끝나므로 JSON 으로 응답.
+        if service.is_noise_commit(info.message):
+            try:
+                result = await asyncio.to_thread(
+                    service.analyze_blame,
+                    req.repoPath, req.filePath, info,
+                    branch=branch, ticket=ticket,
+                    followups=followups, remote=remote, line_history=line_history,
+                )
+            except Exception as e:
+                logger.exception("context blame 분석 실패 — repo=%s file=%s line=%s", req.repoPath, req.filePath, req.line)
+                raise HTTPException(status_code=500, detail=f"context blame 실패: {e}")
+            if commit is not None and file is not None and not result.get("aiDegraded"):
+                try:
+                    await crud.save_blame(db, file.id, commit.id, result)
+                except Exception:
+                    logger.warning("blame 캐시 저장 실패 (응답에는 영향 없음)", exc_info=True)
+            return BlameResponse(**result)
+
+    # 4. 의미있는 커밋 → 세션을 닫은 뒤 SSE 스트림. 설명 토큰을 실시간 전달하고, 제너레이터가
+    #    스트림 종료 시점에 자체 단명 세션으로 캐시에 저장한다(타임라인 /summary 와 동일 패턴).
+    #    프런트는 응답 Content-Type 으로 두 경로를 구분한다(application/json vs text/event-stream).
     return StreamingResponse(
         service.stream_blame(
-            db, req.repoPath, req.filePath,
-            info=info, branch=branch, ticket=ticket, commit=commit, file=file,
+            req.repoPath, req.filePath,
+            info=info, branch=branch, ticket=ticket,
+            commit_id=commit_id, file_id=file_id,
             followups=followups, remote=remote, line_history=line_history,
         ),
         media_type="text/event-stream",

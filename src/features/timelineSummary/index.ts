@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { runTimelineTab } from '../contextBlame/view';
+import { runClearTimelineCache, runTimelineTab } from '../contextBlame/view';
 
 /**
  * Timeline Summary 진입점.
@@ -12,5 +12,6 @@ import { runTimelineTab } from '../contextBlame/view';
 export function registerTimelineSummary(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('codewhy.timelineSummary', () => runTimelineTab()),
+        vscode.commands.registerCommand('codewhy.timeline.clearCache', () => runClearTimelineCache()),
     );
 }

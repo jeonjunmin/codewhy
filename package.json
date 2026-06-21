@@ -3,6 +3,7 @@
   "displayName": "CodeWhy",
   "description": "AI 기반 코드 컨텍스트 분석 - 돋보기, 타임라인 요약, 요구사항 역추적",
   "version": "0.0.1",
+  "publisher": "codewhy",
   "icon": "images/icon-128.png",
   "repository": {
     "type": "git",
@@ -42,15 +43,15 @@
     "commands": [
       {
         "command": "codewhy.contextBlame",
-        "title": "CodeWhy: 이 코드, 왜 바꿨어? (돋보기)"
+        "title": "CodeWhy: 이 코드, 왜 바꿨어?"
       },
       {
         "command": "codewhy.timelineSummary",
-        "title": "CodeWhy: 이 파일의 역사 요약 (Timeline Summary)"
+        "title": "CodeWhy: 이 파일의 역사 요약"
       },
       {
         "command": "codewhy.requirementTrace",
-        "title": "CodeWhy: 원본 기획서 찾기 (Requirement Trace)"
+        "title": "CodeWhy: 요구사항 찾기"
       },
       {
         "command": "codewhy.blame.openCommit",
@@ -64,6 +65,11 @@
         "command": "codewhy.openSettings",
         "title": "CodeWhy: 설정 열기",
         "icon": "$(gear)"
+      },
+      {
+        "command": "codewhy.timeline.clearCache",
+        "title": "CodeWhy: 이 파일의 타임라인 캐시 비우기",
+        "icon": "$(clear-all)"
       }
     ],
     "keybindings": [
@@ -79,7 +85,7 @@
         {
           "command": "codewhy.openSettings",
           "when": "view == codewhy.contextBlame",
-          "group": "navigation"
+          "group": "navigation@2"
         }
       ],
       "editor/context": [

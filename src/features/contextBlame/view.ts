@@ -4,7 +4,7 @@ import { EditorContext, getEditorContext } from '../../shared/editor';
 import * as localGit from '../../shared/git';
 import { BlameRequest, BlameResult, CommitInput, GitCommitMeta, IssueChatMessage, IssueChatRequest, ReasonRequest, TraceRequest } from '../../shared/types';
 import { fetchRequirementTrace } from '../requirementTrace/api';
-import { streamTimelineSummary } from '../timelineSummary/api';
+import { clearTimelineCache, streamTimelineSummary } from '../timelineSummary/api';
 import { fetchCommitReason, streamContextBlame, streamIssueChat } from './api';
 import { ContextBlameSidebarProvider, VIEW_ID } from './sidebar';
 
@@ -285,6 +285,27 @@ export function runTimelineTab() {
             onError: (message) => sidebar!.timelineEmpty(`타임라인 요약 실패: ${message}`),
         },
     ).catch((err) => sidebar!.timelineEmpty(`타임라인 요약 실패: ${(err as Error).message}`));
+}
+
+/**
+ * 현재 파일의 타임라인 요약 캐시를 백엔드에서 비운다.
+ * 비운 뒤 타임라인을 다시 실행하면 캐시 미스가 나면서 최신 형식으로 재요약된다.
+ */
+export async function runClearTimelineCache() {
+    const ctx = getEditorContext();
+    if (!ctx) { return; }
+
+    const fileName = ctx.filePath.split(/[\\/]/).pop() ?? ctx.filePath;
+    try {
+        const deleted = await clearTimelineCache({ filePath: ctx.filePath, repoPath: ctx.repoPath });
+        vscode.window.showInformationMessage(
+            deleted > 0
+                ? `CodeWhy: ${fileName} 타임라인 캐시를 비웠습니다. 타임라인을 다시 실행하면 최신 형식으로 요약합니다.`
+                : `CodeWhy: ${fileName} 에는 비울 타임라인 캐시가 없습니다.`,
+        );
+    } catch (err) {
+        vscode.window.showErrorMessage(`CodeWhy: 타임라인 캐시 비우기 실패 — ${(err as Error).message}`);
+    }
 }
 
 /** 이슈 탭: 현재 파일과 연관된 GitHub Issue 를 역추적해 목록으로 표시. */

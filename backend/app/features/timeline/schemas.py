@@ -22,6 +22,12 @@ class TimelineRequest(BaseModel):
     commits: list[CommitInput]   # 확장이 로컬 git log 를 수집해서 보냄
 
 
+class CacheClearRequest(BaseModel):
+    """현재 파일의 타임라인 요약 캐시를 비우는 요청 — 커밋 목록 없이 위치만 받는다."""
+    filePath: str
+    repoPath: str
+
+
 class Milestone(BaseModel):
     date: str
     description: str

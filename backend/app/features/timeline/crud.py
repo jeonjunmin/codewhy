@@ -9,12 +9,12 @@
 import logging
 from datetime import date, datetime
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.tickets import extract_ticket
 from app.db import crud_common
-from app.db.models import Commit, CommitFile, File, TimelineSummary
+from app.db.models import Commit, CommitFile, File, Repository, TimelineSummary
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +103,38 @@ async def get_cached_summary(
                      file_id, [h[:16] + "…" for h in all_rows] if all_rows else "없음")
 
     return row
+
+
+async def clear_summaries_for_file(
+    db: AsyncSession, repo_path: str, file_path: str
+) -> int:
+    """현재 파일의 타임라인 요약 캐시를 모두 삭제하고, 삭제된 행 수를 반환한다.
+
+    레포/파일 행은 '조회만' 한다(get_or_create 와 달리 없는 행을 만들지 않는다) —
+    캐시 비우기가 의도치 않게 백본에 빈 파일 행을 남기지 않게 하기 위함이다.
+    저장 때와 동일한 키로 지워야 하므로 file_path 는 라우터에서 상대경로로 정규화된 값을 받는다.
+    """
+    repo = (
+        await db.execute(select(Repository).where(Repository.identifier == repo_path))
+    ).scalar_one_or_none()
+    if repo is None:
+        return 0
+
+    file = (
+        await db.execute(
+            select(File).where(File.repo_id == repo.id, File.file_path == file_path)
+        )
+    ).scalar_one_or_none()
+    if file is None:
+        return 0
+
+    result = await db.execute(
+        delete(TimelineSummary).where(TimelineSummary.file_id == file.id)
+    )
+    await db.commit()
+    deleted = result.rowcount or 0
+    logger.info("[crud] clear_summaries_for_file — file_id=%d 삭제=%d건", file.id, deleted)
+    return deleted
 
 
 async def save_summary(

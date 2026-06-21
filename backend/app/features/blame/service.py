@@ -25,8 +25,6 @@ from typing import AsyncGenerator
 
 from botocore.exceptions import BotoCoreError, ClientError
 from langchain_core.messages import HumanMessage, SystemMessage
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.core import git, vcs
 from app.core.ai_client import call_bedrock
 from app.core.bedrock import get_bedrock_llm
@@ -34,7 +32,7 @@ from app.core.commit_classifier import SKIP_TYPES, classify_commit
 from app.core.config import get_team_map
 from app.core.tickets import extract_issue_numbers, extract_ticket
 from app.core.vcs import Issue, PullRequest
-from app.db.models import Commit, File
+from app.db.postgres import AsyncSessionLocal, run_detached
 from app.features.blame import crud
 
 logger = logging.getLogger(__name__)
@@ -190,15 +188,14 @@ def explain_commit_reason(
 
 
 async def stream_blame(
-    db: AsyncSession,
     repo_path: str,
     file_path: str,
     *,
     info: git.BlameInfo,
     branch: str,
     ticket: str | None,
-    commit: Commit | None,
-    file: File | None,
+    commit_id: int | None,
+    file_id: int | None,
     followups: list[dict],
     remote,
     line_history: list[dict],
@@ -290,16 +287,22 @@ async def stream_blame(
         "lineIssues": line_issues,
         "aiSuggestion": None,
     }
-    yield f"data: {json.dumps({'done': True, **result}, ensure_ascii=False)}\n\n"
-
-    # ⑤ 캐시 저장 — degraded(폴백)는 제외. 멀티 리비전 줄은 '라인 스코프' 설명(이력 반영)이라
+    # ⑤ 캐시 저장 — done 프레임 '이전'에, 요청 세션과 분리된 자체 단명 세션으로 저장한다.
+    #    저장이 끝나면 열린 세션이 0개라, 클라이언트가 done 직후 연결을 끊어도 취소로
+    #    커넥션이 terminate 되는 noise 가 생기지 않는다.
+    #    degraded(폴백)는 제외. 멀티 리비전 줄은 '라인 스코프' 설명(이력 반영)이라
     #    라인 이력 해시 키로 저장해 같은 커밋의 다른 줄과 분리한다(단일 리비전은 '' = 커밋 스코프).
     hash_key = line_scope_hash(line_history, info.message)
-    if commit is not None and file is not None and not degraded:
-        try:
-            await crud.save_blame(db, file.id, commit.id, result, hash_key)
-        except Exception:
-            logger.warning("blame 캐시 저장 실패 (응답에는 영향 없음)", exc_info=True)
+    if commit_id is not None and file_id is not None and not degraded:
+        async def _persist() -> None:
+            try:
+                async with AsyncSessionLocal() as db:
+                    await crud.save_blame(db, file_id, commit_id, result, hash_key)
+            except Exception:
+                logger.warning("blame 캐시 저장 실패 (응답에는 영향 없음)", exc_info=True)
+        run_detached(_persist())
+
+    yield f"data: {json.dumps({'done': True, **result}, ensure_ascii=False)}\n\n"
 
 
 def _classify_type(message: str) -> str:
