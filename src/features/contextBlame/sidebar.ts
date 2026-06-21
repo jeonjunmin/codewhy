@@ -797,24 +797,39 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         animation: caret-blink 0.9s steps(1) infinite;
     }
     @keyframes caret-blink { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
+    /* 마일스톤 — 범례 + 연도 그룹 + 좌측 레일(주요 변곡점 / 일반 변경) 디자인 */
+    .tl-ms-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+    .tl-ms-head .related__title { margin: 0; }
+    .tl-legend { display: flex; gap: 12px; font-size: 10.5px; color: var(--fg-mute); flex-shrink: 0; }
+    .tl-leg { display: inline-flex; align-items: center; gap: 5px; }
+    .tl-leg__dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .tl-leg__dot--major { background: #f97316; box-shadow: 0 0 0 2px rgba(249,115,22,0.22); }
+    .tl-leg__dot--normal { background: var(--bg); border: 2px solid var(--fg-mute); box-sizing: border-box; }
+
     .tl-list { display: flex; flex-direction: column; }
-    .tl-item { display: flex; gap: 11px; }
-    .tl-item__left { display: flex; flex-direction: column; align-items: center; flex-shrink: 0; width: 24px; }
-    .tl-item__badge {
-        width: 22px; height: 22px; border-radius: 50%;
-        display: inline-flex; align-items: center; justify-content: center;
-        font-size: 10.5px; font-weight: 700; color: #fff; flex-shrink: 0;
-    }
-    .tl-item__rail { width: 2px; flex: 1; min-height: 10px; background: var(--line); margin: 4px 0; }
-    .tl-item:last-child .tl-item__rail { display: none; }
-    .tl-item__right { flex: 1; min-width: 0; padding-bottom: 16px; }
-    .tl-item:last-child .tl-item__right { padding-bottom: 0; }
-    .tl-item__date { font-size: 11px; color: var(--fg-mute); margin: 2px 0 4px; }
-    .tl-item__date .mon { color: var(--fg-dim); font-weight: 700; }
-    .tl-item__title { font-size: 12.5px; font-weight: 600; color: var(--fg); line-height: 1.4;
-        display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
-    .tl-item__desc { font-size: 11.5px; color: var(--fg-dim); margin-top: 3px; line-height: 1.6;
-        display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .tl-year { display: flex; align-items: baseline; justify-content: space-between;
+        margin: 14px 0 8px; padding-left: 0; }
+    .tl-list > .tl-year:first-child { margin-top: 0; }
+    .tl-year__label { font-size: 13px; font-weight: 700; color: var(--fg); letter-spacing: 0.02em; }
+    .tl-year__count { font-size: 10.5px; color: var(--fg-mute); }
+
+    .tl-item { display: grid; grid-template-columns: 44px 16px 1fr; column-gap: 8px; align-items: stretch; }
+    .tl-item__date { font-size: 10.5px; color: var(--fg-mute); text-align: right; padding-top: 1px;
+        font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .tl-item__rail { position: relative; display: flex; justify-content: center; }
+    .tl-item__rail::before { content: ''; position: absolute; top: 0; bottom: 0; left: 50%;
+        transform: translateX(-50%); width: 2px; background: var(--line); }
+    .tl-item:first-of-type .tl-item__rail::before { top: 5px; }
+    .tl-item:last-of-type .tl-item__rail::before { bottom: auto; height: 5px; }
+    .tl-item__node { position: relative; z-index: 1; margin-top: 3px; flex-shrink: 0;
+        width: 7px; height: 7px; border-radius: 50%;
+        background: var(--bg); border: 2px solid var(--fg-mute); box-sizing: border-box; }
+    .tl-item--major .tl-item__node { width: 11px; height: 11px; margin-top: 1px; border: none; }
+    .tl-item__right { min-width: 0; padding-bottom: 14px; }
+    .tl-item__title { font-size: 12.5px; font-weight: 600; color: var(--fg); line-height: 1.4; }
+    .tl-item--major .tl-item__title { font-weight: 700; }
+    .tl-item__plus { font-weight: 800; }
+    .tl-item__desc { font-size: 11.5px; color: var(--fg-dim); margin-top: 3px; line-height: 1.55; }
 
     /* ── 이슈 페인 (요구사항 역추적) ─────────────────────────────── */
     #is-list-view { display: flex; flex-direction: column; gap: 11px; }
@@ -1251,7 +1266,13 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
                 <button class="callout__more expanded hidden" id="tl-more" data-action="toggleCallout">접기</button>
             </section>
             <section id="tl-ms-wrap" class="hidden">
-                <div class="related__title">주요 마일스톤 <span id="tl-ms-count"></span></div>
+                <div class="tl-ms-head">
+                    <div class="related__title">주요 마일스톤</div>
+                    <div class="tl-legend">
+                        <span class="tl-leg"><span class="tl-leg__dot tl-leg__dot--major"></span>주요 변곡점</span>
+                        <span class="tl-leg"><span class="tl-leg__dot tl-leg__dot--normal"></span>일반 변경</span>
+                    </div>
+                </div>
                 <div class="tl-list" id="tl-list"></div>
             </section>
         </div>
@@ -1422,11 +1443,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         const wrap = document.getElementById('tl-ms-wrap');
         const list = document.getElementById('tl-list');
         list.innerHTML = '';
+        // 최신→오래된 내림차순(위가 최근, 아래가 과거).
         const ms = (p.milestones || []).slice().sort((a, b) => String(b.date).localeCompare(String(a.date)));
         if (ms.length) {
             wrap.classList.remove('hidden');
-            document.getElementById('tl-ms-count').textContent = ms.length + '건';
-            ms.forEach((m, i) => list.appendChild(renderMilestone(m, i)));
+            renderMilestones(list, ms);
         } else {
             wrap.classList.add('hidden');
         }
@@ -1436,26 +1457,58 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         if (message) { document.getElementById('tl-empty').innerHTML = decorate(message); }
         tlShow('empty');
     }
-    const TL_COLORS = ['#e05454','#2cb8b8','#8b5cf6','#d97706','#16a34a','#3b82f6','#ec4899','#f97316'];
-    const KO_MONTHS = ['1월','2월','3월','4월','5월','6월','7월','8월','9월','10월','11월','12월'];
-    function renderMilestone(m, i) {
+    // 주요 변곡점(major) 노드/+아이콘 색상 — 변곡점이 나올 때마다 순환해 서로 구분된다.
+    const TL_MAJOR_COLORS = ['#f97316','#2cb8b8','#8b5cf6','#e05454','#16a34a','#3b82f6'];
+    // 연도 그룹 헤더 + 마일스톤 항목을 순서대로 list 에 그린다.
+    function renderMilestones(list, ms) {
+        // 폴백 — 백엔드 major 가 하나도 없으면(옛 캐시 등) 가장 오래된 항목을 변곡점으로 둔다.
+        const hasMajor = ms.some(m => !!m.major);
+        // 정렬 방향과 무관하게 '가장 오래된 날짜'를 폴백 변곡점으로 잡는다.
+        const oldestDate = ms.reduce((min, m) => String(m.date) < min ? String(m.date) : min, String(ms[0].date));
+        // 연도별 변경 개수 미리 집계('N개 변경' 배지용).
+        const yearCount = {};
+        ms.forEach(m => { const y = String(m.date).slice(0, 4); yearCount[y] = (yearCount[y] || 0) + 1; });
+        let curYear = '';
+        let majorIdx = 0;
+        ms.forEach((m, i) => {
+            const y = String(m.date).slice(0, 4) || '----';
+            if (y !== curYear) {
+                curYear = y;
+                list.appendChild(renderYearHead(y, yearCount[y]));
+            }
+            const isMajor = hasMajor ? !!m.major : (String(m.date) === oldestDate);
+            list.appendChild(renderMilestone(m, isMajor, isMajor ? majorIdx++ : -1));
+        });
+    }
+    function renderYearHead(year, count) {
         const el = document.createElement('div');
-        el.className = 'tl-item';
-        const color = TL_COLORS[i % TL_COLORS.length];
-        const mon = KO_MONTHS[(parseInt(String(m.date).split('-')[1], 10) || 0) - 1] || '';
+        el.className = 'tl-year';
+        el.innerHTML = '<span class="tl-year__label"></span><span class="tl-year__count"></span>';
+        el.querySelector('.tl-year__label').textContent = year;
+        el.querySelector('.tl-year__count').textContent = (count || 0) + '개 변경';
+        return el;
+    }
+    function renderMilestone(m, isMajor, majorIdx) {
+        const el = document.createElement('div');
+        el.className = 'tl-item' + (isMajor ? ' tl-item--major' : '');
+        const color = isMajor ? TL_MAJOR_COLORS[(majorIdx >= 0 ? majorIdx : 0) % TL_MAJOR_COLORS.length] : '';
+        const md = String(m.date || '').split('-');
+        const mmdd = (md[1] || '') + (md[2] ? '-' + md[2] : '');   // MM-DD
         // 타이틀/내용 분리 — 줄바꿈 우선, 없으면 한 문장을 타이틀/내용으로 가른다(폴백).
         const split = tlMilestoneSplit(m.description || '');
         const title = split.lead;
         const body = split.rest;
+        const nodeStyle = isMajor ? ' style="background:' + color + ';box-shadow:0 0 0 3px ' + color + '33"' : '';
+        const plus = isMajor ? '<span class="tl-item__plus" style="color:' + color + '">+</span> ' : '';
         el.innerHTML =
-            '<div class="tl-item__left"><div class="tl-item__badge" style="background:' + color + '">' + (i + 1) + '</div><div class="tl-item__rail"></div></div>' +
+            '<span class="tl-item__date"></span>' +
+            '<div class="tl-item__rail"><span class="tl-item__node"' + nodeStyle + '></span></div>' +
             '<div class="tl-item__right">' +
-                '<div class="tl-item__date">' + (mon ? '<span class="mon">' + mon + '</span> · ' : '') + '<span></span></div>' +
-                '<div class="tl-item__title"></div>' +
+                '<div class="tl-item__title">' + plus + '<span class="tl-item__ttext"></span></div>' +
                 (body ? '<div class="tl-item__desc"></div>' : '') +
             '</div>';
-        el.querySelector('.tl-item__date span:last-child').textContent = m.date || '';
-        el.querySelector('.tl-item__title').textContent = title;
+        el.querySelector('.tl-item__date').textContent = mmdd;
+        el.querySelector('.tl-item__ttext').textContent = title;
         if (body) { el.querySelector('.tl-item__desc').textContent = body; }
         return el;
     }

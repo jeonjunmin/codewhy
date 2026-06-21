@@ -177,9 +177,15 @@ def _reconcile_milestones(llm_milestones: list[dict], groups: list[list[dict]]) 
     out: list[dict] = []
     for i, group in enumerate(groups):
         desc = ""
+        major = False
         if i < len(llm_milestones):
             desc = (llm_milestones[i].get("description") or "").strip()
-        out.append({"date": _group_date(group), "description": desc or seeds[i]["description"]})
+            major = bool(llm_milestones[i].get("major", False))
+        out.append({
+            "date": _group_date(group),
+            "description": desc or seeds[i]["description"],
+            "major": major,
+        })
     return out
 
 

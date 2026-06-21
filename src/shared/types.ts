@@ -181,6 +181,7 @@ export interface TimelineRequest {
 export interface TimelineMilestone {
     date: string;
     description: string;
+    major?: boolean;   // 주요 변곡점 여부 — 백엔드 AI 가 판정(없으면 프론트가 휴리스틱으로 폴백)
 }
 
 export interface TimelineResult {

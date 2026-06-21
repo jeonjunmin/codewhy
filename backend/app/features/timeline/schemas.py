@@ -31,6 +31,7 @@ class CacheClearRequest(BaseModel):
 class Milestone(BaseModel):
     date: str
     description: str
+    major: bool = False   # 주요 변곡점 여부 — AI 가 판정(프론트 범례/강조에 사용)
 
 
 class TimelineResponse(BaseModel):

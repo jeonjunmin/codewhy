@@ -43,7 +43,7 @@ def _build_prompt(
 {{
   "summary": "제목 한 줄\\n상세 2문장 (아래 'summary 형식' 규칙 참고)",
   "milestones": [
-    {{"date": "YYYY-MM-DD", "description": "타이틀 한 줄\\n내용 한 줄"}}
+    {{"date": "YYYY-MM-DD", "description": "타이틀 한 줄\\n내용 한 줄", "major": true}}
   ]
 }}
 
@@ -57,6 +57,9 @@ def _build_prompt(
   · 타이틀 = 그 묶음이 이룬 변화를 압축한 명사구(15자 안팎, 쉼표·마침표 없이 한 토막).
   · 내용 = 그 변화의 의도/효과를 풀어 쓴 한두 줄(개별 커밋 나열·기술 용어가 아니라 기획·비즈니스 의도 중심). 두 문장을 넘기지 마세요.
   · 예: "이슈 맥락 연동\\n커밋과 GitHub 이슈를 이어 변경 사유를 한눈에 추적하게 했습니다."
+- 각 milestone 에 major(boolean) 를 넣으세요 — '주요 변곡점'이면 true, 평범한 일반 변경이면 false:
+  · 주요 변곡점 = 파일 최초 생성, 핵심 기능 도입, 아키텍처/책임 구조 전환처럼 흐름을 바꾼 결정적 지점.
+  · 전체 중 1~3개만 보수적으로 true (전부 true 금지). 최소 1개(보통 최초 생성)는 true 로 두세요.
 - date 는 각 묶음에 표기된 마지막 날짜를 그대로 쓰세요. 임의의 날짜를 만들지 마세요.
 
 [묶음별 커밋 이력]
@@ -82,6 +85,7 @@ def parse_ai_response(raw: str) -> dict[str, Any]:
                 {
                     "date":        str(m.get("date", "")),
                     "description": str(m.get("description", "")),
+                    "major":       bool(m.get("major", False)),
                 }
                 for m in milestones
                 if isinstance(m, dict)
