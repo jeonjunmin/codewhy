@@ -5,6 +5,11 @@
 CodeWhy는 코드의 **맥락과 의도**를 알려주는 AI 기반 VSCode 확장입니다.
 `git blame`이 *누가·언제* 바꿨는지만 알려줄 때, CodeWhy는 *왜* 바꿨는지까지 설명합니다.
 
+<!-- 📸 캡처 자리: CodeWhy 사이드바 + 에디터 전체 모습(대표 스크린샷) -->
+<p align="center">
+  <img src="images/screenshots/overview.png" alt="CodeWhy 전체 화면" width="400" />
+</p>
+
 ---
 
 ## ✨ 핵심 기능
@@ -24,6 +29,11 @@ CodeWhy는 코드의 **맥락과 의도**를 알려주는 AI 기반 VSCode 확�
 
 > 에디터에서 라인을 선택한 뒤 **우클릭 → CodeWhy: 이 코드, 왜 바꿨어?**
 
+<!-- 📸 캡처 자리: 돋보기 분석 결과가 사이드바에 표시된 화면 -->
+<p align="center">
+  <img src="images/screenshots/feature-blame.png" alt="돋보기 — 코드 변경 사유 분석 화면" width="400" />
+</p>
+
 ### 2. 타임라인 요약 — "이 파일의 역사"
 
 수백 개의 커밋을 직접 읽지 않아도, AI가 파일의 변경 흐름을 한 문단과 주요 마일스톤으로 정리합니다.
@@ -35,15 +45,27 @@ CodeWhy는 코드의 **맥락과 의도**를 알려주는 AI 기반 VSCode 확�
 
 > 에디터 **우클릭 → CodeWhy: 이 파일의 역사 요약**
 
-### 3. 요구사항 역추적 — "원본 기획서 찾기"
+<!-- 📸 캡처 자리: 타임라인 요약(한 문단 + 주요 마일스톤)이 표시된 화면 -->
+<p align="center">
+  <img src="images/screenshots/feature-timeline.png" alt="타임라인 요약 — 파일 변경 흐름 요약 화면" width="400" />
+</p>
 
-코드 한 줄에서 출발해, 그 변경과 연결된 **원본 기획 문서**를 찾아 바로 열어 줍니다.
+### 3. 요구사항 찾기 — "이 코드, 어디서 시작됐어?"
 
-- 커밋의 티켓·내용을 기반으로 연관 문서를 다단계로 탐색
-- 연관 발췌문·페이지와 함께, 신뢰도(확정 / 추정)를 구분해 표시
-- 결과에서 원본 문서를 바로 다운로드
+코드 한 줄에서 출발해, 그 변경과 연결된 **요구사항 이슈**를 찾아 줍니다.
 
-> 에디터 **우클릭 → CodeWhy: 원본 기획서 찾기**
+- 연관 이슈를 한곳에 모아 보여주고, 키워드 검색·열림/닫힘 상태로 필터
+- 이슈 상세에서 담당자·개설/업데이트 시점은 물론, 연관 커밋·댓글·첨부 문서까지 **활동 타임라인**으로 정리
+- **AI 질문**으로 이슈 본문·댓글·첨부·연관 커밋을 근거로 요약하거나 후속 질문 가능
+
+> 에디터 **우클릭 → CodeWhy: 요구사항 찾기**
+
+<!-- 📸 캡처 자리: 연관 이슈 목록 → 상세 → AI 요약으로 이어지는 역추적 흐름 -->
+<p align="center">
+  <img src="images/screenshots/feature-trace-1.png" alt="요구사항 역추적 — 연관 이슈 목록" width="300" />
+  <img src="images/screenshots/feature-trace-2.png" alt="요구사항 역추적 — 이슈 상세(담당자·활동 타임라인·첨부)" width="300" />
+  <img src="images/screenshots/feature-trace-3.png" alt="요구사항 역추적 — AI 요약·후속 질문" width="300" />
+</p>
 
 ---
 
@@ -65,7 +87,7 @@ CodeWhy는 코드의 **맥락과 의도**를 알려주는 AI 기반 VSCode 확�
 | --- | --- |
 | `CodeWhy: 이 코드, 왜 바꿨어?` | 돋보기 분석 |
 | `CodeWhy: 이 파일의 역사 요약` | 타임라인 요약 |
-| `CodeWhy: 원본 기획서 찾기` | 요구사항 역추적 |
+| `CodeWhy: 요구사항 찾기` | 연관 요구사항 이슈 찾기 |
 | `CodeWhy: 커밋 상세 보기` | 돋보기 대상 커밋 상세 |
 | `CodeWhy: 현재 라인 돋보기 고정/해제` | 돋보기 핀 토글 |
 
@@ -88,16 +110,7 @@ VSCode 설정(`settings.json` 또는 설정 UI)에서 조정할 수 있습니다
 - **Visual Studio Code** 1.118.0 이상
 - **CodeWhy 백엔드 서버** — AI 분석은 백엔드에서 수행됩니다. `codewhy.backendUrl`이 가리키는 서버가 실행 중이어야 합니다.
 
-백엔드 설치·실행 방법은 아래 개발 문서를 참고하세요.
-
----
-
-## 📚 더 보기
-
-| 문서 | 내용 |
-| --- | --- |
-| [DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md) | 아키텍처·백엔드 실행·개발 현황·TODO |
-| [PACKAGING_GUIDE.md](PACKAGING_GUIDE.md) | 확장 패키징 및 배포 |
+백엔드는 서버에 배포되어 있어 일반 사용자는 별도 설치가 필요 없습니다.
 
 ---
 
