@@ -171,6 +171,48 @@ def find_pr_for_commit(repo_path: str, commit_hash: str) -> PullRequest | None:
     return find_pr_for_remote(detect_remote(repo_path), commit_hash)
 
 
+def fetch_commit_diff(
+    remote: Remote | None, sha: str, *, max_files: int = 12, max_chars: int = 5000
+) -> str:
+    """커밋 SHA 의 '실제 코드 변경(diff)' 텍스트를 반환한다. 실패/미지원 시 "".
+
+    커밋 메시지보다 정확한 근거를 챗봇에 주기 위함(메시지는 의도, diff 는 사실).
+    GitHub: GET /repos/{o}/{r}/commits/{sha} 의 files[].patch
+    GitLab: GET /projects/{id}/repository/commits/{sha}/diff 의 [].diff
+    토큰 폭주를 막기 위해 파일 수(max_files)·문자 수(max_chars) 상한으로 잘라낸다.
+    """
+    if not remote or not sha:
+        return ""
+    try:
+        if remote.host == "github":
+            return _github_commit_diff(remote.base, remote.owner, remote.repo, sha, max_files, max_chars)
+        if remote.host == "gitlab":
+            return _gitlab_commit_diff(remote.base, remote.owner, remote.repo, sha, max_files, max_chars)
+    except (urllib.error.URLError, KeyError, ValueError, TimeoutError, OSError):
+        return ""
+    return ""
+
+
+def _format_patches(pairs: list[tuple[str, str]], max_chars: int) -> str:
+    """[(path, patch), …] → 파일별 헤더를 붙인 diff 텍스트(총 max_chars 로 절단)."""
+    out: list[str] = []
+    total = 0
+    for path, patch in pairs:
+        if not patch:
+            continue
+        block = f"--- {path}\n{patch}"
+        if total + len(block) > max_chars:
+            remaining = max_chars - total
+            if remaining > 200:
+                out.append(block[:remaining] + "\n…(diff 일부 생략)")
+            else:
+                out.append("…(이하 diff 생략)")
+            break
+        out.append(block)
+        total += len(block)
+    return "\n".join(out)
+
+
 # ─── URL 파싱 ───────────────────────────────────────────────────────
 def _host_matches(domain: str, base: str) -> bool:
     """domain 이 base 와 정확히 같거나 base 의 정식 하위 도메인일 때만 True.
@@ -451,6 +493,21 @@ def _github_commit_summary(base: str, owner: str, repo: str, sha: str) -> str:
     return message.splitlines()[0] if message else ""
 
 
+@lru_cache(maxsize=_VCS_CACHE_SIZE)
+def _github_commit_diff(base: str, owner: str, repo: str, sha: str, max_files: int, max_chars: int) -> str:
+    """GitHub 커밋의 변경 파일별 patch 를 모아 diff 텍스트로 반환. 실패 시 ""."""
+    payload = _get_json(f"{base}/repos/{owner}/{repo}/commits/{sha}", _github_headers())
+    files = payload.get("files") if isinstance(payload, dict) else None
+    if not isinstance(files, list):
+        return ""
+    pairs = [
+        (f.get("filename", ""), f.get("patch", ""))
+        for f in files[:max_files]
+        if isinstance(f, dict)
+    ]
+    return _format_patches(pairs, max_chars)
+
+
 # ─── GitLab ─────────────────────────────────────────────────────────
 def _gitlab_headers() -> dict:
     headers = {"User-Agent": "codewhy"}
@@ -458,6 +515,21 @@ def _gitlab_headers() -> dict:
     if token:
         headers["PRIVATE-TOKEN"] = token
     return headers
+
+
+@lru_cache(maxsize=_VCS_CACHE_SIZE)
+def _gitlab_commit_diff(base: str, owner: str, repo: str, sha: str, max_files: int, max_chars: int) -> str:
+    """GitLab 커밋의 변경 파일별 diff 를 모아 텍스트로 반환. 실패 시 ""."""
+    project_id = urllib.parse.quote(f"{owner}/{repo}", safe="")
+    payload = _get_json(f"{base}/projects/{project_id}/repository/commits/{sha}/diff", _gitlab_headers())
+    if not isinstance(payload, list):
+        return ""
+    pairs = [
+        (d.get("new_path") or d.get("old_path") or "", d.get("diff", ""))
+        for d in payload[:max_files]
+        if isinstance(d, dict)
+    ]
+    return _format_patches(pairs, max_chars)
 
 
 def _gitlab_mr_for_commit(remote: Remote, commit_hash: str) -> PullRequest | None:

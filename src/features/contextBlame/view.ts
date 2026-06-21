@@ -2,10 +2,10 @@ import { execSync } from 'child_process';
 import * as vscode from 'vscode';
 import { EditorContext, getEditorContext } from '../../shared/editor';
 import * as localGit from '../../shared/git';
-import { BlameRequest, BlameResult, CommitInput, GitCommitMeta, ReasonRequest, TraceRequest } from '../../shared/types';
+import { BlameRequest, BlameResult, CommitInput, GitCommitMeta, IssueChatMessage, IssueChatRequest, ReasonRequest, TraceRequest } from '../../shared/types';
 import { fetchRequirementTrace } from '../requirementTrace/api';
 import { streamTimelineSummary } from '../timelineSummary/api';
-import { fetchCommitReason, streamContextBlame } from './api';
+import { fetchCommitReason, streamContextBlame, streamIssueChat } from './api';
 import { ContextBlameSidebarProvider, VIEW_ID } from './sidebar';
 
 /**
@@ -97,6 +97,8 @@ function ensureInitialized(context: vscode.ExtensionContext) {
         onOpenCommitIssues: (hash, filePath, repoPath) => handleOpenCommitIssues(hash, filePath, repoPath),
         // 라인 수정 이력 항목 펼침 → 그 커밋의 변경 사유를 지연 생성해 사이드바에 주입.
         onExpandHistory: (hash, filePath, repoPath) => handleExpandHistory(hash, filePath, repoPath),
+        // 이슈 상세 'AI 질문' → 현재 이슈를 컨텍스트로 멀티턴 답변을 스트리밍해 사이드바로 중계.
+        onIssueChat: (payload) => handleIssueChat(payload),
     });
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(VIEW_ID, sidebar, {
@@ -452,6 +454,43 @@ async function handleExpandHistory(hash: string, filePath: string, repoPath: str
         sidebar.setHistoryReason(hash, reason || '(변경 사유를 찾지 못했습니다.)');
     } catch (err) {
         sidebar.setHistoryReason(hash, `변경 사유를 불러오지 못했습니다: ${(err as Error).message}`);
+    }
+}
+
+/**
+ * 이슈 상세 'AI 질문' — 웹뷰가 보낸 (이슈 컨텍스트 + 대화 히스토리)로 백엔드 챗봇을
+ * 스트리밍 호출하고, 토큰 델타를 사이드바(웹뷰)로 그대로 중계한다.
+ * 첨부 다운로드는 백엔드가 서버 토큰으로 수행하므로 여기서 별도 인증을 싣지 않는다.
+ */
+async function handleIssueChat(payload: { issue: any; messages: { role: string; content: string }[] }) {
+    if (!sidebar) { return; }
+    const issue = payload.issue || {};
+    // 연관 커밋 diff 를 백엔드가 호스팅 API 로 가져오려면 remote URL 이 필요하다(로컬 git 에서 추출).
+    const repoPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+    const remoteUrl = repoPath ? localGit.getRemoteUrl(repoPath) : null;
+    const req: IssueChatRequest = {
+        issueNumber: issue.issueNumber ?? null,
+        title: issue.title ?? '',
+        body: issue.body ?? '',
+        state: issue.state ?? '',
+        labels: issue.labels ?? [],
+        assignee: issue.assignee ?? '',
+        url: issue.url ?? '',
+        attachments: issue.attachments ?? [],
+        comments: issue.comments ?? [],
+        linkedCommits: issue.linkedCommits ?? [],
+        repoPath,
+        remoteUrl,
+        messages: payload.messages as IssueChatMessage[],
+    };
+    try {
+        await streamIssueChat(req, {
+            onDelta: (delta) => sidebar?.postIssueChat({ kind: 'delta', text: delta }),
+            onDone: () => sidebar?.postIssueChat({ kind: 'done' }),
+            onError: (message) => sidebar?.postIssueChat({ kind: 'error', text: message }),
+        });
+    } catch (err) {
+        sidebar?.postIssueChat({ kind: 'error', text: (err as Error).message });
     }
 }
 

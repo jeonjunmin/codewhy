@@ -260,3 +260,38 @@ export interface DocumentMatch {
 export interface TraceResult {
     documents: DocumentMatch[];
 }
+
+// ── 이슈 AI 챗봇 ──────────────────────────────────────────────────────────
+/** 멀티턴 대화 한 줄. 마지막 원소가 이번 질문. */
+export interface IssueChatMessage {
+    role: 'user' | 'assistant';
+    content: string;
+}
+
+/** 이슈에 연관된 커밋(활동 타임라인에서 추림). */
+export interface IssueLinkedCommit {
+    sha: string;
+    summary?: string;
+}
+
+/**
+ * POST /api/issue/chat 요청 — 현재 열린 이슈를 컨텍스트로 한 질의응답.
+ * 백엔드 app/features/issue_chat/schemas.py 의 IssueChatRequest 와 키가 일치해야 한다.
+ * 첨부/댓글은 프런트가 이미 가진 DocumentMatch 를 그대로 흘려보낸다(백엔드가 첨부를 내려받아 멀티모달화).
+ */
+export interface IssueChatRequest {
+    issueNumber?: number | null;
+    title?: string;
+    body?: string | null;
+    state?: string | null;
+    labels?: string[];
+    assignee?: string | null;
+    url?: string;
+    attachments?: IssueAttachment[];
+    comments?: IssueComment[];
+    linkedCommits?: IssueLinkedCommit[];
+    filePath?: string;
+    repoPath?: string;
+    remoteUrl?: string | null;
+    messages: IssueChatMessage[];
+}

@@ -69,6 +69,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             onOpenCommitIssues: (hash: string, filePath: string, repoPath: string) => void;
             // 라인 수정 이력 항목 펼침 — 그 커밋의 변경 사유를 지연 생성한다.
             onExpandHistory: (hash: string, filePath: string, repoPath: string) => void;
+            // 이슈 상세의 'AI 질문' — 현재 이슈를 컨텍스트로 멀티턴 답변을 스트리밍한다.
+            onIssueChat: (payload: { issue: any; messages: { role: string; content: string }[] }) => void;
         },
     ) {}
 
@@ -172,6 +174,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     /** 펼친 라인 이력 항목에 그 커밋의 변경 사유를 주입한다(지연 로드 응답). */
     setHistoryReason(hash: string, reason: string) {
         this.view?.webview.postMessage({ type: 'historyReason', payload: { hash, reason } });
+    }
+
+    /** 이슈 챗봇 스트림 프레임을 웹뷰로 중계한다(view.ts onIssueChat 에서 호출). */
+    postIssueChat(payload: { kind: 'delta' | 'done' | 'error'; text?: string }) {
+        this.view?.webview.postMessage({ type: 'issueChat', payload });
     }
 
     private postBlameStream(s: BlameStreamState) {
@@ -338,6 +345,13 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         // 라인 이슈 롤업 칩 등 URL 미해석 항목 클릭 — 임시 안내만 한다.
         if (msg.type === 'openIssueTodo') {
             this.handlers.onOpenIssueTodo();
+            return;
+        }
+        // 이슈 상세의 'AI 질문' — 블레임 결과(this.last) 유무와 무관하게 동작해야 한다.
+        if (msg.type === 'issueChatAsk') {
+            if (msg.payload?.issue && Array.isArray(msg.payload?.messages)) {
+                this.handlers.onIssueChat(msg.payload);
+            }
             return;
         }
         // '라인 수정 이력'의 '이슈 N' 배지 클릭 — 현재 블레임 파일/레포 맥락으로 그 커밋의 이슈를 연다.
@@ -917,12 +931,13 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     /* ── 이슈 상세 화면 ──────────────────────────────────────────── */
     .is-detail { display: flex; flex-direction: column; gap: 13px; }
     .is-d-nav { display: flex; align-items: center; justify-content: space-between; }
-    .is-d-back {
-        display: inline-flex; align-items: center; gap: 3px;
-        background: none; border: none; padding: 0; cursor: pointer;
-        color: var(--fg-dim); font-size: 12px; font-family: inherit;
+    /* 뒤로가기 링크 — 버튼 아님. 강조 색 + 굵게로 '돌아가는 링크'임을 또렷이. (이슈 상세/챗봇 공통) */
+    .is-d-back, .ic-back {
+        display: inline-flex; align-items: center; gap: 4px;
+        background: none; border: none; padding: 2px 0; cursor: pointer;
+        color: var(--accent-violet); font-size: 12.5px; font-weight: 700; font-family: inherit;
     }
-    .is-d-back:hover { color: var(--fg); }
+    .is-d-back:hover, .ic-back:hover { color: var(--accent-cyan); text-decoration: underline; }
     .is-d-pager { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-mute); font-size: 11.5px; }
     .is-d-pager button {
         background: none; border: none; cursor: pointer; color: var(--fg-mute);
@@ -951,6 +966,79 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         background: var(--grad);
     }
     .is-d-ai:hover { filter: brightness(1.12); }
+
+    /* ── 이슈 AI 챗봇 ─────────────────────────────────────────── */
+    /* 채팅 화면은 뷰포트를 꽉 채우는 고정 레이아웃 — 피드만 스크롤하고 입력창은 하단 고정. */
+    .is-chat {
+        position: fixed; inset: 0; z-index: 30;
+        display: flex; flex-direction: column;
+        /* 고정 오버레이 — VSCode 사이드바 배경색으로 불투명하게(아래 내용 비침 방지). */
+        background: var(--vscode-sideBar-background, #18181B); box-sizing: border-box;
+        padding: 12px 14px;
+    }
+    .ic-head {
+        flex-shrink: 0;
+        display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px;
+        padding-bottom: 8px; border-bottom: 1px solid var(--line);
+    }
+    .ic-back { flex-shrink: 0; }   /* 스타일은 위 .is-d-back, .ic-back 공통 규칙을 따른다(링크형) */
+    .ic-title { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; }
+    .ic-num { color: var(--fg-mute); font-size: 12px; font-weight: 600; flex-shrink: 0; }
+    .ic-name { color: var(--fg); font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ic-learned { flex-basis: 100%; color: var(--accent-cyan); font-size: 11px; }
+    .ic-feed {
+        flex: 1; min-height: 0; overflow-y: auto;
+        display: flex; flex-direction: column; gap: 10px; padding: 12px 2px;
+    }
+    .ic-msg { display: flex; }
+    .ic-msg.user { justify-content: flex-end; }
+    .ic-bubble {
+        max-width: 88%; padding: 8px 11px; border-radius: 12px; font-size: 12.5px;
+        line-height: 1.6; word-break: break-word; overflow-wrap: anywhere;
+    }
+    .ic-msg.user .ic-bubble { background: var(--grad); color: #fff; border-bottom-right-radius: 4px; white-space: pre-wrap; }
+    .ic-msg.bot .ic-bubble { background: var(--surface); color: var(--fg); border-bottom-left-radius: 4px; }
+    .ic-msg.bot .ic-bubble.error { color: #FCA5A5; }
+    /* 답변(마크다운) 가독성 */
+    .ic-bubble h1, .ic-bubble h2, .ic-bubble h3, .ic-bubble h4 {
+        margin: 9px 0 5px; font-size: 13px; font-weight: 700; color: var(--fg); line-height: 1.4;
+    }
+    .ic-bubble h1 { font-size: 14px; }
+    .ic-bubble p { margin: 6px 0; }
+    .ic-bubble ul, .ic-bubble ol { margin: 6px 0; padding-left: 18px; }
+    .ic-bubble li { margin: 3px 0; }
+    .ic-bubble strong { color: var(--fg); font-weight: 700; }
+    .ic-bubble em { font-style: italic; }
+    .ic-bubble code {
+        background: rgba(255,255,255,.09); padding: 1px 5px; border-radius: 4px;
+        font-size: 11.5px; font-family: var(--vscode-editor-font-family, ui-monospace, monospace);
+    }
+    .ic-bubble blockquote {
+        margin: 7px 0; padding: 4px 10px; border-left: 3px solid var(--accent-violet);
+        color: var(--fg-dim);
+    }
+    .ic-bubble hr { border: none; border-top: 1px solid var(--line); margin: 9px 0; }
+    .ic-bubble > :first-child { margin-top: 0; }
+    .ic-bubble > :last-child { margin-bottom: 0; }
+    .ic-input {
+        flex-shrink: 0; display: flex; gap: 6px; align-items: flex-end;
+        padding-top: 10px; border-top: 1px solid var(--line);
+    }
+    #ic-text {
+        /* 항상 3줄 높이 고정 — 초과 시 스크롤(자동 높이 변경 없음). line-height(1.5)*3 + 패딩(16). */
+        flex: 1; resize: none; box-sizing: border-box;
+        height: calc(1.5em * 3 + 16px); overflow-y: auto;
+        padding: 8px 10px; border-radius: 8px;
+        border: 1px solid var(--line); background: var(--surface); color: var(--fg);
+        font: inherit; font-size: 12.5px; line-height: 1.5;
+    }
+    #ic-text:focus { outline: none; border-color: var(--accent-violet); }
+    .ic-send {
+        flex-shrink: 0; padding: 8px 12px; border-radius: 8px; border: none; cursor: pointer;
+        color: #fff; font-weight: 700; font-size: 12px; background: var(--grad);
+    }
+    .ic-send:hover { filter: brightness(1.12); }
+    .ic-send:disabled { opacity: .5; cursor: default; filter: none; }
 
     .is-d-title {
         color: var(--fg); font-size: 15px; font-weight: 700; line-height: 1.4;
@@ -1184,6 +1272,18 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
                 <div id="is-list-empty" class="empty hidden">검색 결과가 없습니다.</div>
             </div>
             <div id="is-detail-view" class="is-detail hidden"></div>
+            <div id="is-chat-view" class="is-chat hidden">
+                <div class="ic-head">
+                    <button class="ic-back" data-action="issueChatBack">‹ 이슈로</button>
+                    <div class="ic-title"><span id="ic-num" class="ic-num"></span><span id="ic-name" class="ic-name"></span></div>
+                    <div id="ic-learned" class="ic-learned"></div>
+                </div>
+                <div id="ic-feed" class="ic-feed"></div>
+                <div class="ic-input">
+                    <textarea id="ic-text" rows="3" placeholder="이 이슈의 맥락에서 계속 질문하세요…" autocomplete="off" spellcheck="false"></textarea>
+                    <button id="ic-send" class="ic-send" data-action="issueChatSend">↑ 전송</button>
+                </div>
+            </div>
         </div>
     </div><!-- /#pane-issue -->
 
@@ -1268,6 +1368,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             case 'isEmpty': isEmpty(msg.payload && msg.payload.message); break;
             case 'isCommitLoading': isCommitLoading(msg.payload); break;
             case 'isCommitResult': isCommitResult(msg.payload); break;
+            // ── 이슈 챗봇 스트림 ──
+            case 'issueChat': onChatFrame(msg.payload); break;
         }
     });
 
@@ -1494,11 +1596,162 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     function showIssueList() {
         document.getElementById('is-list-view').classList.remove('hidden');
         document.getElementById('is-detail-view').classList.add('hidden');
+        document.getElementById('is-chat-view').classList.add('hidden');
     }
     function showIssueDetail() {
         document.getElementById('is-list-view').classList.add('hidden');
         document.getElementById('is-detail-view').classList.remove('hidden');
+        document.getElementById('is-chat-view').classList.add('hidden');
     }
+
+    // ── 이슈 AI 챗봇 ────────────────────────────────────────────────────
+    let chatDoc = null;          // 챗봇이 학습한 이슈(isDocs[isIndex] 스냅샷)
+    let chatMessages = [];       // 멀티턴 히스토리 [{role, content}]
+    let chatStreaming = false;   // 응답 수신 중
+    let chatBotEl = null;        // 스트리밍 중인 봇 말풍선 요소
+    let chatBotText = '';        // 현재 봇 답변 누적 텍스트
+
+    function showIssueChat() {
+        document.getElementById('is-list-view').classList.add('hidden');
+        document.getElementById('is-detail-view').classList.add('hidden');
+        document.getElementById('is-chat-view').classList.remove('hidden');
+    }
+    function openIssueChat() {
+        chatDoc = isDocs[isIndex] || null;
+        if (!chatDoc) { return; }
+        chatMessages = []; chatStreaming = false; chatBotEl = null; chatBotText = '';
+        document.getElementById('ic-num').textContent = (chatDoc.issueNumber != null) ? ('#' + chatDoc.issueNumber) : '';
+        document.getElementById('ic-name').textContent = chatDoc.title || '(제목 없음)';
+        const comments = chatDoc.comments || [];
+        const commentCount = comments.filter(c => c && c.kind === 'comment').length;
+        const linkedCount = comments.filter(c => c && (c.event === 'committed' || c.event === 'referenced')).length;
+        // 첨부 수 — 본문 + 코멘트 첨부를 URL 기준 중복 제거(백엔드 collect_attachments 와 동일 기준).
+        const attUrls = new Set();
+        (chatDoc.attachments || []).forEach(a => { if (a && a.url) { attUrls.add(a.url); } });
+        comments.forEach(c => ((c && c.attachments) || []).forEach(a => { if (a && a.url) { attUrls.add(a.url); } }));
+        const attCount = attUrls.size;
+        document.getElementById('ic-learned').textContent =
+            '✦ 커밋 ' + linkedCount + ' · 코멘트 ' + commentCount + ' · 첨부 ' + attCount + ' 학습 완료';
+        const feed = document.getElementById('ic-feed');
+        feed.innerHTML = '';
+        appendChatBubble('bot', '이 이슈에 대해 무엇이든 물어보세요. 본문·댓글·첨부 문서·연관 커밋을 근거로 답합니다.');
+        setChatSending(false);
+        const t = document.getElementById('ic-text');
+        t.value = '';
+        showIssueChat();
+        setTimeout(() => t.focus(), 0);
+    }
+    function appendChatBubble(role, text) {
+        const feed = document.getElementById('ic-feed');
+        const row = document.createElement('div');
+        row.className = 'ic-msg ' + (role === 'user' ? 'user' : 'bot');
+        const bubble = document.createElement('div');
+        bubble.className = 'ic-bubble';
+        // 사용자 입력은 평문, 봇 답변은 마크다운으로 렌더해 가독성을 높인다.
+        if (role === 'user') { bubble.textContent = text || ''; }
+        else { bubble.innerHTML = renderChatMarkdown(text || ''); }
+        row.appendChild(bubble);
+        feed.appendChild(row);
+        feed.scrollTop = feed.scrollHeight;
+        return bubble;
+    }
+    // ── 답변 마크다운 → HTML (제목/굵게/목록/인용/구분선/코드) ──────────
+    function chatEsc(s) {
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+    function chatInline(t) {
+        return chatEsc(t)
+            .replace(/\`([^\`]+)\`/g, '<code>$1</code>')
+            .replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>')
+            .replace(/(^|[^*])\\*([^*\\s][^*]*?)\\*(?!\\*)/g, '$1<em>$2</em>');
+    }
+    function renderChatMarkdown(src) {
+        const lines = String(src || '').split(/\\r?\\n/);
+        let html = '', inQuote = false;
+        const stack = [];   // 들여쓰기 기준 리스트 스택 {tag, indent} — 번호 매김 유지 + 하위 불릿 중첩
+        const closeQuote = () => { if (inQuote) { html += '</blockquote>'; inQuote = false; } };
+        const closeAll = () => { while (stack.length) { html += '</' + stack.pop().tag + '>'; } };
+        for (const raw of lines) {
+            const line = raw.replace(/\\s+$/, '');
+            let m;
+            if (/^\\s*([-*_])\\1{2,}\\s*$/.test(line)) { closeAll(); closeQuote(); html += '<hr/>'; continue; }
+            if ((m = line.match(/^\\s*(#{1,4})\\s+(.*)$/))) { closeAll(); closeQuote(); const lv = m[1].length; html += '<h' + lv + '>' + chatInline(m[2]) + '</h' + lv + '>'; continue; }
+            if ((m = line.match(/^\\s*>\\s?(.*)$/))) { closeAll(); if (!inQuote) { html += '<blockquote>'; inQuote = true; } html += chatInline(m[1]) + '<br/>'; continue; }
+            const om = line.match(/^(\\s*)\\d+\\.\\s+(.*)$/);
+            const um = om ? null : line.match(/^(\\s*)[-*]\\s+(.*)$/);
+            if (om || um) {
+                closeQuote();
+                const lead = (om ? om[1] : um[1]).replace(/\\t/g, '    ').length;
+                const tag = om ? 'ol' : 'ul';
+                const content = om ? om[2] : um[2];
+                while (stack.length && stack[stack.length - 1].indent > lead) { html += '</' + stack.pop().tag + '>'; }
+                const top = stack[stack.length - 1];
+                if (!top || top.indent < lead) { html += '<' + tag + '>'; stack.push({ tag, indent: lead }); }
+                else if (top.indent === lead && top.tag !== tag) { html += '</' + stack.pop().tag + '>'; html += '<' + tag + '>'; stack.push({ tag, indent: lead }); }
+                html += '<li>' + chatInline(content) + '</li>';
+                continue;
+            }
+            if (line.trim() === '') { continue; }   // 빈 줄: 리스트는 유지(느슨하게)
+            closeAll(); closeQuote();
+            html += '<p>' + chatInline(line) + '</p>';
+        }
+        closeAll(); closeQuote();
+        return html;
+    }
+    function setChatSending(on) {
+        chatStreaming = on;
+        const btn = document.getElementById('ic-send');
+        if (btn) { btn.disabled = on; }
+    }
+    function chatIssuePayload() {
+        const d = chatDoc || {};
+        return {
+            issueNumber: d.issueNumber != null ? d.issueNumber : null,
+            title: d.title || '', body: d.body || '', state: d.state || '',
+            labels: d.labels || [], assignee: d.assignee || '', url: d.url || '',
+            attachments: d.attachments || [], comments: d.comments || [],
+        };
+    }
+    function sendChat() {
+        if (chatStreaming || !chatDoc) { return; }
+        const t = document.getElementById('ic-text');
+        const q = (t.value || '').trim();
+        if (!q) { return; }
+        chatMessages.push({ role: 'user', content: q });
+        appendChatBubble('user', q);
+        t.value = '';
+        chatBotText = '';
+        chatBotEl = appendChatBubble('bot', '');
+        chatBotEl.innerHTML = '<span class="spinner"></span>';
+        setChatSending(true);
+        vscode.postMessage({ type: 'issueChatAsk', payload: { issue: chatIssuePayload(), messages: chatMessages.slice() } });
+    }
+    function onChatFrame(p) {
+        if (!p) { return; }
+        const feed = document.getElementById('ic-feed');
+        if (p.kind === 'delta') {
+            if (!chatBotEl) { chatBotEl = appendChatBubble('bot', ''); }
+            chatBotText += (p.text || '');
+            chatBotEl.innerHTML = renderChatMarkdown(chatBotText);
+            if (feed) { feed.scrollTop = feed.scrollHeight; }
+        } else if (p.kind === 'done') {
+            if (chatBotEl) { chatMessages.push({ role: 'assistant', content: chatBotText || chatBotEl.textContent || '' }); }
+            chatBotText = ''; chatBotEl = null; setChatSending(false);
+        } else if (p.kind === 'error') {
+            if (!chatBotEl) { chatBotEl = appendChatBubble('bot', ''); }
+            chatBotEl.classList.add('error');
+            chatBotEl.textContent = '답변을 가져오지 못했습니다: ' + (p.text || '알 수 없는 오류');
+            chatBotText = ''; chatBotEl = null; setChatSending(false);
+        }
+    }
+    // 입력창: Enter 전송 / Shift+Enter 줄바꿈 (높이는 CSS 로 3줄 고정, 초과 시 스크롤)
+    (function bindChatInput() {
+        const t = document.getElementById('ic-text');
+        if (!t) { return; }
+        t.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+        });
+    })();
     function renderIssueList() {
         const list = document.getElementById('is-list');
         list.innerHTML = '';
@@ -2372,11 +2625,14 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         if (el.dataset.action === 'issueBack') { showIssueList(); return; }
         if (el.dataset.action === 'issuePrev') { stepIssue(-1); return; }
         if (el.dataset.action === 'issueNext') { stepIssue(1); return; }
-        // AI 질문 — 아직 미연동, '준비 중' 안내만(openIssueTodo 재사용).
+        // AI 질문 — 현재 이슈를 컨텍스트로 한 챗봇 화면으로 전환.
         if (el.dataset.action === 'issueAiAsk') {
-            vscode.postMessage({ type: 'openIssueTodo' });
+            openIssueChat();
             return;
         }
+        // 챗봇 화면 — 상세로 복귀 / 전송.
+        if (el.dataset.action === 'issueChatBack') { showIssueDetail(); return; }
+        if (el.dataset.action === 'issueChatSend') { sendChat(); return; }
         // 이슈/첨부 항목은 자기 URL 을 함께 실어 외부로 연다.
         if (el.dataset.action === 'openIssue') {
             vscode.postMessage({ type: 'openIssue', payload: { url: el.dataset.url } });

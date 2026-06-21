@@ -8,6 +8,9 @@
 스트리밍 경로는 langchain_aws.ChatBedrock(`core/bedrock.py`)을 쓴다.
 """
 
+import asyncio
+import threading
+
 import boto3
 
 from app.core.config import (
@@ -64,3 +67,55 @@ def call_bedrock(
 
     response = _get_bedrock_runtime().converse(**kwargs)
     return response["output"]["message"]["content"][0]["text"]
+
+
+async def stream_bedrock(
+    messages: list[dict],
+    *,
+    system: list[dict] | str | None = None,
+    max_tokens: int = 1024,
+    temperature: float = 0.2,
+    model_id: str | None = None,
+):
+    """미리 구성한 Converse 메시지(멀티모달 블록 포함)를 스트리밍으로 보내고 텍스트 델타를 흘린다.
+
+    `call_bedrock` 은 텍스트 단발 응답용이라, image/document/cachePoint 블록과 멀티턴
+    히스토리를 그대로 제어해야 하는 챗봇은 `converse_stream` 을 직접 쓴다.
+    boto3 converse_stream 은 동기 블로킹 이터레이터라, 워커 스레드에서 돌리고
+    이벤트 루프로 안전하게 델타를 넘긴다(이벤트 루프 블로킹 방지).
+
+    messages: [{"role": "user"|"assistant", "content": [블록…]}, …]
+    """
+    kwargs: dict = {
+        "modelId": model_id or get_bedrock_model_id(),
+        "messages": messages,
+        "inferenceConfig": {"maxTokens": max_tokens, "temperature": temperature},
+    }
+    if system:
+        kwargs["system"] = system if isinstance(system, list) else [{"text": system}]
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    _DONE = object()
+
+    def _worker():
+        try:
+            response = _get_bedrock_runtime().converse_stream(**kwargs)
+            for event in response["stream"]:
+                text = event.get("contentBlockDelta", {}).get("delta", {}).get("text")
+                if text:
+                    loop.call_soon_threadsafe(queue.put_nowait, text)
+        except BaseException as exc:  # noqa: BLE001 — 호출 측으로 그대로 전달
+            loop.call_soon_threadsafe(queue.put_nowait, exc)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, _DONE)
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+    while True:
+        item = await queue.get()
+        if item is _DONE:
+            return
+        if isinstance(item, BaseException):
+            raise item
+        yield item

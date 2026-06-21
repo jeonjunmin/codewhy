@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     AWS_DEFAULT_REGION: str = "ap-northeast-2"
 
     # ── AWS Bedrock ───────────────────────────────────────────────────────────
-    BEDROCK_MODEL_ID: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    BEDROCK_MODEL_ID: str = "global.anthropic.claude-sonnet-4-6"
 
     # ── PostgreSQL (RDS) ──────────────────────────────────────────────────────
     # 런타임(asyncpg): postgresql+asyncpg://user:pass@host:5432/codewhy

@@ -1,5 +1,5 @@
 import { createHttpClient } from '../../shared/http';
-import { AskRequest, AskResult, BlameRequest, BlameResult, LineHistoryEntry, LineIssue, ReasonRequest, ReasonResult } from '../../shared/types';
+import { AskRequest, AskResult, BlameRequest, BlameResult, IssueChatRequest, LineHistoryEntry, LineIssue, ReasonRequest, ReasonResult } from '../../shared/types';
 
 /**
  * POST /api/blame/context — 라인 단위 변경 사유 분석(비스트리밍, 폴백용).
@@ -123,4 +123,59 @@ export async function fetchCommitReason(req: ReasonRequest): Promise<ReasonResul
 export async function askBlame(req: AskRequest): Promise<AskResult> {
     const { data } = await createHttpClient().post<AskResult>('/api/blame/ask', req);
     return data;
+}
+
+/** 이슈 챗봇 스트리밍 콜백 — streamContextBlame 의 핸들러 구조와 동일. */
+export interface IssueChatStreamHandlers {
+    onDelta(delta: string): void;
+    onDone(): void;
+    onError(message: string): void;
+}
+
+/**
+ * POST /api/issue/chat 를 호출해 답변을 스트리밍으로 전달한다.
+ *
+ * 백엔드는 항상 SSE(text/event-stream)로 응답한다(timeline /summary 와 동일 프레임 규약):
+ *   - {"delta": "토큰"}   → onDelta (말풍선에 누적)
+ *   - {"done": true}      → onDone
+ *   - {"error": "..."}    → onError
+ * streamContextBlame 과 같은 방식으로 axios Node 스트림을 직접 순회하며 `data: {...}\n\n` 를 파싱한다.
+ */
+export async function streamIssueChat(
+    req: IssueChatRequest,
+    handlers: IssueChatStreamHandlers,
+): Promise<void> {
+    const response = await createHttpClient().post('/api/issue/chat', req, {
+        responseType: 'stream',
+        headers: { Accept: 'text/event-stream' },
+    });
+
+    const body = response.data as AsyncIterable<Buffer>;
+    let buffer = '';
+    for await (const chunk of body) {
+        buffer += chunk.toString('utf-8');
+
+        let sepIndex: number;
+        while ((sepIndex = buffer.indexOf('\n\n')) !== -1) {
+            const frame = buffer.slice(0, sepIndex).trim();
+            buffer = buffer.slice(sepIndex + 2);
+            if (!frame.startsWith('data:')) { continue; }
+
+            const payload = frame.slice('data:'.length).trim();
+            if (!payload) { continue; }
+
+            let msg: { delta?: string; done?: boolean; error?: string };
+            try {
+                msg = JSON.parse(payload);
+            } catch {
+                continue;
+            }
+
+            if (msg.error) { handlers.onError(msg.error); return; }
+            if (msg.done) { handlers.onDone(); return; }
+            if (typeof msg.delta === 'string') { handlers.onDelta(msg.delta); }
+        }
+    }
+    // 스트림이 done 프레임 없이 끝나면(연결 종료 등) 정상 종료로 간주.
+    handlers.onDone();
 }
