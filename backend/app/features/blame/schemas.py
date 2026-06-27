@@ -44,6 +44,15 @@ class BlameRequest(BaseModel):
     remoteUrl: str | None = None
 
 
+class CacheClearRequest(BaseModel):
+    """현재 파일의 돋보기(블레임) 설명 캐시를 비우는 요청 — 위치만 받는다(타임라인과 동일).
+
+    filePath 는 분석 저장 때와 동일한 값(확장 활성 에디터의 경로)을 그대로 보내야,
+    같은 File 행을 찾아 그 파일의 모든 설명 캐시를 지운다(블레임은 경로를 정규화하지 않는다)."""
+    filePath: str
+    repoPath: str
+
+
 class ChangeStats(BaseModel):
     """헤더 메타 테이블의 '변경' 칸 — 추가/삭제 라인 수."""
     added: int

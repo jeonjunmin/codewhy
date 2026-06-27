@@ -63,8 +63,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             onOpenCommit: (commitHash: string, repoPath: string) => void;
             onSwitchTab: (tab: string) => void;
             onOpenIssue: (url: string) => void;
-            // 라인 이슈 롤업 칩 등 URL 이 아직 해석되지 않은 항목 클릭의 임시 동작(안내).
-            onOpenIssueTodo: () => void;
             // '라인 수정 이력'의 '이슈 N' 배지 클릭 — 이슈 탭에서 그 커밋의 연관 이슈를 연다.
             onOpenCommitIssues: (hash: string, filePath: string, repoPath: string) => void;
             // 라인 수정 이력 항목 펼침 — 그 커밋의 변경 사유를 지연 생성한다.
@@ -342,14 +340,14 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             }
             return;
         }
-        // 라인 이슈 롤업 칩 등 URL 미해석 항목 클릭 — 임시 안내만 한다.
-        if (msg.type === 'openIssueTodo') {
-            this.handlers.onOpenIssueTodo();
-            return;
-        }
         // 타임라인 파일명 옆 휴지통 — 기존 명령을 재사용해 활성 파일의 타임라인 캐시를 비운다.
         if (msg.type === 'clearTimelineCache') {
             vscode.commands.executeCommand('codewhy.timeline.clearCache');
+            return;
+        }
+        // 돋보기 파일명 옆 휴지통 — 활성 파일의 돋보기 설명 캐시를 비운다(시연 재분석용).
+        if (msg.type === 'clearBlameCache') {
+            vscode.commands.executeCommand('codewhy.blame.clearCache');
             return;
         }
         // 이슈 상세의 'AI 질문' — 블레임 결과(this.last) 유무와 무관하게 동작해야 한다.
@@ -761,27 +759,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
     .hist-item__reason.loading { color: var(--fg-mute); font-style: italic; }
     .hist-item__reason code { color: var(--fg); background: var(--surface); padding: 0 4px; border-radius: 4px; }
-
-    /* ── 연관 이슈 롤업 (라인 전체 dedup + 상태) ─────────────────── */
-    .lineissues { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
-    .li-chip {
-        display: inline-flex; align-items: center; gap: 5px;
-        padding: 3px 9px; border-radius: 7px; font-size: 11px; white-space: nowrap;
-        background: var(--surface); border: 1px solid var(--line); color: var(--fg-dim);
-        cursor: pointer;
-    }
-    .li-chip .ico { display: inline-flex; opacity: 0.8; }
-    .li-chip__num { font-weight: 600; color: var(--fg); }
-    .li-chip__status { color: var(--fg-mute); font-size: 10px; }
-    .li-chip:hover { border-color: var(--accent-violet); color: var(--fg); }
-    /* 현재 = 지금의 변경 동인 */
-    .li-chip--current { border-color: var(--line-soft); }
-    .li-chip--current .li-chip__num,
-    .li-chip--current .li-chip__status { color: var(--accent-violet); }
-    /* 되돌림 = revert 커밋이 참조(휴리스틱) */
-    .li-chip--reverted { border-color: rgba(248,113,113,0.40); }
-    .li-chip--reverted .li-chip__status { color: #F87171; }
-    .li-chip--reverted .li-chip__num { text-decoration: line-through; opacity: 0.85; }
 
     /* ── 작은 보조 ───────────────────────────────────────────────── */
     .hidden { display: none !important; }
@@ -1216,6 +1193,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         <div class="crumb">
             <span class="mono crumb__file" id="file-name"></span>
             <span class="crumb__line mono" id="file-line"></span>
+            <button class="tl-clear" id="bl-clear" data-action="clearBlameCache" title="이 파일의 돋보기 캐시 비우기"><span id="ico-bl-clear"></span></button>
             <span class="crumb__dot"></span>
         </div>
 
@@ -1229,16 +1207,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             </div>
             <div class="callout__lead" id="narrative"></div>
             <section class="callout__detail hidden" id="ca-detail-sec">
-                <div class="callout__detail-label">자세한 배경</div>
+                <div class="callout__detail-label">자세한 설명</div>
                 <div class="callout__detail-body" id="ca-detail"></div>
             </section>
             <button class="callout__more expanded hidden" id="callout-more" data-action="toggleCallout">접기</button>
             <div class="callout__chips hidden" id="callout-chips"></div>
-        </section>
-
-        <section id="lineissues-wrap" class="hidden">
-            <div class="history__title">연관 이슈</div>
-            <div class="lineissues" id="lineissues-list"></div>
         </section>
 
         <section id="history-wrap" class="hidden">
@@ -1260,7 +1233,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             <section class="callout">
                 <div class="callout__lead" id="tl-summary"></div>
                 <section class="callout__detail hidden" id="tl-detail-sec">
-                    <div class="callout__detail-label">자세한 배경</div>
+                    <div class="callout__detail-label">자세한 설명</div>
                     <div class="callout__detail-body" id="tl-detail"></div>
                 </section>
                 <button class="callout__more expanded hidden" id="tl-more" data-action="toggleCallout">접기</button>
@@ -1375,6 +1348,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         setIcon('ico-is-search', ICON.search);
         setIcon('ico-is-cbanner', ICON.issue);
         setIcon('ico-tl-clear', ICON.trash);
+        setIcon('ico-bl-clear', ICON.trash);   // 돋보기 파일명 옆 캐시 비우기 — 타임라인과 동일 휴지통
     } catch (err) {
         vscode.postMessage({ type: 'webview-error', payload: '아이콘 초기화 실패: ' + String(err) });
     }
@@ -2494,7 +2468,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         } else {
             histWrap.classList.add('hidden');
         }
-        renderLineIssues(p.lineIssues);
     }
     function blDelta(delta) {
         blExp += delta;
@@ -2531,7 +2504,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         } else {
             histWrap.classList.add('hidden');
         }
-        renderLineIssues(p.lineIssues);
     }
 
     // 라인 수정 이력 한 줄 — 클릭하면 해당 커밋을 git show 로 연다.
@@ -2576,35 +2548,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         return el;
     }
 
-    // 상태 라벨 — 이슈 롤업 칩에 붙는다(현재/과거/되돌림).
-    const LI_STATUS = { current: '현재', past: '과거', reverted: '되돌림' };
-
-    // 연관 이슈 롤업 — 라인 전체에서 dedup 된 이슈 칩을 상태별 색으로 그린다.
-    function renderLineIssues(list) {
-        const wrap = document.getElementById('lineissues-wrap');
-        const box = document.getElementById('lineissues-list');
-        box.innerHTML = '';
-        if (!list || !list.length) { wrap.classList.add('hidden'); return; }
-        wrap.classList.remove('hidden');
-        list.forEach(it => box.appendChild(renderLineIssue(it)));
-    }
-    function renderLineIssue(it) {
-        const status = it.status || 'past';
-        const el = document.createElement('span');
-        el.className = 'li-chip li-chip--' + status;
-        // URL 이 해석돼 있으면 외부 열기, 아니면 임시 안내(이슈 기능 연동 전).
-        el.dataset.action = it.url ? 'openIssue' : 'openIssueTodo';
-        if (it.url) { el.dataset.url = it.url; }
-        const count = (it.changeCount && it.changeCount > 1) ? (' · ' + it.changeCount + '회') : '';
-        el.innerHTML =
-            '<span class="ico">' + ICON.issue + '</span>' +
-            '<span class="li-chip__num"></span>' +
-            '<span class="li-chip__status"></span>';
-        el.querySelector('.li-chip__num').textContent = '#' + it.number;
-        el.querySelector('.li-chip__status').textContent = (LI_STATUS[status] || '') + count;
-        el.title = it.title ? ('#' + it.number + ' ' + it.title) : ('이슈 #' + it.number);
-        return el;
-    }
 
     // 펼친 라인 이력 항목에 그 커밋의 변경 사유를 채운다(지연 로드 응답).
     function fillHistoryReason(hash, reason) {
@@ -2689,6 +2632,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             vscode.postMessage({ type: 'clearTimelineCache' });
             return;
         }
+        // 돋보기 파일명 옆 휴지통 — 이 파일의 돋보기 설명 캐시를 비운다(시연 재분석용).
+        if (el.dataset.action === 'clearBlameCache') {
+            vscode.postMessage({ type: 'clearBlameCache' });
+            return;
+        }
         // 콜아웃 '더 보기/접기' — 같은 카드 안 '자세한 배경'을 통째로 접고/펼친다.
         // 블레임·타임라인이 같은 버튼을 쓰므로, 클릭한 버튼이 속한 .callout 기준으로 찾는다.
         if (el.dataset.action === 'toggleCallout') {
@@ -2756,11 +2704,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         // 이미지(본문/첨부) 클릭 — 확대 팝업으로.
         if (el.dataset.action === 'zoomImage') {
             showLightbox(el.dataset.url);
-            return;
-        }
-        // 라인 수정 이력의 '이슈 N' 배지 — 이슈 기능 미완이라 임시 안내만(행 클릭으로 번지지 않음).
-        if (el.dataset.action === 'openIssueTodo') {
-            vscode.postMessage({ type: 'openIssueTodo' });
             return;
         }
         vscode.postMessage({ type: el.dataset.action });

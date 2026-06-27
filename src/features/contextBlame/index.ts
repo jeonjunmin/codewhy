@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { runContextBlame } from './command';
-import { registerContextBlameCodeLens } from './view';
+import { registerContextBlameCodeLens, runClearBlameCache } from './view';
 
 /**
  * Context Blame 기능 진입점.
@@ -11,6 +11,7 @@ import { registerContextBlameCodeLens } from './view';
 export function registerContextBlame(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('codewhy.contextBlame', () => runContextBlame(context)),
+        vscode.commands.registerCommand('codewhy.blame.clearCache', () => runClearBlameCache()),
     );
     registerContextBlameCodeLens(context);
 }

@@ -14,12 +14,16 @@
 👤 담당: 개발자 A
 """
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_team_map
-from app.db.models import BlameExplanation, Commit
+from app.db.models import BlameExplanation, Commit, File, Repository
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 async def get_cached_blame(
@@ -72,6 +76,40 @@ async def save_blame(
     )
     await db.execute(stmt)
     await db.commit()
+
+
+async def clear_explanations_for_file(
+    db: AsyncSession, repo_path: str, file_path: str
+) -> int:
+    """현재 파일의 돋보기 설명 캐시(모든 커밋·라인)를 삭제하고 삭제된 행 수를 반환한다.
+
+    시연 등에서 '이미 분석한 줄을 다시 분석'하려고 비울 때 쓴다. 다음 돋보기 조회 때
+    캐시 미스가 나면서 최신 형식으로 재생성된다(타임라인 clear_summaries_for_file 와 동일 발상).
+
+    레포/파일 행은 '조회만' 한다(없으면 만들지 않음) — 캐시 비우기가 백본에 빈 행을 남기지 않게.
+    file_path 는 분석 저장 때와 동일하게 라우터가 정규화 없이 넘긴 값을 그대로 키로 쓴다.
+    """
+    repo = (
+        await db.execute(select(Repository).where(Repository.identifier == repo_path))
+    ).scalar_one_or_none()
+    if repo is None:
+        return 0
+
+    file = (
+        await db.execute(
+            select(File).where(File.repo_id == repo.id, File.file_path == file_path)
+        )
+    ).scalar_one_or_none()
+    if file is None:
+        return 0
+
+    result = await db.execute(
+        delete(BlameExplanation).where(BlameExplanation.file_id == file.id)
+    )
+    await db.commit()
+    deleted = result.rowcount or 0
+    logger.info("[crud] clear_explanations_for_file — file_id=%d 삭제=%d건", file.id, deleted)
+    return deleted
 
 
 def _to_response(row: BlameExplanation, commit: Commit) -> dict:

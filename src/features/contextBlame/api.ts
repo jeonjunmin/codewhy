@@ -11,6 +11,17 @@ export async function fetchContextBlame(req: BlameRequest): Promise<BlameResult>
     return data;
 }
 
+/**
+ * POST /api/blame/cache/clear — 현재 파일의 돋보기 설명 캐시를 백엔드에서 모두 비운다.
+ * 반환값은 삭제된 캐시 행 수. (타임라인 clearTimelineCache 와 동일 패턴)
+ */
+export async function clearBlameCache(
+    req: { filePath: string; repoPath: string },
+): Promise<number> {
+    const res = await createHttpClient().post('/api/blame/cache/clear', req);
+    return (res.data?.deleted as number) ?? 0;
+}
+
 /** 스트리밍 첫 프레임(meta) — git 만으로 즉시 구하는 메타/라인 이력. */
 export interface BlameMeta {
     commitHash: string;

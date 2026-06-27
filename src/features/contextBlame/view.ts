@@ -5,7 +5,7 @@ import * as localGit from '../../shared/git';
 import { BlameRequest, BlameResult, CommitInput, GitCommitMeta, IssueChatMessage, IssueChatRequest, ReasonRequest, TraceRequest } from '../../shared/types';
 import { fetchRequirementTrace } from '../requirementTrace/api';
 import { clearTimelineCache, streamTimelineSummary } from '../timelineSummary/api';
-import { fetchCommitReason, streamContextBlame, streamIssueChat } from './api';
+import { clearBlameCache, fetchCommitReason, streamContextBlame, streamIssueChat } from './api';
 import { ContextBlameSidebarProvider, VIEW_ID } from './sidebar';
 
 /**
@@ -89,10 +89,6 @@ function ensureInitialized(context: vscode.ExtensionContext) {
             vscode.commands.executeCommand('codewhy.blame.openCommit', { commitHash, repoPath }),
         onSwitchTab: (tab) => handleSwitchTab(tab),
         onOpenIssue: (url) => { vscode.env.openExternal(vscode.Uri.parse(url)); },
-        // 라인 이슈 롤업 칩 등 URL 이 아직 해석되지 않은 항목은 임시 안내만.
-        onOpenIssueTodo: () => {
-            vscode.window.showInformationMessage('연관 이슈 보기는 이슈 기능 연동 후 제공될 예정입니다.');
-        },
         // '라인 수정 이력'의 '이슈 N' 배지 클릭 — 이슈 탭으로 전환 후 그 커밋이 참조한 이슈만 보여준다.
         onOpenCommitIssues: (hash, filePath, repoPath) => handleOpenCommitIssues(hash, filePath, repoPath),
         // 라인 수정 이력 항목 펼침 → 그 커밋의 변경 사유를 지연 생성해 사이드바에 주입.
@@ -305,6 +301,37 @@ export async function runClearTimelineCache() {
         );
     } catch (err) {
         vscode.window.showErrorMessage(`CodeWhy: 타임라인 캐시 비우기 실패 — ${(err as Error).message}`);
+    }
+}
+
+/**
+ * 현재 파일의 돋보기(블레임) 설명 캐시를 비우고 곧장 현재 라인을 재분석한다(시연 재분석용).
+ *
+ * 캐시는 두 층이다 — 백엔드 blame_explanations + 확장 메모리 blameCache(라인별).
+ * 백엔드만 비우면 라인 재분석이 확장 메모리 캐시에 적중해(handleAnalyzeAndShow) 백엔드를
+ * 호출하지 않으므로 화면이 그대로다. 그래서 둘 다 비우고 현재 커서 라인을 다시 분석해 즉시 새로 그린다.
+ */
+export async function runClearBlameCache() {
+    const ctx = getEditorContext();
+    if (!ctx) { return; }
+
+    const fileName = ctx.filePath.split(/[\\/]/).pop() ?? ctx.filePath;
+    try {
+        const deleted = await clearBlameCache({ filePath: ctx.filePath, repoPath: ctx.repoPath });
+
+        // 확장 메모리 캐시(현재 파일의 모든 라인)도 함께 비운다 — 안 그러면 재분석이 옛 결과로 적중한다.
+        for (const key of [...blameCache.keys()]) {
+            if (key.startsWith(ctx.filePath + ':')) { blameCache.delete(key); }
+        }
+
+        vscode.window.showInformationMessage(
+            `CodeWhy: ${fileName} 돋보기 캐시를 비웠습니다(${deleted}건). 현재 라인을 다시 분석합니다…`,
+        );
+
+        // 현재 커서 라인을 즉시 재분석해 패널을 새로 그린다(캐시 미스 → 스트리밍).
+        runBlameTab();
+    } catch (err) {
+        vscode.window.showErrorMessage(`CodeWhy: 돋보기 캐시 비우기 실패 — ${(err as Error).message}`);
     }
 }
 

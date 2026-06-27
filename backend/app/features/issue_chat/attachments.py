@@ -170,13 +170,17 @@ def collect_attachments(req) -> list[dict]:
 
 
 def build_blocks(req) -> tuple[list[dict], list[str]]:
-    """첨부를 내려받아 Converse 멀티모달 블록 리스트로 변환한다.
+    """req.attachments(+댓글 첨부)를 내려받아 Converse 멀티모달 블록으로 변환한다."""
+    return build_blocks_from_list(collect_attachments(req))
+
+
+def build_blocks_from_list(attachments: list[dict]) -> tuple[list[dict], list[str]]:
+    """{label,url} 리스트를 Converse 멀티모달 블록으로 변환한다(req 비의존 — blame 도 재사용).
 
     반환: (blocks, skipped_labels)
       blocks         — converse content 에 끼울 image/document 블록들
       skipped_labels — 미지원/실패/초과로 본문(텍스트)만 남는 첨부 라벨(로그/안내용)
     """
-    attachments = collect_attachments(req)
     blocks: list[dict] = []
     skipped: list[str] = []
     used_names: set[str] = set()
@@ -227,7 +231,7 @@ def build_blocks(req) -> tuple[list[dict], list[str]]:
         total += len(data)
 
     if blocks or skipped:
-        logger.info("[issue_chat] 첨부 멀티모달 변환 — 이미지 %d · 문서 %d · 건너뜀 %d",
+        logger.info("[attachments] 첨부 멀티모달 변환 — 이미지 %d · 문서 %d · 건너뜀 %d",
                     images, docs, len(skipped))
     return blocks, skipped
 

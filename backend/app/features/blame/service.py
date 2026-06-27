@@ -24,16 +24,15 @@ import re
 from typing import AsyncGenerator
 
 from botocore.exceptions import BotoCoreError, ClientError
-from langchain_core.messages import HumanMessage, SystemMessage
 from app.core import git, vcs
-from app.core.ai_client import call_bedrock
-from app.core.bedrock import get_bedrock_llm
+from app.core.ai_client import call_bedrock, stream_bedrock
 from app.core.commit_classifier import SKIP_TYPES, classify_commit
 from app.core.config import get_team_map
 from app.core.tickets import extract_issue_numbers, extract_ticket
-from app.core.vcs import Issue, PullRequest
+from app.core.vcs import Comment, Issue, PullRequest
 from app.db.postgres import AsyncSessionLocal, run_detached
 from app.features.blame import crud
+from app.features.issue_chat import attachments as issue_attachments
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +50,12 @@ _CONTEXT_CACHE_MAX = 100
 
 _SYSTEM_PROMPT = (
     "당신은 코드 변경의 '기획 의도'를 설명하는 도우미입니다. "
-    "git 커밋 메시지의 기술적 표현 뒤에 숨은, 연관 이슈와 첨부된 요구사항 문서가 알려주는 "
-    "진짜 이유를 추론해 비개발자도 이해할 수 있는 한국어로 설명하세요."
+    "git 커밋 메시지의 기술적 표현 뒤에 숨은, 연관 이슈의 본문·활동/댓글과 "
+    "첨부된 요구사항 문서·이미지가 알려주는 진짜 이유를 추론해 "
+    "비개발자도 이해할 수 있는 한국어로 '아주 짧게' 설명하세요. "
+    "당신의 답은 IDE 사이드바에 들어가는 2~3문장짜리 짧은 평문이어야 합니다. "
+    "이슈·문서의 문장이나 표를 그대로 옮기거나 재구성하지 말고, 핵심 의도만 당신 말로 압축하세요. "
+    "제목·머리말·소제목·구분선·표·목록 같은 구조나 마크다운 기호는 절대 쓰지 말고 평문 문장만 쓰세요."
 )
 
 # Bedrock 에 보낼 diff 의 문자 수 상한 — 거대 커밋의 토큰 폭발(비용·지연)을 막는다.
@@ -60,6 +63,15 @@ _MAX_DIFF_CHARS = 2000
 
 # 이슈 본문 발췌의 상한 — 긴 PRD/요구사항이 통째로 들어가 토큰을 잡아먹지 않도록.
 _MAX_ISSUE_BODY_CHARS = 800
+
+# 이슈 활동/댓글 상한 — 입력 토큰 방어용. issue_chat 보다 타이트하게 잡는다.
+_MAX_ACTIVITY_ITEMS = 12
+_MAX_COMMENT_CHARS = 300
+
+# 설명 생성(출력) 토큰 상한 — 프롬프트가 '핵심 한 줄 + 짧은 배경(최대 3문장 평문)'으로 길이를
+# 통제하므로 출력은 짧다. 이 값은 그 짧은 답이 문장 중간에 잘리지 않게 하는 넉넉한 천장일 뿐이다
+# (정상적으로는 도달하지 않는다). 결과는 캐시되므로 토큰 비용은 커밋당 1회뿐이다.
+_EXPLAIN_MAX_TOKENS = 512
 
 # 후속 변경을 'security' 로 분류할 도메인 신호어
 _SECURITY_TERMS = ("KYC", "감사", "audit", "보안", "security", "권한", "auth")
@@ -131,8 +143,10 @@ def _compose_commit_result(
     pr = _safe_find_pr(remote, info.commit_hash)
     issues = _safe_find_issues(remote, pr, commit_message=info.message)
 
-    context = _build_context(info, issues)
-    explanation, ai_degraded = _explain_blame(info, issues, context=context)
+    # 이슈 첨부를 멀티모달 블록으로 변환(블로킹 다운로드 — 이 함수는 router 가 to_thread 로 호출).
+    mm_blocks, skipped = _collect_issue_attachment_blocks(issues)
+    context = _build_context(info, issues, skipped_attachments=skipped)
+    explanation, ai_degraded = _explain_blame(info, issues, context=context, mm_blocks=mm_blocks)
     source_ref = _format_source_ref(issues)
     primary_issue = issues[0] if issues else None
     attachments = [
@@ -234,7 +248,10 @@ async def stream_blame(
     pr = await asyncio.to_thread(_safe_find_pr, remote, info.commit_hash)
     issues = await asyncio.to_thread(_safe_find_issues, remote, pr, info.message)
 
-    context = _build_context(info, issues)
+    # 이슈 첨부(이미지/PDF/문서)를 내려받아 멀티모달 블록으로 변환 — 블로킹 I/O 라 스레드에서.
+    #    못 붙인 첨부(skipped)는 컨텍스트에 '내용 미첨부'로 표기해 모델이 존재는 알게 한다.
+    mm_blocks, skipped = await asyncio.to_thread(_collect_issue_attachment_blocks, issues)
+    context = _build_context(info, issues, skipped_attachments=skipped)
     _remember_context(repo_path, file_path, info.commit_hash, context)
 
     # ③ 설명 스트리밍 — 토큰이 생성되는 즉시 delta 프레임으로 전달.
@@ -243,7 +260,9 @@ async def stream_blame(
     full_text = ""
     degraded = False
     try:
-        async for delta in _stream_explain_blame(info, issues, context=context, line_digest=line_digest):
+        async for delta in _stream_explain_blame(
+            info, issues, context=context, line_digest=line_digest, mm_blocks=mm_blocks
+        ):
             full_text += delta
             yield f"data: {json.dumps({'delta': delta}, ensure_ascii=False)}\n\n"
     except Exception as e:
@@ -496,6 +515,27 @@ def _safe_find_issues(
         return []
 
 
+def _collect_issue_attachment_blocks(issues: list[Issue]) -> tuple[list[dict], list[str]]:
+    """연관 이슈(본문+댓글)의 첨부를 url 기준 dedup 해 Converse 멀티모달 블록으로 변환한다.
+
+    issue_chat 의 다운로드·검증·변환 인프라(build_blocks_from_list)를 그대로 재사용한다 —
+    호스트 화이트리스트/토큰 라우팅/포맷·용량·개수 캡이 한곳(attachments.py)에 모여 있다.
+    다운로드는 블로킹 I/O 라, 호출부가 스레드에서 부른다(스트리밍 경로는 asyncio.to_thread).
+    반환: (blocks, skipped_labels) — skipped 는 형식/용량/접근 제한으로 본문만 남는 첨부 라벨.
+    """
+    items: list[dict] = []
+    seen: set[str] = set()
+    for issue in issues:
+        sources = list(issue.attachments) + [a for c in issue.comments for a in c.attachments]
+        for a in sources:
+            if a.url and a.url not in seen:
+                seen.add(a.url)
+                items.append({"label": a.label, "url": a.url})
+    if not items:
+        return [], []
+    return issue_attachments.build_blocks_from_list(items)
+
+
 def _build_related_changes(
     issues: list[Issue], pr: PullRequest | None, followups, current_file: str
 ) -> list[dict]:
@@ -682,21 +722,24 @@ def _build_line_issues(history: list[dict], current_hash: str) -> list[dict]:
 
 
 def _explain_blame(
-    info: git.BlameInfo, issues: list[Issue], *, context: str | None = None
+    info: git.BlameInfo, issues: list[Issue], *, context: str | None = None,
+    mm_blocks: list[dict] | None = None,
 ) -> tuple[str, bool]:
-    """코드 + 커밋 메시지 + 연관 이슈를 Bedrock 에 넣어 변경 사유를 추론한다.
+    """코드 + 커밋 메시지 + 연관 이슈(본문·활동/댓글·첨부)를 Bedrock 에 넣어 변경 사유를 추론한다.
 
     반환: (설명, degraded). degraded=True 면 Bedrock 호출에 실패해 폴백 문구를 반환한 것이며,
     호출부(analyze_blame)는 이를 응답의 aiDegraded 로 올려 프론트·DB 캐시가 캐싱을 건너뛰게 한다.
 
     context 를 미리 받으면 _build_context 재호출을 생략한다(프롬프트 캐시 공유).
+    mm_blocks(이슈 첨부의 멀티모달 블록)가 있으면 첨부 파일 내용까지 함께 분석한다.
     """
     if context is None:
         context = _build_context(info, issues)
 
     try:
         text = call_bedrock(
-            _EXPLAIN_INSTRUCTION, system=_SYSTEM_PROMPT, context=context, cache=True, max_tokens=160
+            _EXPLAIN_INSTRUCTION, system=_SYSTEM_PROMPT, context=context,
+            cache=True, blocks=mm_blocks, max_tokens=_EXPLAIN_MAX_TOKENS,
         ).strip()
         return text, False
     except Exception as e:
@@ -709,9 +752,14 @@ def _explain_blame(
 # 설명 추론 작업 지시문 — _explain_blame(동기)과 _stream_explain_blame(스트리밍)이 공유한다.
 # 첫 문장을 짧은 '핵심 한 줄'로 쓰게 해, _split_headline 이 헤드라인으로 떼어 쓰게 한다.
 _EXPLAIN_INSTRUCTION = """위 변경 맥락을 종합해, 개발자가 이 코드를 왜 변경했는지 한국어로 아주 간결하게 설명하세요.
-첫 문장은 40자 이내의 핵심 요약 한 문장으로 쓰세요(예: "해외 결제 수수료 누락을 막으려고 추가했습니다.").
-보충이 꼭 필요할 때만 짧게 한 문장만 더 쓰고, 전체 2문장을 넘기지 마세요. 길게 늘어놓지 마세요.
-기술적 커밋 메시지가 아니라 연관 이슈·요구사항이 알려주는 '진짜 이유'를 우선하고, 마크다운 기호(#, *, -, --- 등)는 절대 쓰지 마세요."""
+
+형식(엄수):
+- 첫 문장: 40자 이내의 핵심 요약 한 문장(예: "해외 결제 수수료 누락을 막으려고 추가했습니다.").
+- 배경이 꼭 필요하면 1~2문장만 덧붙이고, 전체 3문장을 넘기지 마세요. 길게 늘어놓지 마세요.
+- 표·머리말·소제목·목록·구분선·굵게 등 어떤 마크다운이나 문서 구조도 쓰지 말고, 평문 문장만 쓰세요.
+- 연관 이슈나 첨부 문서의 문장·표를 그대로 옮기거나 재구성하지 말고, 핵심 의도만 당신 말로 압축하세요.
+
+기술적 커밋 메시지가 아니라 연관 이슈·요구사항이 알려주는 '진짜 이유'를 우선하세요."""
 
 
 # 첫 문장(핵심 한 줄)을 본문에서 분리하는 정규식 — 한국어 종결('…다.'/'…요.') + 일반 문장부호.
@@ -723,14 +771,26 @@ _MD_HEAD_RE = re.compile(r"(?m)^\s*#{1,6}\s*")
 _MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 _MD_LIST_RE = re.compile(r"(?m)^\s*(?:[-*]\s+|\d+\.\s+)")
 _MD_BLANKS_RE = re.compile(r"\n{3,}")
+# 표(table) 안전망 — 사이드바 콜아웃은 평문만 렌더하므로, 모델이 지시를 어기고 표를 내도
+# raw 파이프(| … |)가 보이지 않게 정리한다. 구분선 줄(|---|---|)은 지우고, 행(| a | b |)은
+# 셀을 쉼표로 잇는다. 시작·끝이 '|' 인 줄만 행으로 보므로 평문(가운데 파이프 1개 등)은 안 건드린다.
+_MD_TABLE_SEP_RE = re.compile(r"(?m)^[ \t]*\|?[ \t|:-]*-[ \t|:-]*$")
+_MD_TABLE_ROW_RE = re.compile(r"(?m)^[ \t]*\|(.+)\|[ \t]*$")
+
+
+def _flatten_table_row(m: "re.Match") -> str:
+    cells = [c.strip() for c in m.group(1).split("|")]
+    return ", ".join(c for c in cells if c)
 
 
 def _strip_markdown(text: str) -> str:
-    """제목/굵게/구분선/목록 같은 마크다운 흔적을 떼어 평문으로 만든다.
+    """제목/굵게/구분선/목록/표 같은 마크다운 흔적을 떼어 평문으로 만든다.
 
     프롬프트가 마크다운을 금지하지만, 모델이 가끔 흘리거나 옛 캐시에 남은 경우를 위한 안전망.
     """
     t = text or ""
+    t = _MD_TABLE_SEP_RE.sub("", t)                   # |---|---| 구분선 줄 제거(행보다 먼저)
+    t = _MD_TABLE_ROW_RE.sub(_flatten_table_row, t)   # | a | b | → "a, b"
     t = _MD_HR_RE.sub("", t)
     t = _MD_HEAD_RE.sub("", t)
     t = _MD_BOLD_RE.sub(r"\1", t)
@@ -748,7 +808,7 @@ def extract_headline(text: str) -> str | None:
 # 멀티 리비전(여러 번 수정된) 줄에만 덧붙이는 지시 — 요구사항 변천을 한 문장으로 언급하게 한다.
 _HISTORY_CLAUSE = (
     "\n이 줄은 여러 번 수정됐으니, 둘째 문장에서 요구사항 변천을 이슈 번호 흐름으로만 짧게"
-    "(예: \"#12 → #34\") 한 번 언급하세요. 그래도 전체 2문장을 넘기지 마세요."
+    "(예: \"#12 → #34\") 한 번 언급하세요. 그래도 전체 3문장을 넘기지 마세요."
 )
 
 _HISTORY_STATUS_LABEL = {"current": "현재", "past": "과거", "reverted": "되돌림"}
@@ -796,33 +856,31 @@ def _split_headline(text: str) -> tuple[str, str]:
 
 
 async def _stream_explain_blame(
-    info: git.BlameInfo, issues: list[Issue], *, context: str | None = None, line_digest: str = ""
+    info: git.BlameInfo, issues: list[Issue], *, context: str | None = None,
+    line_digest: str = "", mm_blocks: list[dict] | None = None,
 ) -> AsyncGenerator[str, None]:
     """_explain_blame 의 스트리밍 버전 — Bedrock 응답을 토큰(델타) 단위로 즉시 yield 한다.
 
     SSE 프레이밍/누적은 호출 측(stream_blame) 책임이다. 이 함수는 raw text delta 만 흘려보낸다.
-    timeline_file_graph.stream_file_summary 와 동일한 langchain astream 경로를 사용한다.
-    동기 _explain_blame 과 달리 boto3 Converse 의 프롬프트 캐시는 쓰지 않지만, 블레임 스트리밍은
-    설명 1회만 호출하므로 공유할 캐시 프리픽스가 없어 손실이 없다.
+    issue_chat 과 동일하게 boto3 converse_stream(stream_bedrock)을 쓴다 — 이슈 첨부의
+    image/document 멀티모달 블록(mm_blocks)을 컨텍스트에 함께 실어 첨부 파일 내용까지 분석한다.
+    멀티모달 블록과 cachePoint 는 같은 content 에 공존 시 ValidationException 을 내므로 cachePoint 는
+    쓰지 않는다(블레임 스트리밍은 설명 1회뿐이라 공유할 캐시 프리픽스가 없어 손실 없음).
     """
     if context is None:
         context = _build_context(info, issues)
 
     # 멀티 리비전 줄이면 변천 이력 블록 + 이력 반영 지시를 덧붙인다(단일 리비전이면 line_digest="").
     if line_digest:
-        human = f"{context}\n\n{line_digest}\n\n{_EXPLAIN_INSTRUCTION}{_HISTORY_CLAUSE}"
+        instruction = f"{line_digest}\n\n{_EXPLAIN_INSTRUCTION}{_HISTORY_CLAUSE}"
     else:
-        human = f"{context}\n\n{_EXPLAIN_INSTRUCTION}"
+        instruction = _EXPLAIN_INSTRUCTION
 
-    llm = get_bedrock_llm(max_tokens=160)
-    messages = [
-        SystemMessage(content=_SYSTEM_PROMPT),
-        HumanMessage(content=human),
-    ]
-    async for chunk in llm.astream(messages):
-        piece = chunk.content
-        if piece:
-            yield piece
+    content: list[dict] = [{"text": context}, *(mm_blocks or []), {"text": instruction}]
+    messages = [{"role": "user", "content": content}]
+    async for delta in stream_bedrock(messages, system=_SYSTEM_PROMPT, max_tokens=_EXPLAIN_MAX_TOKENS):
+        if delta:
+            yield delta
 
 
 def _degraded_explanation(info: git.BlameInfo, e: Exception) -> str:
@@ -884,15 +942,20 @@ def _suggest_improvement(info: git.BlameInfo, issues: list[Issue], *, context: s
     return suggestion
 
 
-def _build_context(info: git.BlameInfo, issues: list[Issue]) -> str:
+def _build_context(
+    info: git.BlameInfo, issues: list[Issue], skipped_attachments: list[str] | None = None
+) -> str:
     """설명/AI제안/후속질문 호출이 공유하는 '변경 맥락' 블록.
 
     이 블록이 프롬프트 캐싱의 캐시 프리픽스가 된다(call_bedrock(context=..., cache=True)).
     analyze_blame 한 번에 _explain_blame + _suggest_improvement 가 같은 context 로 연달아
     호출하므로, 두 번째 호출부터 이 블록이 캐시 적중되어 입력 토큰 비용이 준다.
     핵심: 호출마다 달라지는 '작업 지시문/질문'은 여기 넣지 말고, 변하지 않는 맥락 데이터만 둔다.
+
+    skipped_attachments: 멀티모달로 못 붙인(형식/용량/접근 제한) 첨부 라벨 — 이슈 블록에서
+    '내용 미첨부 — 링크만'으로 표기해, 모델이 그 첨부의 '존재'는 알되 내용은 없음을 인지하게 한다.
     """
-    issue_block = _format_issues(issues)
+    issue_block = _format_issues(issues, skipped_attachments)
     # 빈 메시지/diff (initial commit, merge, 바이너리-only 등)는 LLM 이 무엇이 비었는지
     # 알 수 있도록 명시 라벨로 폴백한다 — 빈 줄만 보내면 환각 가능성↑.
     message = info.message.strip() or "(커밋 메시지 없음)"
@@ -957,19 +1020,76 @@ def _truncate_diff(diff: str) -> str:
     return "\n".join(parts)
 
 
-def _format_issues(issues: list[Issue]) -> str:
+# ─────────────────────────────────────────────────────────────────────────────
+# 👉 사용자 작성 구역 — 이슈 활동/댓글을 프롬프트용으로 압축
+#
+# 블레임 답변은 2문장으로 짧다. 활동 타임라인을 통째로 넣으면 토큰만 먹고 신호는 묻힌다.
+# '무엇이 왜 어떻게 결정됐나'에 기여하는 항목만 남기는 게 핵심 — 비용 대비 신호의 트레이드오프.
+#
+# 고려할 점(직접 조정하세요):
+#   · 어떤 event 가 의미 있나? committed/referenced/closed/reopened 는 '처리·결정' 신호로 크다.
+#     labeled/assigned 는 부수적 — 지금은 생략한다(다 버릴지/최신 1개만 남길지 취향껏).
+#   · 사람 댓글(kind=="comment")은 의도·근거가 담겨 가장 중요 — _MAX_COMMENT_CHARS 로 자른다.
+#   · 최신 흐름 우선이라 끝에서 _MAX_ACTIVITY_ITEMS 개만 본다(오래된 잡음 컷).
+#   · 활동이 없거나 의미 없으면 "" 반환 — _format_issues 가 섹션을 통째로 숨긴다.
+#
+# 입력: Comment 리스트(vcs.Comment — kind="comment"|"event", 필드는 클래스 docstring 참고)
+# 반환: 들여쓴 항목들의 문자열(또는 "")
+# ─────────────────────────────────────────────────────────────────────────────
+def _format_issue_activity(comments: list[Comment]) -> str:
+    if not comments:
+        return ""
+    lines: list[str] = []
+    for c in comments[-_MAX_ACTIVITY_ITEMS:]:  # 타임라인은 시간순 — 끝(최신)부터 본다
+        when = (c.created_at or "")[:10]
+        who = c.author or "?"
+        if c.kind == "comment":
+            body = " ".join((c.body or "").split())
+            if len(body) > _MAX_COMMENT_CHARS:
+                body = body[:_MAX_COMMENT_CHARS] + "…"
+            if body:
+                lines.append(f"    ({when}) {who}: {body}")
+        elif c.event in ("committed", "referenced"):
+            lines.append(f"    ({when}) [{c.event}] {c.commit_sha[:7]} {c.commit_summary}".rstrip())
+        elif c.event in ("closed", "reopened"):
+            lines.append(f"    ({when}) [{c.event}] {who}")
+        # labeled/assigned 등 부수 이벤트는 신호가 약해 생략(토큰 절약)
+    return "\n".join(lines)
+
+
+def _format_issues(issues: list[Issue], skipped_attachments: list[str] | None = None) -> str:
     if not issues:
         return "(연관 이슈 없음 — 커밋 메시지와 변경 내용만으로 추론하세요.)"
+    skip = set(skipped_attachments or [])
     blocks: list[str] = []
     for issue in issues:
         body = issue.body.strip()
         if len(body) > _MAX_ISSUE_BODY_CHARS:
             body = body[:_MAX_ISSUE_BODY_CHARS] + "…(이하 생략)"
-        attachments = (
-            "\n  · 첨부: " + ", ".join(a.label for a in issue.attachments)
-            if issue.attachments else ""
-        )
-        blocks.append(f"- Issue #{issue.number} {issue.title}\n{body}{attachments}")
+
+        meta_bits: list[str] = []
+        if issue.state:
+            meta_bits.append(f"상태: {issue.state}")
+        if issue.labels:
+            meta_bits.append("라벨: " + ", ".join(issue.labels))
+        if issue.assignee:
+            meta_bits.append("담당자: " + issue.assignee)
+        meta = ("\n  " + " · ".join(meta_bits)) if meta_bits else ""
+
+        if issue.attachments:
+            att_rows = []
+            for a in issue.attachments:
+                label = a.label or a.url
+                note = " ※ 내용 미첨부(형식/용량/접근 제한) — 링크만" if label in skip else ""
+                att_rows.append(f"    · {label}{note}")
+            attachments = "\n  · 첨부:\n" + "\n".join(att_rows)
+        else:
+            attachments = ""
+
+        activity = _format_issue_activity(issue.comments)
+        activity_block = ("\n  · 활동/댓글:\n" + activity) if activity else ""
+
+        blocks.append(f"- Issue #{issue.number} {issue.title}{meta}\n{body}{attachments}{activity_block}")
     return "\n\n".join(blocks)
 
 

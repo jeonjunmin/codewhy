@@ -32,6 +32,7 @@ from app.features.blame.schemas import (
     AskResponse,
     BlameRequest,
     BlameResponse,
+    CacheClearRequest,
     GitCommitMeta,
     ReasonRequest,
     ReasonResponse,
@@ -238,3 +239,20 @@ def ask_blame(req: AskRequest):
         logger.exception("blame ask 실패 — repo=%s file=%s line=%s", req.repoPath, req.filePath, req.line)
         raise HTTPException(status_code=500, detail=f"blame ask 실패: {e}")
     return AskResponse(answer=answer)
+
+
+@router.post("/cache/clear")
+async def clear_blame_cache(req: CacheClearRequest, db: AsyncSession = Depends(get_db)):
+    """현재 파일의 돋보기 설명 캐시를 모두 비운다 → {"deleted": 삭제건수}.
+
+    파일 경로는 분석 저장 때(context_blame 의 get_or_create_file)와 동일하게 req.filePath 를
+    그대로 키로 쓴다 — 블레임은 타임라인과 달리 _to_relpath 정규화를 하지 않으므로, 여기서도
+    정규화하지 않아야 같은 File 행을 찾아 지운다.
+    DELETE 대신 POST: 본문 있는 DELETE 를 버리는 프록시 대비(타임라인 /cache/clear 와 동일).
+    """
+    try:
+        deleted = await crud.clear_explanations_for_file(db, req.repoPath, req.filePath)
+    except Exception as e:
+        logger.exception("blame 캐시 삭제 실패 — repo=%s file=%s", req.repoPath, req.filePath)
+        raise HTTPException(status_code=500, detail=f"blame 캐시 삭제 실패: {e}")
+    return {"deleted": deleted}

@@ -35,6 +35,7 @@ def call_bedrock(
     system: str | None = None,
     context: str | None = None,
     cache: bool = False,
+    blocks: list[dict] | None = None,
     max_tokens: int = 600,
     temperature: float = 0.2,
     model_id: str | None = None,
@@ -48,14 +49,19 @@ def call_bedrock(
     content 를 [context, cachePoint, prompt] 로 구성한다. 같은 context 로 연달아 호출하면
     두 번째부터 프리픽스가 캐시 적중되어 입력 토큰 비용이 준다. 단, 모델별 최소 캐시 토큰
     임계값을 넘는 context 일 때만 실제 절감이 생기며, 작으면 무동작(무해)이다.
+
+    `blocks`(image/document 멀티모달 블록)를 주면 context 텍스트 뒤·prompt 앞에 끼운다.
+    멀티모달 블록과 cachePoint 를 같은 content 에 함께 두면 일부 모델이 ValidationException 을
+    내므로, blocks 가 있을 때는 cachePoint 를 생략한다(캐싱은 비용 최적화일 뿐 무손실).
     """
+    content: list[dict] = []
     if context is not None:
-        content: list[dict] = [{"text": context}]
-        if cache:
-            content.append({"cachePoint": {"type": "default"}})
-        content.append({"text": prompt})
-    else:
-        content = [{"text": prompt}]
+        content.append({"text": context})
+    if blocks:
+        content.extend(blocks)
+    elif context is not None and cache:
+        content.append({"cachePoint": {"type": "default"}})
+    content.append({"text": prompt})
 
     kwargs: dict = {
         "modelId": model_id or get_bedrock_model_id(),
