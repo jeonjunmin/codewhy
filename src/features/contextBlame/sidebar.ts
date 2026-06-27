@@ -406,11 +406,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             case 'openCommit':
                 this.handlers.onOpenCommit(result.commitHash, ctx.repoPath);
                 break;
-            case 'openCommitHash':
-                if (typeof msg.payload?.hash === 'string' && msg.payload.hash) {
-                    this.handlers.onOpenCommit(msg.payload.hash, ctx.repoPath);
-                }
-                break;
         }
     }
 
@@ -718,10 +713,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
     .hist-item {
         display: grid;
-        grid-template-columns: 16px 1fr auto;
+        grid-template-columns: 16px 1fr;   /* 점 + 본문. 배지는 본문 머리줄 우측으로 옮김 */
         column-gap: 8px;
         padding: 0 0 14px 0;
-        cursor: pointer;
+        cursor: default;   /* 행 본문은 클릭 동작 없음(배지만 pointer) */
         position: relative;
     }
     .hist-item:last-child { padding-bottom: 2px; }
@@ -752,8 +747,9 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .hist-item__date { color: var(--fg-mute); font-size: 11px; }
     .hist-item__subject {
         color: var(--fg); font-size: 12.5px; margin-top: 3px; line-height: 1.45;
-        /* 길어도 줄이지 말고 줄바꿈해 전부 보여준다(... 말줄임 제거). 긴 토큰도 강제 줄바꿈. */
-        white-space: normal; overflow-wrap: anywhere; word-break: break-word;
+        /* 길어도 줄이지 말고 전부 보여준다. 한글은 어절(띄어쓰기) 단위로 줄바꿈(keep-all)해
+           '추/가'처럼 단어 중간이 깨지지 않게 하고, 띄어쓰기 없는 긴 토큰만 강제로 줄바꿈한다. */
+        white-space: normal; word-break: keep-all; overflow-wrap: break-word;
     }
     /* AI 타이틀 도착 전 — 원본 메시지를 보여주고 갈아끼우면 '글자가 바뀌어' 어색하므로,
        제목 자리에 스켈레톤만 두고 준비되면 드러낸다(로딩 후 등장). */
@@ -771,6 +767,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .hist-item__author { color: var(--fg-mute); font-size: 11px; margin-top: 2px; }
     .hist-item__issues {
         align-self: start; margin-top: 1px;
+        margin-left: auto; flex-shrink: 0;   /* 머리줄(head) 우측으로 밀착 */
         display: inline-flex; align-items: center; gap: 4px;
         padding: 2px 7px; border-radius: 6px;
         background: var(--surface); border: 1px solid var(--line);
@@ -2646,35 +2643,31 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         }, 12000);
     }
 
-    // 라인 수정 이력 한 줄 — 클릭하면 해당 커밋을 git show 로 연다.
+    // 라인 수정 이력 한 줄. (행 본문 클릭으로 git show diff 를 열던 기능은 제거됨 —
+    // 캐럿=변경사유 펼침, '이슈 N' 배지=이슈 탭 만 동작한다.)
     // currentShort(=블레임 대상 커밋 7자리)와 같은 커밋은 'current' 로 강조한다.
     function renderHistory(h, currentShort) {
         const short = (h.hash || '').slice(0, 7);
         const isCurrent = currentShort && short === currentShort;
         const el = document.createElement('div');
         el.className = 'hist-item' + (isCurrent ? ' current' : '');
-        el.dataset.action = 'openCommitHash';
         el.dataset.hash = h.hash || '';
-        // 배지는 자체 data-action 을 가져, 클릭 위임의 closest() 가 행(openCommitHash) 대신
-        // 배지(openCommitIssues)를 먼저 잡는다 → 배지=이슈 탭 이동, 나머지 행=커밋 열기로 분기된다.
+        // 배지('이슈 N')만 클릭 동작(openCommitIssues)을 가진다. 캐럿(세모)·변경사유 펼침은 제거됨.
+        // 배지를 머리줄(head) 우측에 두어, 타이틀(subject)이 그 아래로 전체 폭을 쓰게 한다.
         const badge = (h.issueCount && h.issueCount > 0)
             ? '<span class="hist-item__issues" data-action="openCommitIssues" title="이 커밋이 참조한 이슈 보기"><span class="ico">' + ICON.issue + '</span>이슈 ' + h.issueCount + '</span>'
-            : '<span></span>';
-        // 캐럿/이유 박스는 자체 data-action(expandHistory)을 가져, 클릭 위임의 closest() 가
-        // 행(openCommitHash)보다 먼저 잡는다 → 캐럿=펼침, 배지=이슈, 나머지 행=커밋 열기로 분기.
+            : '';
         el.innerHTML =
             '<span class="hist-item__dot"></span>' +
             '<div style="min-width:0">' +
                 '<div class="hist-item__head">' +
                     '<span class="hist-item__hash mono"></span>' +
                     '<span class="hist-item__date"></span>' +
-                    '<span class="hist-item__caret" data-action="expandHistory" title="이 커밋의 변경 사유 보기">' + ICON.caret + '</span>' +
+                    badge +
                 '</div>' +
                 '<div class="hist-item__subject"></div>' +
                 '<div class="hist-item__author"></div>' +
-                '<div class="hist-item__reason hidden" data-action="expandHistory"></div>' +
-            '</div>' +
-            badge;
+            '</div>';
         el.querySelector('.hist-item__hash').textContent = short;
         el.querySelector('.hist-item__date').textContent = formatHistDate(h.date);
         // 타이틀: 원본 메시지를 보여줬다가 갈아끼우면 어색하므로, AI 타이틀이 이미 캐시돼 있으면
@@ -2685,9 +2678,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         if (cached) { subEl.textContent = cached; }
         else { subEl.classList.add('is-loading'); armTitleFallback(); }
         el.querySelector('.hist-item__author').textContent = h.author || '';
-        // 펼침/이유 요청이 자기 커밋 해시를 싣도록 캐럿·이유 박스에도 해시를 단다.
-        el.querySelector('.hist-item__caret').dataset.hash = h.hash || '';
-        el.querySelector('.hist-item__reason').dataset.hash = h.hash || '';
         // '이슈 N' 배지도 자기 커밋 해시를 실어, 클릭 시 그 커밋의 이슈만 역추적하게 한다.
         const issuesBadge = el.querySelector('.hist-item__issues');
         if (issuesBadge) { issuesBadge.dataset.hash = h.hash || ''; }
@@ -2831,11 +2821,6 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
                 box.textContent = '변경 사유 불러오는 중…';
                 vscode.postMessage({ type: 'expandHistory', payload: { hash: el.dataset.hash } });
             }
-            return;
-        }
-        // 라인 수정 이력 항목은 자기 커밋 해시를 함께 실어 보낸다.
-        if (el.dataset.action === 'openCommitHash') {
-            vscode.postMessage({ type: 'openCommitHash', payload: { hash: el.dataset.hash } });
             return;
         }
         // 이슈 목록 항목 선택 — 외부로 열지 않고 상세 화면으로 전환한다.
