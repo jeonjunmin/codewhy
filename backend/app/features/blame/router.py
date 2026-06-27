@@ -34,6 +34,8 @@ from app.features.blame.schemas import (
     BlameResponse,
     CacheClearRequest,
     GitCommitMeta,
+    LineTitlesRequest,
+    LineTitlesResponse,
     ReasonRequest,
     ReasonResponse,
 )
@@ -220,6 +222,22 @@ async def commit_reason(req: ReasonRequest, db: AsyncSession = Depends(get_db)):
             logger.warning("reason 캐시 저장 실패 (응답에는 영향 없음)", exc_info=True)
 
     return ReasonResponse(reason=result.get("explanation", ""), aiDegraded=bool(result.get("aiDegraded")))
+
+
+@router.post("/line-titles", response_model=LineTitlesResponse)
+async def line_titles(req: LineTitlesRequest):
+    """'라인 수정 이력' 행 타이틀을 원본 커밋 메시지에서 깔끔히 다듬어 배치로 반환한다.
+
+    한 번의 Bedrock 호출(미적중 커밋만)로 처리하고 커밋 해시별로 캐시한다 — 라인 이력 목록은
+    git 메타로 '즉시' 그려지고, 이 응답이 도착하면 프런트가 타이틀만 교체한다(진행형).
+    """
+    commits = [c.model_dump() for c in req.commits]
+    try:
+        titles = await asyncio.to_thread(service.generate_line_titles, commits)
+    except Exception as e:
+        logger.exception("라인 타이틀 생성 실패 — repo=%s file=%s", req.repoPath, req.filePath)
+        raise HTTPException(status_code=500, detail=f"라인 타이틀 실패: {e}")
+    return LineTitlesResponse(titles=titles)
 
 
 @router.post("/ask", response_model=AskResponse)

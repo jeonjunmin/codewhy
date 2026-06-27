@@ -22,6 +22,28 @@ export async function clearBlameCache(
     return (res.data?.deleted as number) ?? 0;
 }
 
+/** 라인 타이틀 다듬기 입력 커밋 — 원본 메시지 + (선택) 실제 변경 신호. */
+export interface LineTitleCommit {
+    hash: string;
+    subject: string;
+    linesAdded?: number;
+    linesRemoved?: number;
+    changedSymbols?: string;
+}
+
+/**
+ * POST /api/blame/line-titles — '라인 수정 이력' 행 타이틀을 원본 커밋 메시지에서 다듬어 받는다.
+ * 반환: {커밋해시: 다듬은 타이틀}. 라인 이력 목록을 즉시 그린 뒤 진행형으로 교체하는 용도.
+ */
+export async function fetchLineTitles(
+    req: { filePath: string; repoPath: string; commits: LineTitleCommit[] },
+): Promise<Record<string, string>> {
+    const { data } = await createHttpClient().post<{ titles: Record<string, string> }>(
+        '/api/blame/line-titles', req,
+    );
+    return data?.titles ?? {};
+}
+
 /** 스트리밍 첫 프레임(meta) — git 만으로 즉시 구하는 메타/라인 이력. */
 export interface BlameMeta {
     commitHash: string;

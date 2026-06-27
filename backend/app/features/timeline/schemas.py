@@ -14,6 +14,10 @@ class CommitInput(BaseModel):
     author: str
     date: str      # YYYY-MM-DD
     subject: str
+    # 하이브리드 요약용 — 이 파일에 대한 '실제 코드 변경' 신호(git diff). 구버전 확장 호환 위해 옵션.
+    linesAdded: int | None = None
+    linesRemoved: int | None = None
+    changedSymbols: str | None = None
 
 
 class TimelineRequest(BaseModel):

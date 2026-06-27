@@ -155,6 +155,26 @@ class ReasonResponse(BaseModel):
     aiDegraded: bool = False
 
 
+class LineTitleCommit(BaseModel):
+    """라인 타이틀 다듬기 입력 커밋 — 원본 메시지 + (선택) 실제 변경 신호."""
+    hash: str
+    subject: str = ""
+    linesAdded: int | None = None
+    linesRemoved: int | None = None
+    changedSymbols: str | None = None
+
+
+class LineTitlesRequest(BaseModel):
+    """'라인 수정 이력' 행 타이틀을, 원본 커밋 메시지에서 다듬어 달라는 배치 요청."""
+    filePath: str
+    repoPath: str
+    commits: list[LineTitleCommit] = Field(default_factory=list)
+
+
+class LineTitlesResponse(BaseModel):
+    titles: dict[str, str]   # {commit_hash: 다듬은 타이틀}
+
+
 class AskRequest(BaseModel):
     """AI에게 더 묻기 — 현재 라인 블레임 맥락 위에서 후속 질문."""
     filePath: str

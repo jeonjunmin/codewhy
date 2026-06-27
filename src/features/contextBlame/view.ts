@@ -1,11 +1,12 @@
-import { execSync } from 'child_process';
+import { execFile, execSync } from 'child_process';
+import { promisify } from 'util';
 import * as vscode from 'vscode';
 import { EditorContext, getEditorContext } from '../../shared/editor';
 import * as localGit from '../../shared/git';
 import { BlameRequest, BlameResult, CommitInput, GitCommitMeta, IssueChatMessage, IssueChatRequest, ReasonRequest, TraceRequest } from '../../shared/types';
 import { fetchRequirementTrace } from '../requirementTrace/api';
 import { clearTimelineCache, streamTimelineSummary } from '../timelineSummary/api';
-import { clearBlameCache, fetchCommitReason, streamContextBlame, streamIssueChat } from './api';
+import { clearBlameCache, fetchCommitReason, fetchLineTitles, streamContextBlame, streamIssueChat } from './api';
 import { ContextBlameSidebarProvider, VIEW_ID } from './sidebar';
 
 /**
@@ -206,6 +207,8 @@ async function handleAnalyzeAndShow(args: { filePath: string; line: number; repo
         // 캐시 적중 — 스트리밍 없이 즉시 표시.
         updateStatusBar(args.line, entry.result);
         pushToSidebar(entry.ctx, entry.result);
+        // 라인 이력 타이틀은 사후에 AI 로 다듬어 진행형 교체(해시별 캐시라 재호출도 저렴).
+        void applyLineTitles(entry.result.lineHistory, args);
         return;
     }
     // 미스 — SSE 스트리밍으로 설명을 토큰 단위로 그린다(타임라인 패턴과 동일).
@@ -224,7 +227,12 @@ function streamBlameInto(args: { filePath: string; line: number; repoPath: strin
     let metaSeen = false;
 
     streamContextBlame(buildBlameRequest(args), {
-        onMeta: (meta) => { metaSeen = true; sidebar!.blameStreaming(ctx, meta); },
+        onMeta: (meta) => {
+            metaSeen = true;
+            sidebar!.blameStreaming(ctx, meta);
+            // 라인 이력 목록은 즉시 떴으니, 타이틀은 사후에 AI 로 다듬어 진행형 교체한다.
+            void applyLineTitles(meta.lineHistory, ctx);
+        },
         onDelta: (delta) => sidebar!.blameDelta(delta),
         onDone: (result) => {
             // degraded(Bedrock 폴백)는 일시적 실패이므로 캐싱하지 않는다(다음 분석 때 자동 회복).
@@ -266,7 +274,7 @@ export function runTimelineTab() {
     if (!ctx) { return; }
 
     const fileName = ctx.filePath.split(/[\\/]/).pop() ?? ctx.filePath;
-    const commits = collectGitLog(ctx.repoPath, ctx.filePath);
+    const commits = collectCommitsWithChanges(ctx.repoPath, ctx.filePath);
     if (commits.length === 0) {
         sidebar.timelineEmpty('이 파일의 git 커밋 이력을 찾을 수 없습니다.');
         return;
@@ -489,6 +497,116 @@ function collectGitLog(repoPath: string, filePath: string): CommitInput[] {
     } catch {
         return [];
     }
+}
+
+interface FileChangeSignal { added: number; removed: number; symbols: string; }
+
+/**
+ * 타임라인 하이브리드 요약용 — 이 파일에 대한 커밋별 '실제 코드 변경' 신호를 git diff 에서 추출한다.
+ *
+ * `git log -p --unified=0` 한 번으로 전체 이력의 패치를 받아, 커밋마다
+ *   · +/- 줄 수(diffstat) 와
+ *   · @@ 헌크 헤더 뒤에 git 이 달아주는 '함수/섹션 컨텍스트'(바뀐 심볼)
+ * 만 추려 들고, 패치 본문은 버린다(토큰·payload 최소화).
+ * %x01 은 git 이 출력하는 레코드 구분 바이트(0x01) — 패치 내용과 안 겹치는 안전한 경계.
+ *
+ * 👤 담당: 개발자 B
+ */
+/** `git log -p` 출력을 커밋별 변경 신호(+/-줄 수 + 헌크 함수명)로 파싱한다. */
+function parseFileChangeSignals(out: string): Map<string, FileChangeSignal> {
+    const map = new Map<string, FileChangeSignal>();
+    for (const block of out.split('\x01')) {
+        const nl = block.indexOf('\n');
+        const hash = (nl < 0 ? block : block.slice(0, nl)).trim();
+        if (!hash) { continue; }
+        const body = nl < 0 ? '' : block.slice(nl + 1);
+        let added = 0, removed = 0;
+        const symbols = new Set<string>();
+        for (const line of body.split('\n')) {
+            if (line.startsWith('@@')) {
+                // "@@ -a,b +c,d @@ <context>" — <context> 는 보통 이 헌크가 속한 함수/섹션명.
+                const ctx = line.slice(line.indexOf('@@', 2) + 2).trim();
+                if (ctx) { symbols.add(ctx); }
+            } else if (line.startsWith('+') && !line.startsWith('+++')) {
+                added++;
+            } else if (line.startsWith('-') && !line.startsWith('---')) {
+                removed++;
+            }
+        }
+        // 심볼은 토큰을 아끼려고 최대 4개까지만.
+        map.set(hash, { added, removed, symbols: [...symbols].slice(0, 4).join(', ') });
+    }
+    return map;
+}
+
+const GIT_DIFF_ARGS = (filePath: string) =>
+    ['log', '--follow', '-p', '--unified=0', '--format=%x01%H', '--', filePath];
+
+function collectFileChangeSignals(repoPath: string, filePath: string): Map<string, FileChangeSignal> {
+    try {
+        const out = execSync(
+            `git log --follow -p --unified=0 --format="%x01%H" -- "${filePath}"`,
+            { cwd: repoPath, timeout: 20_000, maxBuffer: 64 * 1024 * 1024 },
+        ).toString();
+        return parseFileChangeSignals(out);
+    } catch {
+        // diff 수집 실패(대용량/타임아웃 등)는 치명적이지 않다 — 메시지만으로 폴백한다.
+        return new Map();
+    }
+}
+
+const execFileAsync = promisify(execFile);
+
+/** 확장 호스트를 막지 않는 비동기 버전 — 블레임 라인 타이틀처럼 사후 보강에 쓴다. */
+async function collectFileChangeSignalsAsync(repoPath: string, filePath: string): Promise<Map<string, FileChangeSignal>> {
+    try {
+        const { stdout } = await execFileAsync('git', GIT_DIFF_ARGS(filePath), {
+            cwd: repoPath, timeout: 20_000, maxBuffer: 64 * 1024 * 1024,
+        });
+        return parseFileChangeSignals(stdout.toString());
+    } catch {
+        return new Map();
+    }
+}
+
+/**
+ * 라인 수정 이력의 행 타이틀을 'AI 가 다듬은 한 줄'로 진행형 교체한다.
+ * 목록은 이미 원본 커밋 메시지로 즉시 렌더된 상태 — 여기서는 사후에 비동기로 다듬어 갈아끼운다.
+ * 실제 변경(diff) 신호를 함께 실어, 모호한 메시지도 코드 변경 기준으로 다듬도록 grounding 한다.
+ */
+async function applyLineTitles(
+    lineHistory: { hash: string; subject: string }[] | undefined,
+    ctx: { filePath: string; repoPath: string },
+) {
+    if (!sidebar || !lineHistory || lineHistory.length === 0) { return; }
+    let titles: Record<string, string> = {};
+    try {
+        const signals = await collectFileChangeSignalsAsync(ctx.repoPath, ctx.filePath);
+        const commits = lineHistory.map(h => {
+            const s = signals.get(h.hash);
+            return s
+                ? { hash: h.hash, subject: h.subject || '', linesAdded: s.added, linesRemoved: s.removed, changedSymbols: s.symbols }
+                : { hash: h.hash, subject: h.subject || '' };
+        });
+        titles = await fetchLineTitles({ filePath: ctx.filePath, repoPath: ctx.repoPath, commits });
+    } catch {
+        // 실패 → 원본 메시지를 타이틀로 실어, 웹뷰가 스켈레톤을 풀고 원본으로 즉시 드러내게 한다.
+        titles = Object.fromEntries(lineHistory.map(h => [h.hash, h.subject || '']));
+    }
+    // 성공/실패 무관하게 항상 호출 — 모든 행의 스켈레톤이 한 번에 해제되어야 한다.
+    sidebar.setHistoryTitles(titles);
+}
+
+/** git log(메타) + git diff(변경 신호)를 합쳐, 커밋마다 실제 변경을 덧붙인 목록을 만든다. */
+function collectCommitsWithChanges(repoPath: string, filePath: string): CommitInput[] {
+    const commits = collectGitLog(repoPath, filePath);
+    const signals = collectFileChangeSignals(repoPath, filePath);
+    return commits.map(c => {
+        const s = signals.get(c.hash);
+        return s
+            ? { ...c, linesAdded: s.added, linesRemoved: s.removed, changedSymbols: s.symbols }
+            : c;
+    });
 }
 
 /**

@@ -147,12 +147,31 @@ def _group_period(group: list[dict]) -> str:
     return start if start == end else f"{start} ~ {end}"
 
 
-def _format_groups_for_prompt(groups: list[list[dict]]) -> str:
-    """묶음들을 LLM 프롬프트용 텍스트로 — 묶음마다 인덱스/기간/커밋 목록."""
+def _format_diff_signal(sig: dict | None) -> str:
+    """커밋의 '실제 코드 변경' 신호(git diff)를 프롬프트 한 토막으로 — 없으면 빈 문자열."""
+    if not sig:
+        return ""
+    added, removed, symbols = sig.get("added"), sig.get("removed"), sig.get("symbols")
+    parts: list[str] = []
+    if added is not None or removed is not None:
+        parts.append(f"+{added or 0}/-{removed or 0}줄")
+    if symbols:
+        parts.append(f"함수: {symbols}")
+    return f"  ⟪실제변경 {' · '.join(parts)}⟫" if parts else ""
+
+
+def _format_groups_for_prompt(groups: list[list[dict]], diff_by_hash: dict | None = None) -> str:
+    """묶음들을 LLM 프롬프트용 텍스트로 — 묶음마다 인덱스/기간/커밋 목록.
+
+    커밋마다 git diff 에서 뽑은 '실제 코드 변경'(⟪실제변경 …⟫)을 덧붙여, LLM 이
+    부정확한 커밋 메시지를 실제 변경으로 교정할 수 있게 한다(diff_by_hash 가 있을 때).
+    """
+    diff_by_hash = diff_by_hash or {}
     blocks: list[str] = []
     for i, group in enumerate(groups, 1):
         lines = "\n".join(
             f"  - [{c.get('date', '')}] {c.get('subject', '')} (by {c.get('author', '')})"
+            f"{_format_diff_signal(diff_by_hash.get(c.get('hash')))}"
             for c in group
         )
         blocks.append(f"[묶음 {i}] ({_group_period(group)}, 커밋 {len(group)}개)\n{lines}")
@@ -219,6 +238,17 @@ async def prepare_summary(
         logger.info("[timeline] ✅ 캐시 적중 — file_id=%d", file.id)
         return {"cached": True, "result": {"summary": cached.summary, "milestones": cached.milestones or []}}
 
+    # 요청 커밋에 실려 온 '실제 코드 변경' 신호를 hash 로 색인 — 프롬프트 grounding 용.
+    # (DB 에 영속하지 않는다: 신호는 1회 생성에만 쓰고, 결과 요약은 commit_set_hash 로 캐시된다.)
+    diff_by_hash = {
+        c["hash"]: {
+            "added": c.get("linesAdded"),
+            "removed": c.get("linesRemoved"),
+            "symbols": (c.get("changedSymbols") or "").strip(),
+        }
+        for c in commits if c.get("hash")
+    }
+
     logger.info("[timeline] ❌ 캐시 미스 — 스트리밍 응답으로 전환")
     return {
         "cached": False,
@@ -229,6 +259,7 @@ async def prepare_summary(
             "repo_path": repo_path,
             "file_path": file_path,
             "stored": stored,
+            "diff_by_hash": diff_by_hash,
         },
     }
 
@@ -263,7 +294,7 @@ async def stream_summary(ctx: dict) -> AsyncGenerator[str, None]:
     #   '어떤 커밋을 묶을지'는 여기서 규칙으로 정하고, LLM 은 묶음 라벨만 생성한다.
     meaningful = filter_meaningful(stored)
     groups = group_commits_into_milestones(meaningful)
-    groups_text = _format_groups_for_prompt(groups)
+    groups_text = _format_groups_for_prompt(groups, ctx.get("diff_by_hash"))
     logger.info("[timeline] 마일스톤 그룹핑 — 커밋 %d건 → 묶음 %d개  (입력 %d자)",
                 len(meaningful), len(groups), len(groups_text))
 

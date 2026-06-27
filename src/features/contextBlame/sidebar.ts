@@ -48,6 +48,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     private view?: vscode.WebviewView;
     private last?: { ctx: EditorContext; result: BlameResult; pinned: boolean };
     private lastBlameStream?: BlameStreamState;
+    // 커밋 해시 → AI 가 다듬은 라인 이력 타이틀. 웹뷰 재생성 시 스켈레톤을 즉시 메우기 위해 보관.
+    private lastLineTitles: Record<string, string> = {};
     private lastTimeline?: TimelineState;
     private lastIssue?: IssueState;
     private activeTab: 'blame' | 'timeline' | 'issue' = 'blame';
@@ -175,6 +177,20 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         this.view?.webview.postMessage({ type: 'historyReason', payload: { hash, reason } });
     }
 
+    /** 라인 이력 행 타이틀을 AI 가 다듬은 것으로 드러낸다({hash: 타이틀}).
+     * 커밋 해시별로 보관해, 웹뷰가 재생성되며 이력을 다시 그릴 때(탭 전환·재방문) 스켈레톤이
+     * 영구히 남지 않도록 같은 타이틀을 다시 실어 보낸다(postLineTitles). */
+    setHistoryTitles(titles: Record<string, string>) {
+        this.lastLineTitles = { ...this.lastLineTitles, ...titles };
+        this.view?.webview.postMessage({ type: 'historyTitles', payload: { titles } });
+    }
+
+    /** 라인 이력을 (재)렌더한 직후 호출 — 보관해 둔 타이틀로 스켈레톤을 즉시 드러낸다. */
+    private postLineTitles() {
+        if (!this.ready || Object.keys(this.lastLineTitles).length === 0) { return; }
+        this.view?.webview.postMessage({ type: 'historyTitles', payload: { titles: this.lastLineTitles } });
+    }
+
     /** 이슈 챗봇 스트림 프레임을 웹뷰로 중계한다(view.ts onIssueChat 에서 호출). */
     postIssueChat(payload: { kind: 'delta' | 'done' | 'error'; text?: string }) {
         this.view?.webview.postMessage({ type: 'issueChat', payload });
@@ -204,6 +220,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
                     text: s.text,
                 },
             });
+            this.postLineTitles();   // 재방문 시 스켈레톤을 보관된 타이틀로 즉시 메운다.
         } else {
             const r = s.result;
             wv.postMessage({
@@ -435,6 +452,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             pinned,
         };
         this.view?.webview.postMessage({ type: 'render', payload });
+        this.postLineTitles();   // 재방문 시 스켈레톤을 보관된 타이틀로 즉시 메운다.
     }
 
     // ─── 한 번만 그리는 HTML 빨대 컵 ──────────────────────────────────────
@@ -733,9 +751,23 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     .hist-item.current .hist-item__hash { color: var(--accent-violet); }
     .hist-item__date { color: var(--fg-mute); font-size: 11px; }
     .hist-item__subject {
-        color: var(--fg); font-size: 12.5px; margin-top: 3px;
-        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        color: var(--fg); font-size: 12.5px; margin-top: 3px; line-height: 1.45;
+        /* 길어도 줄이지 말고 줄바꿈해 전부 보여준다(... 말줄임 제거). 긴 토큰도 강제 줄바꿈. */
+        white-space: normal; overflow-wrap: anywhere; word-break: break-word;
     }
+    /* AI 타이틀 도착 전 — 원본 메시지를 보여주고 갈아끼우면 '글자가 바뀌어' 어색하므로,
+       제목 자리에 스켈레톤만 두고 준비되면 드러낸다(로딩 후 등장). */
+    .hist-item__subject.is-loading {
+        color: transparent; height: 12px; max-width: 62%; margin-top: 5px;
+        border-radius: 4px; background: var(--line);
+        background-image: linear-gradient(90deg, transparent 0, rgba(255,255,255,0.07) 40%, transparent 80%);
+        background-size: 200% 100%; background-repeat: no-repeat;
+        animation: hist-skel 1.15s ease-in-out infinite;
+    }
+    @keyframes hist-skel { 0% { background-position: 150% 0; } 100% { background-position: -50% 0; } }
+    /* 스켈레톤 → AI 타이틀로 드러날 때 살짝 페이드 인(텍스트 교체가 아니라 '등장'). */
+    .hist-item__subject--ai { animation: hist-title-in .3s ease; }
+    @keyframes hist-title-in { from { opacity: 0; } to { opacity: 1; } }
     .hist-item__author { color: var(--fg-mute); font-size: 11px; margin-top: 2px; }
     .hist-item__issues {
         align-self: start; margin-top: 1px;
@@ -1394,6 +1426,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             case 'blDelta': blDelta(msg.payload.delta); break;
             case 'blResult': blResult(msg.payload); break;
             case 'historyReason': fillHistoryReason(msg.payload.hash, msg.payload.reason); break;
+            case 'historyTitles': applyHistoryTitles(msg.payload.titles); break;
             case 'info': showInfo(msg.payload.message); break;
             case 'empty':
                 document.getElementById('info').classList.add('hidden');
@@ -2595,6 +2628,24 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    // 커밋 해시 → AI 가 다듬은 라인 이력 타이틀(웹뷰 캐시). done 재렌더·재방문 시 스켈레톤
+    // 깜빡임 없이 바로 쓰기 위함. 해시는 전역 식별자라 파일/라인이 달라도 재사용 안전.
+    let lineTitles = {};
+    // 안전망 — 어떤 이유로든 타이틀이 끝내 안 오면(백엔드 다운 등) 스켈레톤이 영구히 남지 않게
+    // 원본으로 드러낸다. 정상 경로(성공/실패 모두 setHistoryTitles 호출)는 수 초 내 끝나므로
+    // 충분히 길게 둬, 이 타이머가 먼저 터져서 '원본→AI' 교체가 되살아나는 일은 없게 한다.
+    let titleFallbackTimer = null;
+    function armTitleFallback() {
+        if (titleFallbackTimer) { clearTimeout(titleFallbackTimer); }
+        titleFallbackTimer = setTimeout(() => {
+            titleFallbackTimer = null;
+            document.querySelectorAll('#history-list .hist-item__subject.is-loading').forEach(sub => {
+                sub.textContent = sub.dataset.raw || '';
+                sub.classList.remove('is-loading');
+            });
+        }, 12000);
+    }
+
     // 라인 수정 이력 한 줄 — 클릭하면 해당 커밋을 git show 로 연다.
     // currentShort(=블레임 대상 커밋 7자리)와 같은 커밋은 'current' 로 강조한다.
     function renderHistory(h, currentShort) {
@@ -2626,7 +2677,13 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             badge;
         el.querySelector('.hist-item__hash').textContent = short;
         el.querySelector('.hist-item__date').textContent = formatHistDate(h.date);
-        el.querySelector('.hist-item__subject').textContent = h.subject || '';
+        // 타이틀: 원본 메시지를 보여줬다가 갈아끼우면 어색하므로, AI 타이틀이 이미 캐시돼 있으면
+        // 바로 쓰고, 아니면 스켈레톤만 띄운다(applyHistoryTitles 가 도착 시 드러냄). 원본은 폴백용으로 보관.
+        const subEl = el.querySelector('.hist-item__subject');
+        subEl.dataset.raw = h.subject || '';
+        const cached = lineTitles[h.hash || ''];
+        if (cached) { subEl.textContent = cached; }
+        else { subEl.classList.add('is-loading'); armTitleFallback(); }
         el.querySelector('.hist-item__author').textContent = h.author || '';
         // 펼침/이유 요청이 자기 커밋 해시를 싣도록 캐럿·이유 박스에도 해시를 단다.
         el.querySelector('.hist-item__caret').dataset.hash = h.hash || '';
@@ -2646,6 +2703,29 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         box.innerHTML = decorate(reason || '(변경 사유 없음)');
         box.dataset.loaded = '1';
         delete box.dataset.loading;
+    }
+
+    // 배치 응답 도착 — '이번에 받은 해시'의 스켈레톤만 드러낸다(텍스트 교체가 아니라 '등장').
+    // 받지 않은 행은 스켈레톤을 유지한다 — 아직 fetch 중인 새 커밋을 원본으로 먼저 드러냈다가
+    // AI 로 다시 바꾸는(어색한 교체) 일을 막기 위함. 백엔드는 요청 해시마다 항상 한 줄을
+    // 돌려주므로(다듬은 것 or 원본), 한 번의 응답으로 그 분석의 모든 행이 드러난다.
+    function applyHistoryTitles(titles) {
+        titles = titles || {};
+        Object.assign(lineTitles, titles);   // 해시별 캐시 갱신(재렌더·재방문 대비)
+        document.querySelectorAll('#history-list .hist-item').forEach(row => {
+            const hash = row.dataset.hash || '';
+            if (!(hash in titles)) { return; }   // 이번에 받은 해시만 드러낸다
+            const sub = row.querySelector('.hist-item__subject');
+            if (!sub) { return; }
+            const wasLoading = sub.classList.contains('is-loading');
+            sub.textContent = titles[hash] || sub.dataset.raw || '';
+            sub.classList.remove('is-loading');
+            if (wasLoading && titles[hash]) { sub.classList.add('hist-item__subject--ai'); }
+        });
+        // 남은 스켈레톤이 없으면 안전망 타이머는 불필요.
+        if (titleFallbackTimer && !document.querySelector('#history-list .hist-item__subject.is-loading')) {
+            clearTimeout(titleFallbackTimer); titleFallbackTimer = null;
+        }
     }
 
     // "2026-03-15" → "3월 15일" (파싱 실패 시 원본)

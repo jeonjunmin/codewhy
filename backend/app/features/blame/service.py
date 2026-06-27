@@ -634,6 +634,93 @@ def _decorate_line_history(history: list[dict]) -> list[dict]:
     ]
 
 
+# ── 라인 수정 이력 '타이틀' 다듬기 (배치 1콜 + 커밋 해시별 인메모리 캐시) ────────────
+# 커밋 해시 → 다듬은 타이틀. 타이틀은 해시에 종속(안정적)이라 프로세스 수명 동안 재사용한다.
+_LINE_TITLE_CACHE: dict[str, str] = {}
+_LINE_TITLE_CACHE_MAX = 1000
+
+_LINE_TITLE_SYSTEM = (
+    "당신은 개발자의 거친 커밋 메시지를, 비개발자도 이해할 깔끔한 '변경 타이틀'로 다듬는 도우미입니다. "
+    "사실을 지어내지 말고, 주어진 정보 안에서만 다듬으세요."
+)
+
+
+def _format_line_diff_signal(c: dict) -> str:
+    """라인 타이틀 입력 커밋의 '실제 변경'(git diff) 신호 한 토막 — 없으면 빈 문자열."""
+    added, removed = c.get("linesAdded"), c.get("linesRemoved")
+    symbols = (c.get("changedSymbols") or "").strip()
+    parts: list[str] = []
+    if added is not None or removed is not None:
+        parts.append(f"+{added or 0}/-{removed or 0}줄")
+    if symbols:
+        parts.append(f"함수: {symbols}")
+    return f"  ⟪실제변경 {' · '.join(parts)}⟫" if parts else ""
+
+
+def _parse_title_array(raw: str, n: int) -> list[str]:
+    """LLM 응답(JSON 문자열 배열)을 n개 길이로 정규화한다. 실패 시 빈 리스트."""
+    cleaned = re.sub(r"```(?:json)?\s*|\s*```", "", raw or "").strip()
+    try:
+        arr = json.loads(cleaned)
+    except Exception:
+        return []
+    if not isinstance(arr, list):
+        return []
+    out = [str(x).strip() for x in arr[:n]]
+    return out + [""] * (n - len(out))   # 모자라면 빈칸으로 패딩(원본 유지됨)
+
+
+def _refine_titles(commits: list[dict]) -> list[str]:
+    """커밋들(원본 메시지 + 실제변경)을 한 번의 Bedrock 호출로 다듬어, 순서대로 타이틀 리스트 반환."""
+    lines = "\n".join(
+        f"{i}. {(c.get('subject') or '').strip() or '(메시지 없음)'}{_format_line_diff_signal(c)}"
+        for i, c in enumerate(commits, 1)
+    )
+    prompt = (
+        "아래는 한 코드 라인이 수정된 커밋들의 원본 메시지입니다(개발자가 대충/부정확하게 적었을 수 있음).\n"
+        "각 항목을, 그 자체로 완결된 한국어 한 줄 명사구(20자 안팎)로 다듬으세요.\n"
+        "규칙:\n"
+        "- 티켓 번호(#53), 타입 접두어(feat:, fix[blame]:), 군더더기를 제거하세요.\n"
+        "- 명사(체언)로 끝맺으세요. '~까지/~부터' 같은 조사·연결어미로 끝내지 마세요.\n"
+        "- ⟪실제변경⟫(있으면)은 git diff 에서 뽑은 '실제 바뀐 것'입니다. 메시지가 모호하면(예: '수정')\n"
+        "  ⟪실제변경⟫ 으로 무슨 변경인지 구체화하고, 메시지와 어긋나면 실제 변경을 우선하세요.\n"
+        "- 정보가 부족하면 의미를 지어내지 말고 원문을 최소한으로만 정리하세요.\n"
+        f"반드시 JSON 문자열 배열로, 입력과 같은 {len(commits)}개·같은 순서로만 반환하세요. 다른 텍스트 금지.\n\n"
+        f"[커밋들]\n{lines}"
+    )
+    raw = call_bedrock(prompt, system=_LINE_TITLE_SYSTEM, max_tokens=600, temperature=0.2)
+    return _parse_title_array(raw, len(commits))
+
+
+def generate_line_titles(commits: list[dict]) -> dict[str, str]:
+    """'라인 수정 이력' 행 타이틀을 다듬어 {hash: 타이틀} 로 반환한다.
+
+    - 캐시에 있으면 재사용, 없는 것(+메시지 있는 것)만 모아 한 번의 Bedrock 호출로 다듬는다.
+    - 다듬기 실패/빈 결과면 해당 커밋은 원본 메시지를 그대로 돌려준다(프런트가 바꾸지 않음).
+    """
+    todo = [
+        c for c in commits
+        if c.get("hash") and c["hash"] not in _LINE_TITLE_CACHE and (c.get("subject") or "").strip()
+    ]
+    if todo:
+        try:
+            refined = _refine_titles(todo)
+        except Exception:
+            logger.warning("라인 타이틀 다듬기 실패 — 원본 유지", exc_info=True)
+            refined = []
+        for c, title in zip(todo, refined):
+            if title:
+                _LINE_TITLE_CACHE[c["hash"]] = title
+        # 단순 크기 제한 — 오래된 항목부터 버린다(insertion order).
+        while len(_LINE_TITLE_CACHE) > _LINE_TITLE_CACHE_MAX:
+            _LINE_TITLE_CACHE.pop(next(iter(_LINE_TITLE_CACHE)), None)
+
+    return {
+        c["hash"]: _LINE_TITLE_CACHE.get(c["hash"], (c.get("subject") or "").strip())
+        for c in commits if c.get("hash")
+    }
+
+
 def _safe_count_linked_issues(message: str) -> int:
     """_count_linked_issues 가 아직 미구현(또는 예외)이어도 이력 목록 자체는 살린다.
 

@@ -170,6 +170,11 @@ export interface CommitInput {
     author: string;
     date: string;    // YYYY-MM-DD
     subject: string;
+    // 하이브리드 요약용 — 이 파일에 대한 '실제 코드 변경' 신호(git diff 에서 추출).
+    // 커밋 메시지(의도)가 부정확할 때 실제 변경(사실)으로 교정하기 위함. 없으면 메시지만으로 폴백.
+    linesAdded?: number;
+    linesRemoved?: number;
+    changedSymbols?: string;   // 바뀐 함수/섹션 이름(쉼표 구분, best-effort)
 }
 
 export interface TimelineRequest {
