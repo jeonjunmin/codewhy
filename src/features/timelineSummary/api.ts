@@ -3,6 +3,8 @@ import { TimelineMilestone, TimelineRequest, TimelineResult } from '../../shared
 
 export interface TimelineStreamHandlers {
     onDelta(delta: string): void;
+    /** summary 값이 닫힌 시점 — 마일스톤 토큰이 마저 오기 전에 상단 요약을 먼저 확정한다. */
+    onSummaryDone(summary: string): void;
     onDone(result: TimelineResult): void;
     onError(message: string): void;
 }
@@ -62,7 +64,7 @@ export async function streamTimelineSummary(
             const payload = frame.slice('data:'.length).trim();
             if (!payload) { continue; }
 
-            let msg: { delta?: string; done?: boolean; error?: string; summary?: string; milestones?: TimelineMilestone[] };
+            let msg: { delta?: string; summaryDone?: boolean; done?: boolean; error?: string; summary?: string; milestones?: TimelineMilestone[] };
             try {
                 msg = JSON.parse(payload);
             } catch {
@@ -72,6 +74,10 @@ export async function streamTimelineSummary(
             if (msg.error) {
                 handlers.onError(msg.error);
                 return;
+            }
+            if (msg.summaryDone) {
+                handlers.onSummaryDone(msg.summary ?? '');
+                continue;
             }
             if (msg.done) {
                 handlers.onDone({ summary: msg.summary ?? '', milestones: msg.milestones ?? [] });

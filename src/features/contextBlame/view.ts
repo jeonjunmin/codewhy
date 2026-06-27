@@ -277,6 +277,7 @@ export function runTimelineTab() {
         { filePath: ctx.filePath, repoPath: ctx.repoPath, commits },
         {
             onDelta: (delta) => sidebar!.timelineDelta(delta),
+            onSummaryDone: (summary) => sidebar!.timelineSummaryDone(fileName, summary),
             onDone: (result) => sidebar!.timelineResult(fileName, result),
             onError: (message) => sidebar!.timelineEmpty(`타임라인 요약 실패: ${message}`),
         },

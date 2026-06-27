@@ -22,7 +22,7 @@ from typing import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.timeline_file_graph import parse_ai_response, stream_file_summary
+from app.ai.timeline_file_graph import _salvage_summary, parse_ai_response, stream_file_summary
 from app.core.commit_classifier import classify_commit, filter_meaningful
 from app.core.tickets import extract_ticket
 from app.db.postgres import AsyncSessionLocal, run_detached
@@ -273,6 +273,7 @@ async def stream_summary(ctx: dict) -> AsyncGenerator[str, None]:
                 file_path, parsed["type"], parsed["domain"])
 
     full_text = ""
+    summary_sent = False
     try:
         async for delta in stream_file_summary(
             file_path=file_path,
@@ -283,6 +284,13 @@ async def stream_summary(ctx: dict) -> AsyncGenerator[str, None]:
         ):
             full_text += delta
             yield f"data: {json.dumps({'delta': delta}, ensure_ascii=False)}\n\n"
+            # summary 값이 닫히는 순간('"milestones"' 키 등장)을 감지해 상단 요약을 먼저 확정한다.
+            # → 프런트는 마일스톤 토큰이 마저 생성되는 동안 상단을 '진행중'이 아닌 '완료'로 보여준다.
+            if not summary_sent and '"milestones"' in full_text:
+                summary_sent = True
+                early = _salvage_summary(full_text)
+                if early:
+                    yield f"data: {json.dumps({'summaryDone': True, 'summary': early}, ensure_ascii=False)}\n\n"
     except Exception as exc:
         logger.exception("[timeline] 스트리밍 중 오류 — file=%s : %s", file_path, exc)
         yield f"data: {json.dumps({'error': str(exc)}, ensure_ascii=False)}\n\n"

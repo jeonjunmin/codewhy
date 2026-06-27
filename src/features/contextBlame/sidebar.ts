@@ -25,7 +25,8 @@ import { BlameMeta } from './api';
 export const VIEW_ID = 'codewhy.contextBlame';
 
 type TimelineState =
-    | { kind: 'streaming'; fileName: string; text: string }
+    // summary: summaryDone 수신 후 확정된 상단 요약(있으면 재표시 시 상단을 '완료'로 복원).
+    | { kind: 'streaming'; fileName: string; text: string; summary?: string }
     | { kind: 'result'; fileName: string; result: TimelineResult }
     | { kind: 'empty'; message?: string };
 
@@ -243,6 +244,11 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         if (this.lastTimeline?.kind === 'streaming') { this.lastTimeline.text += delta; }
         this.view?.webview.postMessage({ type: 'tlDelta', payload: { delta } });
     }
+    // 상단 요약 조기 확정 — 마일스톤 토큰이 마저 오는 동안 상단을 '완료'로 보여준다.
+    timelineSummaryDone(fileName: string, summary: string) {
+        if (this.lastTimeline?.kind === 'streaming') { this.lastTimeline.summary = summary; }
+        this.view?.webview.postMessage({ type: 'tlSummaryDone', payload: { fileName, summary } });
+    }
     timelineResult(fileName: string, result: TimelineResult) {
         this.lastTimeline = { kind: 'result', fileName, result };
         this.postTimeline(this.lastTimeline);
@@ -257,6 +263,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         if (!wv || !this.ready) { return; }
         if (s.kind === 'streaming') {
             wv.postMessage({ type: 'tlStreaming', payload: { fileName: s.fileName, text: s.text } });
+            // 이미 상단 요약이 확정된 뒤 뷰가 다시 열렸다면 '완료' 상태로 복원한다.
+            if (s.summary) { wv.postMessage({ type: 'tlSummaryDone', payload: { fileName: s.fileName, summary: s.summary } }); }
         } else if (s.kind === 'result') {
             wv.postMessage({ type: 'tlResult', payload: { fileName: s.fileName, summary: s.result.summary, milestones: s.result.milestones } });
         } else {
@@ -1164,6 +1172,25 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         border-radius: 50%; animation: spin .75s linear infinite; margin-right: 6px;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── 마일스톤 로딩 바 (요약이 타이핑되는 동안 하단에 표시) ─────── */
+    .tl-ms-loading { margin-top: 10px; }
+    .tl-loadbar {
+        position: relative; height: 3px; border-radius: 3px;
+        background: var(--line); overflow: hidden;
+    }
+    .tl-loadbar::before {
+        content: ''; position: absolute; top: 0; bottom: 0; left: -40%;
+        width: 40%; border-radius: 3px; background: var(--accent-violet);
+        animation: tl-loadbar 1.05s ease-in-out infinite;
+    }
+    @keyframes tl-loadbar {
+        0%   { left: -40%; }
+        100% { left: 100%; }
+    }
+    .tl-ms-loading__txt {
+        margin-top: 7px; font-size: 11px; color: var(--fg-mute);
+    }
 </style>
 </head>
 <body>
@@ -1245,6 +1272,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
                         <span class="tl-leg"><span class="tl-leg__dot tl-leg__dot--major"></span>주요 변곡점</span>
                         <span class="tl-leg"><span class="tl-leg__dot tl-leg__dot--normal"></span>일반 변경</span>
                     </div>
+                </div>
+                <div id="tl-ms-loading" class="tl-ms-loading hidden">
+                    <div class="tl-loadbar"></div>
+                    <div class="tl-ms-loading__txt">주요 마일스톤을 정리하고 있습니다…</div>
                 </div>
                 <div class="tl-list" id="tl-list"></div>
             </section>
@@ -1375,6 +1406,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             // ── 타임라인 ──
             case 'tlStreaming': tlStreaming(msg.payload); break;
             case 'tlDelta': tlDelta(msg.payload.delta); break;
+            case 'tlSummaryDone': tlSummaryDone(msg.payload); break;
             case 'tlResult': tlResult(msg.payload); break;
             case 'tlEmpty': tlEmpty(msg.payload && msg.payload.message); break;
             // ── 이슈 ──
@@ -1390,33 +1422,60 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
 
     // ─────────────────── 타임라인 렌더 ───────────────────
     let tlText = '';
+    // 상단 요약이 summaryDone 으로 '확정'되면 잠근다 — 이후 마일스톤 토큰(tlDelta)은 상단을 건드리지 않는다.
+    let tlSummaryLocked = false;
     function tlShow(which) {
         document.getElementById('tl-empty').classList.toggle('hidden', which !== 'empty');
         document.getElementById('tl-body').classList.toggle('hidden', which === 'empty');
     }
+    // 스트리밍 중엔 raw JSON 전체가 아니라 summary 값만 뽑아 위에 타이핑하고,
+    // 마일스톤 자리에는 로딩 바를 돌린다(카드는 done(tlResult)에서 확정).
+    function tlPaintStreamingSummary() {
+        const sum = tlExtractStreamingSummary(tlText);
+        document.getElementById('tl-summary').innerHTML = sum
+            ? renderBold(sum) + '<span class="caret"></span>'
+            : '<span class="spinner"></span>AI가 소스 코드를 분석 중입니다…';
+    }
     function tlStreaming(p) {
         tlText = p.text || '';
+        tlSummaryLocked = false;
         document.getElementById('tl-file').textContent = p.fileName || '';
-        // 핵심/배경 분리·접기는 done(tlResult)에서 확정하고, 스트리밍 중엔 캐럿만 띄운다.
-        document.getElementById('tl-summary').innerHTML = tlText
-            ? renderBold(tlText) + '<span class="caret"></span>'
-            : '<span class="spinner"></span>AI가 소스 코드를 분석 중입니다…';
+        // 핵심/배경 분리·접기는 summaryDone/done 에서 확정하고, 스트리밍 중엔 캐럿만 띄운다.
+        tlPaintStreamingSummary();
         document.getElementById('tl-detail-sec').classList.add('hidden');
         document.getElementById('tl-more').classList.add('hidden');
-        document.getElementById('tl-ms-wrap').classList.add('hidden');
+        // 마일스톤 영역: 헤더+로딩 바만 먼저 노출, 카드 목록은 비워 둔다.
+        document.getElementById('tl-list').innerHTML = '';
+        document.getElementById('tl-ms-loading').classList.remove('hidden');
+        document.getElementById('tl-ms-wrap').classList.remove('hidden');
         tlShow('body');
     }
     function tlDelta(delta) {
         tlText += delta;
-        document.getElementById('tl-summary').innerHTML = renderBold(tlText) + '<span class="caret"></span>';
+        // 상단이 확정된 뒤(마일스톤 토큰 구간)에는 상단을 다시 그리지 않는다.
+        if (tlSummaryLocked) { return; }
+        tlPaintStreamingSummary();
+    }
+    // 상단 요약 조기 확정 — 캐럿을 거두고 핵심/배경으로 가른다. 마일스톤은 로딩 바 유지.
+    function tlSummaryDone(p) {
+        if (p && p.fileName) { document.getElementById('tl-file').textContent = p.fileName; }
+        tlFillSummary((p && p.summary) || tlExtractStreamingSummary(tlText));
+        tlSummaryLocked = true;
+        document.getElementById('tl-ms-loading').classList.remove('hidden');
+        document.getElementById('tl-ms-wrap').classList.remove('hidden');
+        tlShow('body');
     }
     function tlResult(p) {
         document.getElementById('tl-file').textContent = p.fileName || '';
         // 요약을 핵심 한 줄 / 자세한 배경으로 가르고 캐럿을 거둔다(블레임 콜아웃과 동일).
-        tlFillSummary(p.summary || '');
+        // 방어: 백엔드가 (드물게) 파싱 못 한 raw JSON 을 summary 로 보내도 골격이 안 새게 한 번 더 건진다.
+        let summary = p.summary || '';
+        if (/^\s*\{[\s\S]*"summary"\s*:/.test(summary)) { summary = tlExtractStreamingSummary(summary) || summary; }
+        tlFillSummary(summary);
         const wrap = document.getElementById('tl-ms-wrap');
         const list = document.getElementById('tl-list');
         list.innerHTML = '';
+        document.getElementById('tl-ms-loading').classList.add('hidden');  // 로딩 바 종료
         // 최신→오래된 내림차순(위가 최근, 아래가 과거).
         const ms = (p.milestones || []).slice().sort((a, b) => String(b.date).localeCompare(String(a.date)));
         if (ms.length) {
@@ -2370,6 +2429,36 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             detail.innerHTML = '';
             sec.classList.add('hidden');
             if (more) { more.classList.add('hidden'); }
+        }
+    }
+    // 스트리밍 중(아직 안 끝난) raw JSON 에서 summary 값만 뽑아낸다.
+    //   raw 예(미완성 가능): '{"summary": "제목\\n상세 일부…'  ← 닫는 따옴표가 아직 없음
+    //   값의 시작/끝 '경계'만 우리가 찾고, 이스케이프(\\n \\" \\\\ \\t \\uXXXX) 복원은
+    //   JSON.parse 에 통째로 맡긴다 — 손으로 풀지 않는다.
+    function tlExtractStreamingSummary(raw) {
+        const s = String(raw || '');
+        const key = s.indexOf('"summary"');
+        if (key < 0) { return ''; }
+        const open = s.indexOf('"', key + 9);   // 값 여는 따옴표
+        if (open < 0) { return ''; }
+        // 값 닫는 따옴표 찾기 — 백슬래시로 이스케이프된 따옴표(\\")는 끝으로 치지 않는다.
+        let end = -1;
+        for (let i = open + 1; i < s.length; i++) {
+            if (s[i] === '\\\\') { i++; continue; }   // 이스케이프된 다음 글자는 통째로 건너뜀
+            if (s[i] === '"') { end = i; break; }
+        }
+        let inner = end >= 0 ? s.slice(open + 1, end) : s.slice(open + 1);
+        // 아직 안 닫힌 스트리밍이면, 끝에 매달린 '미완성 백슬래시'(홀수 개)는 떼어
+        // JSON.parse 가 깨지지 않게 한다(\\u 처럼 뒤가 잘린 이스케이프도 동일 방어).
+        if (end < 0) {
+            const m = inner.match(/(\\\\+)$/);
+            if (m && m[1].length % 2 === 1) { inner = inner.slice(0, -1); }
+            inner = inner.replace(/\\\\u[0-9a-fA-F]{0,3}$/, '');   // 꼬리 잘린 \\uXXXX 방어
+        }
+        try {
+            return JSON.parse('"' + inner + '"');   // 이스케이프 복원은 여기서 자동
+        } catch (e) {
+            return inner;   // 만에 하나 파싱 실패 시 원문 그대로(표시는 됨)
         }
     }
     // 타임라인 요약을 '제목 / 상세'로 가른다 — 토막 방지가 핵심.
