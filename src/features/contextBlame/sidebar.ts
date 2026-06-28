@@ -1149,6 +1149,32 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         margin: 9px 0; padding: 9px 13px; border-left: 2px solid var(--accent-violet);
         background: var(--surface); border-radius: 0 8px 8px 0; color: var(--fg-dim); font-size: 12px; line-height: 1.65;
     }
+    /* 마크다운 본문 요소 — GitHub 풍 서식 */
+    .is-d-body .is-d-p { margin: 7px 0; }
+    .is-d-body .is-d-p:first-child { margin-top: 0; }
+    .is-d-body strong { color: var(--fg); font-weight: 600; }
+    .is-d-body em { font-style: italic; }
+    .is-d-body del { opacity: 0.65; }
+    .is-d-h { color: var(--fg); font-weight: 600; line-height: 1.35; margin: 16px 0 8px; }
+    .is-d-h:first-child { margin-top: 0; }
+    .is-d-h1 { font-size: 16px; padding-bottom: 5px; border-bottom: 1px solid var(--card-line, rgba(255,255,255,0.10)); }
+    .is-d-h2 { font-size: 14.5px; padding-bottom: 4px; border-bottom: 1px solid var(--card-line, rgba(255,255,255,0.08)); }
+    .is-d-h3 { font-size: 13.5px; }
+    .is-d-h4, .is-d-h5, .is-d-h6 { font-size: 12.5px; color: var(--fg-dim); }
+    .is-d-list { margin: 7px 0; padding-left: 20px; }
+    .is-d-list li { margin: 3px 0; }
+    .is-d-link { color: var(--accent-violet, #8b9cff); cursor: pointer; text-decoration: none; }
+    .is-d-link:hover { text-decoration: underline; }
+    .is-d-hr { border: none; border-top: 1px solid var(--card-line, rgba(255,255,255,0.10)); margin: 14px 0; }
+    .is-d-pre {
+        margin: 9px 0; padding: 10px 12px; background: var(--code-bg); border-radius: 8px;
+        overflow-x: auto; font-size: 11.5px; line-height: 1.55;
+    }
+    .is-d-pre code { background: none; padding: 0; color: var(--code-fg); white-space: pre; }
+    .is-d-table { border-collapse: collapse; margin: 10px 0; font-size: 12px; width: 100%; display: block; overflow-x: auto; }
+    .is-d-table th, .is-d-table td { border: 1px solid var(--card-line, rgba(255,255,255,0.12)); padding: 5px 9px; text-align: left; }
+    .is-d-table th { background: var(--surface); color: var(--fg); font-weight: 600; }
+    .is-d-table tr:nth-child(even) td { background: rgba(255,255,255,0.025); }
 
     /* 섹션 헤더(첨부/활동) — 위에 구분선을 둬 본문과 또렷이 가른다. */
     .is-d-sec-title {
@@ -1670,24 +1696,129 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         const safe = attrEsc(cleanUrl(url));
         return '<img class="is-d-bimg" data-action="zoomImage" data-url="' + safe + '" src="' + safe + '" alt="첨부 이미지" loading="lazy"/>';
     }
-    // 인용/개행만 처리하는 본문 텍스트 렌더(이미지 토큰을 걷어낸 조각에 적용).
-    function renderBodyText(text) {
-        const lines = String(text).split('\\n');   // 실제 개행으로 분리
+    // ── GitHub 풍 마크다운 렌더 (이슈 본문/댓글) ─────────────────────
+    // 주의: 이 전체가 TS 템플릿 리터럴 안의 웹뷰 스크립트다. 정규식 백슬래시는
+    // 반드시 이중(\\s, \\n …)으로, 백틱(\`)은 이스케이프해야 템플릿이 깨지지 않는다.
+    // 인라인 마크다운 — 코드/링크/굵게/기울임/취소선. HTML escape 후 적용한다.
+    function renderInline(s) {
+        let t = String(s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        // 인라인 코드(\`...\`)를 먼저 자리표시자로 빼내 다른 규칙의 간섭을 막는다.
+        const codes = [];
+        t = t.replace(/\`([^\`]+)\`/g, (_, c) => {
+            codes.push(c); return '\\u0001' + (codes.length - 1) + '\\u0001';
+        });
+        // 링크 [text](url) → 안전한 링크(클릭 시 openIssue 로 외부에서 연다).
+        t = t.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^)\\s]+)\\)/g, (_, txt, url) =>
+            '<span class="is-d-link" data-action="openIssue" data-url="' + attrEsc(cleanUrl(url)) + '">' + txt + '</span>');
+        // 굵게 → 기울임 → 취소선
+        t = t.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>')
+             .replace(/__([^_]+)__/g, '<strong>$1</strong>')
+             .replace(/\\*([^*]+)\\*/g, '<em>$1</em>')
+             .replace(/~~([^~]+)~~/g, '<del>$1</del>');
+        // 코드 자리표시자 복원
+        t = t.replace(/\\u0001(\\d+)\\u0001/g, (_, i) => '<code>' + codes[+i] + '</code>');
+        return t;
+    }
+    // 파이프 표의 한 행을 셀 배열로 — 양끝 파이프를 떼고 '|' 로 나눈다.
+    function splitRow(row) {
+        return String(row).trim().replace(/^\\|/, '').replace(/\\|$/, '')
+            .split('|').map(c => c.trim());
+    }
+    function alignAttr(a) { return a ? ' style="text-align:' + a + '"' : ''; }
+    // 블록 마크다운 — 제목/목록/표/코드펜스/인용/구분선/문단을 그린다.
+    function renderMarkdownBlocks(text) {
+        const lines = String(text).split('\\n');
         let html = '';
-        let quote = [];
-        const flush = () => {
-            if (quote.length) {
-                html += '<blockquote class="is-d-quote">' + quote.map(renderBold).join('<br/>') + '</blockquote>';
-                quote = [];
+        let i = 0;
+        let para = [];
+        const flushPara = () => {
+            if (para.length) {
+                html += '<p class="is-d-p">' + para.map(renderInline).join('<br/>') + '</p>';
+                para = [];
             }
         };
-        lines.forEach(ln => {
-            const m = /^\\s*>\\s?(.*)$/.exec(ln);
-            if (m) { quote.push(m[1]); }
-            else { flush(); html += ln.trim() ? (renderBold(ln) + '<br/>') : '<br/>'; }
-        });
-        flush();
+        while (i < lines.length) {
+            const ln = lines[i];
+            // 코드 펜스 \`\`\`lang … \`\`\`
+            if (/^\\s*\`\`\`/.test(ln)) {
+                flushPara();
+                const buf = [];
+                i++;
+                while (i < lines.length && !/^\\s*\`\`\`\\s*$/.test(lines[i])) { buf.push(lines[i]); i++; }
+                i++; // 닫는 펜스 소비
+                const code = buf.join('\\n')
+                    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                html += '<pre class="is-d-pre"><code>' + code + '</code></pre>';
+                continue;
+            }
+            // 가로 구분선 ---  ***  ___
+            if (/^\\s*([-*_])(\\s*\\1){2,}\\s*$/.test(ln)) {
+                flushPara(); html += '<hr class="is-d-hr"/>'; i++; continue;
+            }
+            // 제목 # ~ ######
+            const head = /^\\s*(#{1,6})\\s+(.*)$/.exec(ln);
+            if (head) {
+                flushPara();
+                const lvl = head[1].length;
+                html += '<h' + lvl + ' class="is-d-h is-d-h' + lvl + '">'
+                     + renderInline(head[2].replace(/\\s*#+\\s*$/, '')) + '</h' + lvl + '>';
+                i++; continue;
+            }
+            // GFM 파이프 표 — 현재 줄에 '|', 다음 줄이 구분행(---|---)이면.
+            if (/\\|/.test(ln) && i + 1 < lines.length
+                && /^\\s*\\|?\\s*:?-+:?\\s*(\\|\\s*:?-+:?\\s*)+\\|?\\s*$/.test(lines[i + 1])) {
+                flushPara();
+                const aligns = splitRow(lines[i + 1]).map(c => {
+                    const l = /^:/.test(c); const r = /:$/.test(c);
+                    return r ? (l ? 'center' : 'right') : (l ? 'left' : '');
+                });
+                let tbl = '<table class="is-d-table"><thead><tr>';
+                splitRow(ln).forEach((c, k) => { tbl += '<th' + alignAttr(aligns[k]) + '>' + renderInline(c) + '</th>'; });
+                tbl += '</tr></thead><tbody>';
+                i += 2;
+                while (i < lines.length && /\\|/.test(lines[i]) && lines[i].trim()) {
+                    tbl += '<tr>';
+                    splitRow(lines[i]).forEach((c, k) => { tbl += '<td' + alignAttr(aligns[k]) + '>' + renderInline(c) + '</td>'; });
+                    tbl += '</tr>'; i++;
+                }
+                html += tbl + '</tbody></table>';
+                continue;
+            }
+            // 인용 > … (연속 줄을 묶어 재귀 렌더)
+            if (/^\\s*>\\s?/.test(ln)) {
+                flushPara();
+                const q = [];
+                while (i < lines.length && /^\\s*>\\s?/.test(lines[i])) {
+                    q.push(lines[i].replace(/^\\s*>\\s?/, '')); i++;
+                }
+                html += '<blockquote class="is-d-quote">' + renderMarkdownBlocks(q.join('\\n')) + '</blockquote>';
+                continue;
+            }
+            // 목록 — 순서 없는(-,*,+) / 순서 있는(1.)
+            if (/^\\s*([-*+]|\\d+\\.)\\s+/.test(ln)) {
+                flushPara();
+                const ordered = /^\\s*\\d+\\.\\s+/.test(ln);
+                const items = [];
+                while (i < lines.length && /^\\s*([-*+]|\\d+\\.)\\s+/.test(lines[i])) {
+                    items.push(lines[i].replace(/^\\s*([-*+]|\\d+\\.)\\s+/, '')); i++;
+                }
+                const tag = ordered ? 'ol' : 'ul';
+                html += '<' + tag + ' class="is-d-list">'
+                     + items.map(it => '<li>' + renderInline(it) + '</li>').join('')
+                     + '</' + tag + '>';
+                continue;
+            }
+            // 빈 줄 → 문단 분리, 그 외 → 문단 누적
+            if (!ln.trim()) { flushPara(); i++; continue; }
+            para.push(ln); i++;
+        }
+        flushPara();
         return html;
+    }
+    // 이슈 본문 텍스트 렌더(이미지 토큰을 걷어낸 조각에 적용) — 풀 마크다운.
+    function renderBodyText(text) {
+        return renderMarkdownBlocks(text);
     }
     // 본문을 이미지 토큰(HTML <img src> / 마크다운 ![alt](url)) 기준으로 쪼개,
     // 이미지는 인라인 미리보기로, 나머지는 텍스트로 렌더한다.
@@ -2428,8 +2559,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         el.appendChild(head);
         if (c.body) {
             const body = document.createElement('div');
-            body.className = 'is-cmt__body';
-            body.innerHTML = renderBold(c.body);
+            body.className = 'is-cmt__body is-d-body';
+            body.innerHTML = renderIssueBodyHTML(c.body);
             el.appendChild(body);
         }
         (c.attachments || []).forEach(a => el.appendChild(renderAttachment(a)));
