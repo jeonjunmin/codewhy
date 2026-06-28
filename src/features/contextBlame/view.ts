@@ -276,9 +276,15 @@ function streamBlameInto(args: { filePath: string; line: number; repoPath: strin
             // degraded(Bedrock 폴백)는 일시적 실패이므로 캐싱하지 않는다(다음 분석 때 자동 회복).
             if (!result.aiDegraded) { blameCache.set(key, { ctx, result }); }
             updateStatusBar(args.line, result);
-            // meta 를 본 경우(스트리밍)는 콜아웃 확정만, 아니면(노이즈 JSON 즉답) 전체 렌더 + 탭 전환.
+            // meta 를 본 경우(스트리밍)는 콜아웃 확정만, 아니면(캐시 적중/노이즈 JSON 즉답) 전체 렌더 + 탭 전환.
             if (metaSeen) { sidebar!.blameResult(ctx, result); }
-            else { pushToSidebar(ctx, result, true); }
+            else {
+                // 백엔드가 단일 JSON 으로 즉답한 경로 — meta 프레임이 없어 onMeta 의
+                // applyLineTitles 가 돌지 않는다. 라인 이력이 원본 커밋 메시지로 남지 않도록
+                // 여기서 직접 타이틀 다듬기를 건다(스트리밍 meta 경로와 동일하게).
+                pushToSidebar(ctx, result, true);
+                void applyLineTitles(result.lineHistory, args);
+            }
         },
         onError: (message) => vscode.window.showErrorMessage(`돋보기 실패: ${message}`),
     }).catch((err) => vscode.window.showErrorMessage(`돋보기 실패: ${(err as Error).message}`));
