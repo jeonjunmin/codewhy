@@ -39,7 +39,39 @@ let currentFilePath = '';
 let currentCursorLine = -1;
 let initialized = false;
 
+// AI 라인 타이틀의 영구 저장소(globalState). 재시작 후에도 살아남아 스켈레톤/원문 깜빡임을 없앤다.
+let titleStore: vscode.Memento | undefined;
+
 const cacheKey = (filePath: string, line: number) => `${filePath}:${line}`;
+
+/**
+ * 커밋 해시 → AI 가 다듬은 라인 타이틀의 영구 캐시.
+ *
+ * 키가 '커밋 해시'(전역·불변)라 워크스페이스/파일/라인이 달라도 안전하게 공유·재사용된다.
+ * blameCache(파일:라인 키)는 파일 편집으로 라인이 밀리면 stale 해져 영속화가 위험하지만,
+ * 이 타이틀 캐시는 해시가 바뀌지 않는 한 영원히 유효하므로 globalState 에 그대로 둔다.
+ */
+const TITLE_CACHE_KEY = 'codewhy.blame.lineTitles';
+
+function loadTitleCache(): Record<string, string> {
+    return titleStore?.get<Record<string, string>>(TITLE_CACHE_KEY, {}) ?? {};
+}
+
+function saveTitleCache(titles: Record<string, string>) {
+    if (!titleStore || Object.keys(titles).length === 0) { return; }
+    void titleStore.update(TITLE_CACHE_KEY, { ...loadTitleCache(), ...titles });
+}
+
+/** 영구 타이틀 캐시에서 특정 커밋들을 제거한다(돋보기 캐시 비우기 → 재다듬기 강제용). */
+function evictTitleCache(hashes: string[]) {
+    if (!titleStore || hashes.length === 0) { return; }
+    const cache = loadTitleCache();
+    let changed = false;
+    for (const h of hashes) {
+        if (h in cache) { delete cache[h]; changed = true; }
+    }
+    if (changed) { void titleStore.update(TITLE_CACHE_KEY, cache); }
+}
 
 /** `codewhy.*` 설정값을 읽는다(미설정 시 fallback). 토글 게이트용 헬퍼. */
 const cfg = <T>(key: string, fallback: T): T =>
@@ -71,6 +103,9 @@ function ensureInitialized(context: vscode.ExtensionContext) {
     if (initialized) { return; }
     initialized = true;
 
+    // 영구 라인 타이틀 캐시를 globalState 에 연결한다(재시작 후에도 살아남음).
+    titleStore = context.globalState;
+
     statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     context.subscriptions.push(statusBar);
 
@@ -101,6 +136,10 @@ function ensureInitialized(context: vscode.ExtensionContext) {
             webviewOptions: { retainContextWhenHidden: true },
         }),
     );
+
+    // 영구 캐시에 쌓인 AI 라인 타이틀을 provider 에 미리 실어, 재시작 직후 첫 렌더부터
+    // 스켈레톤/원문 깜빡임 없이 즉시 다듬은 제목을 보여준다.
+    sidebar.seedHistoryTitles(loadTitleCache());
 
     // ── HoverProvider — 캐시에 분석 결과가 있는 라인만 짧은 마크다운 팝업
     context.subscriptions.push(
@@ -166,7 +205,11 @@ function ensureInitialized(context: vscode.ExtensionContext) {
         }),
     );
 
-    // ── 커서 이동 감지 → CodeLens 위치 갱신 + 캐시 있으면 사이드바 자동 갱신
+    // ── 커서 이동 감지 → CodeLens 위치만 갱신(🔍 렌즈가 커서를 따라가도록)
+    //    사이드바(라인 수정 이력 포함)는 여기서 갱신하지 않는다.
+    //    조회/표시는 오직 명시적 액션 — 우클릭 메뉴(codewhy.contextBlame), 돋보기 렌즈
+    //    클릭(codewhy.blame.analyzeAndShow), 탭 클릭 — 에서만 일어난다. 커서가 움직일
+    //    때마다 패널을 다시 그리면(스켈레톤 깜빡임) "또 조회하는" 것처럼 보이기 때문.
     context.subscriptions.push(
         vscode.window.onDidChangeTextEditorSelection(e => {
             const newLine = e.selections[0].active.line;
@@ -175,10 +218,6 @@ function ensureInitialized(context: vscode.ExtensionContext) {
                 currentCursorLine = newLine;
                 currentFilePath = newPath;
                 codeLensEmitter!.fire();
-
-                // 이미 분석된 라인이면 사이드바도 그 라인으로 따라간다
-                const entry = blameCache.get(cacheKey(newPath, newLine + 1));
-                if (entry) { pushToSidebar(entry.ctx, entry.result); }
             }
         }),
         vscode.window.onDidChangeActiveTextEditor(editor => {
@@ -315,8 +354,10 @@ export async function runClearTimelineCache() {
 /**
  * 현재 파일의 돋보기(블레임) 설명 캐시를 비우기만 한다(재분석은 하지 않음 — 타임라인 캐시 비우기와 동일).
  *
- * 캐시는 두 층이다 — 백엔드 blame_explanations + 확장 메모리 blameCache(라인별). 둘 다 비워야
- * 다음에 라인을 클릭할 때 캐시 미스가 나며 최신 형식으로 재분석된다(인메모리만 남으면 옛 결과로 적중).
+ * 캐시는 세 층이다 — 백엔드 blame_explanations + 확장 메모리 blameCache(라인별) +
+ * 영구 라인 타이틀 캐시(globalState, 커밋 해시별). 셋 다 비워야 다음에 라인을 클릭할 때
+ * 캐시 미스가 나며 최신 형식으로 재분석된다(인메모리만 남으면 옛 결과로 적중하고, 영구 타이틀
+ * 캐시가 남으면 applyLineTitles 가 캐시 적중으로 백엔드를 건너뛰어 옛 제목이 그대로 나온다).
  * 비운 직후 자동 재분석은 하지 않으므로, 화면은 사용자가 라인을 다시 누를 때 갱신된다.
  */
 export async function runClearBlameCache() {
@@ -331,6 +372,9 @@ export async function runClearBlameCache() {
         for (const key of [...blameCache.keys()]) {
             if (key.startsWith(ctx.filePath + ':')) { blameCache.delete(key); }
         }
+
+        // 영구 타이틀 캐시에서 이 파일의 커밋들을 제거한다 — 재분석이 새 제목을 다시 받도록.
+        evictTitleCache(collectGitLog(ctx.repoPath, ctx.filePath).map(c => c.hash));
 
         vscode.window.showInformationMessage(
             deleted > 0
@@ -524,12 +568,31 @@ function collectFileChangeSignals(repoPath: string, filePath: string): Map<strin
  * 라인 수정 이력의 행 타이틀을 'AI 가 다듬은 한 줄'로 진행형 교체한다.
  * 목록은 이미 원본 커밋 메시지로 즉시 렌더된 상태 — 여기서는 사후에 비동기로 다듬어 갈아끼운다.
  * 실제 변경(diff) 신호를 함께 실어, 모호한 메시지도 코드 변경 기준으로 다듬도록 grounding 한다.
+ *
+ * 2겹 캐시 전략:
+ *   1) 영구 캐시(globalState)에 이미 있는 커밋은 즉시 드러낸다 — 재시작 후에도 백엔드 호출 0,
+ *      스켈레톤/원문 깜빡임 없음(증상 1 해결).
+ *   2) 캐시에 없는 커밋만 백엔드에 요청하고, 받은 타이틀을 영구 캐시에 적재해 다음 재시작에 대비.
+ *      전부 캐시 적중이면 백엔드 호출 자체를 건너뛴다.
  */
 async function applyLineTitles(
     lineHistory: { hash: string; subject: string }[] | undefined,
     ctx: { filePath: string; repoPath: string; line: number },
 ) {
     if (!sidebar || !lineHistory || lineHistory.length === 0) { return; }
+
+    // 1) 영구 캐시 적중분 — 즉시 표시.
+    const cache = loadTitleCache();
+    const cachedHere: Record<string, string> = {};
+    for (const h of lineHistory) {
+        if (cache[h.hash]) { cachedHere[h.hash] = cache[h.hash]; }
+    }
+    if (Object.keys(cachedHere).length > 0) { sidebar.setHistoryTitles(cachedHere); }
+
+    // 2) 캐시에 없는 커밋만 다듬어 받는다. 전부 적중이면 여기서 끝(백엔드 호출 없음).
+    const missing = lineHistory.filter(h => !cache[h.hash]);
+    if (missing.length === 0) { return; }
+
     let titles: Record<string, string> = {};
     const t0 = Date.now();
     let tGit = t0;
@@ -538,22 +601,25 @@ async function applyLineTitles(
         // 라인 단위 -L diff 는 출력이 작아 동기 호출로도 확장 호스트를 의미있게 막지 않는다.
         const signals = localGit.getLineChangeSignals(ctx.repoPath, ctx.filePath, ctx.line);
         tGit = Date.now();
-        const commits = lineHistory.map(h => {
+        const commits = missing.map(h => {
             const s = signals.get(h.hash);
             return s
                 ? { hash: h.hash, subject: h.subject || '', linesAdded: s.added, linesRemoved: s.removed, changedSymbols: s.symbols, changedLines: s.changedLines }
                 : { hash: h.hash, subject: h.subject || '' };
         });
         titles = await fetchLineTitles({ filePath: ctx.filePath, repoPath: ctx.repoPath, commits });
+        // 다듬은 타이틀을 영구 캐시에 적재 — 다음 재시작부터는 위 1) 경로로 즉시 복원된다.
+        saveTitleCache(titles);
         // 진단: 클라이언트 구간(git -L vs 네트워크) 지연 + 받은 타이틀이 원본과 다른지.
-        const changed = lineHistory.filter(h => titles[h.hash] && titles[h.hash] !== (h.subject || '')).length;
-        console.log(`[CodeWhy line-titles] git=${tGit - t0}ms fetch=${Date.now() - tGit}ms rows=${lineHistory.length} refined=${changed}`, titles);
+        const changed = missing.filter(h => titles[h.hash] && titles[h.hash] !== (h.subject || '')).length;
+        console.log(`[CodeWhy line-titles] git=${tGit - t0}ms fetch=${Date.now() - tGit}ms rows=${missing.length} refined=${changed}`, titles);
     } catch (e) {
         // 실패 → 원본 메시지를 타이틀로 실어, 웹뷰가 스켈레톤을 풀고 원본으로 즉시 드러내게 한다.
-        titles = Object.fromEntries(lineHistory.map(h => [h.hash, h.subject || '']));
+        // (원문은 영구 캐시에 적재하지 않는다 — 다음 호출 때 백엔드가 살아 있으면 다시 다듬도록.)
+        titles = Object.fromEntries(missing.map(h => [h.hash, h.subject || '']));
         console.log(`[CodeWhy line-titles] FAILED after ${Date.now() - t0}ms — 원본 폴백`, e);
     }
-    // 성공/실패 무관하게 항상 호출 — 모든 행의 스켈레톤이 한 번에 해제되어야 한다.
+    // 성공/실패 무관하게 항상 호출 — 남은 행의 스켈레톤이 한 번에 해제되어야 한다.
     sidebar.setHistoryTitles(titles);
 }
 

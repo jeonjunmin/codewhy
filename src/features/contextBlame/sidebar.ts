@@ -187,6 +187,13 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         this.view?.webview.postMessage({ type: 'historyTitles', payload: { titles } });
     }
 
+    /** 영구 캐시(globalState)에 보관돼 있던 AI 라인 타이틀을 초기 주입한다.
+     * 확장 활성화 직후(웹뷰가 아직 없을 때) 호출돼, 첫 렌더부터 보관된 타이틀로
+     * 스켈레톤을 즉시 메우게 한다. postMessage 는 view 가 없으면 자연히 생략된다. */
+    seedHistoryTitles(titles: Record<string, string>) {
+        this.lastLineTitles = { ...titles, ...this.lastLineTitles };
+    }
+
     /** 라인 이력을 (재)렌더한 직후 호출 — 보관해 둔 타이틀로 스켈레톤을 즉시 드러낸다. */
     private postLineTitles() {
         if (!this.ready || Object.keys(this.lastLineTitles).length === 0) { return; }
