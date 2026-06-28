@@ -117,10 +117,12 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    /** Context Blame 분석이 끝났을 때 view.ts 에서 호출. */
-    setBlame(ctx: EditorContext, result: BlameResult, pinned: boolean) {
+    /** Context Blame 분석이 끝났을 때 view.ts 에서 호출. activate=true 면 돋보기 탭으로 전환한다. */
+    setBlame(ctx: EditorContext, result: BlameResult, pinned: boolean, activate = false) {
         this.last = { ctx, result, pinned };
-        log('sidebar', 'setBlame', { hasView: !!this.view, ready: this.ready });
+        // 명시적 트리거면 활성 탭을 돋보기로 고정 — 웹뷰 재로드(flushPending) 후에도 돋보기가 유지된다.
+        if (activate) { this.activeTab = 'blame'; }
+        log('sidebar', 'setBlame', { hasView: !!this.view, ready: this.ready, activate });
         if (!this.view) {
             // 사이드바가 아직 안 열려 있으면 강제로 표시한다 — 첫 분석 시 자연스럽게 펼쳐짐
             log('sidebar', `view 없음 → ${VIEW_ID}.focus 실행`);
@@ -139,7 +141,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         }
         // 확정 렌더가 진행 중이던 스트림을 대체한다(커서 이동/캐시 적중 등).
         this.lastBlameStream = undefined;
-        this.postRender(ctx, result, pinned);
+        this.postRender(ctx, result, pinned, activate);
     }
 
     // ─── 블레임 탭 스트리밍 (개발자 A) ─────────────────────────────────────
@@ -414,14 +416,14 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         this.view?.webview.postMessage({ type: 'empty' });
     }
 
-    private postRender(ctx: EditorContext, r: BlameResult, pinned: boolean) {
+    private postRender(ctx: EditorContext, r: BlameResult, pinned: boolean, activate = false) {
         // commitHash 가 비면 분석할 커밋 이력이 없는 경우(미커밋 라인 등) — 백엔드의
         // uncommitted_response. 메타/관련변경/CTA 는 채울 게 없으므로 안내 문구만 표시한다.
         if (!r.commitHash) {
             log('sidebar', 'commitHash 없음 → info 안내 상태로 렌더');
             this.view?.webview.postMessage({
                 type: 'info',
-                payload: { message: r.explanation || '이 라인의 변경 이력을 찾을 수 없습니다.' },
+                payload: { message: r.explanation || '이 라인의 변경 이력을 찾을 수 없습니다.', activate },
             });
             return;
         }
@@ -445,6 +447,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             lineHistory: r.lineHistory ?? [],
             lineIssues: r.lineIssues ?? [],
             pinned,
+            activate,   // true 면 웹뷰가 이 렌더와 함께 돋보기 탭으로 전환(단일 메시지라 경합 없음)
         };
         this.view?.webview.postMessage({ type: 'render', payload });
         this.postLineTitles();   // 재방문 시 스켈레톤을 보관된 타이틀로 즉시 메운다.
@@ -453,6 +456,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     // ─── 한 번만 그리는 HTML 빨대 컵 ──────────────────────────────────────
     private renderHtml(): string {
         const nonce = randomNonce();
+        // 환영 화면 상단 로고 — 로컬 png 는 웹뷰 URI 로 변환해야 CSP(img-src cspSource)를 통과한다.
+        const iconUri = this.view?.webview.asWebviewUri(
+            vscode.Uri.joinPath(this.extensionUri, 'images', 'icon-128.png'),
+        ) ?? '';
         const csp = [
             `default-src 'none'`,
             `style-src ${this.view?.webview.cspSource ?? "'self'"} 'unsafe-inline'`,
@@ -536,20 +543,17 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     /* ── 환영(온보딩) 화면 — 설치 직후 첫 화면 ─────────────────────── */
     .hero {
         display: flex; flex-direction: column; align-items: center; text-align: center;
-        padding: 40px 24px 28px;
-        gap: 14px;
+        padding: 30px 18px 24px;
+        gap: 12px;
     }
-    .hero__badge {
-        width: 64px; height: 64px; border-radius: 18px;
-        display: inline-flex; align-items: center; justify-content: center;
-        background: linear-gradient(135deg, rgba(103,232,249,0.18) 0%, rgba(167,139,250,0.22) 100%);
-        border: 1px solid var(--line-soft);
-        box-shadow: 0 0 28px rgba(167,139,250,0.30);
-        color: var(--accent-violet);
-        margin-bottom: 4px;
+    /* 앱 로고 — images/icon-128.png 를 웹뷰 URI 로 주입 */
+    .hero__logo {
+        width: 76px; height: 76px; border-radius: 20px;
+        margin-bottom: 2px;
+        box-shadow: 0 0 34px rgba(167,139,250,0.30);
     }
     .hero__title {
-        margin: 0; font-size: 18px; font-weight: 700; color: var(--fg);
+        margin: 0; font-size: 19px; font-weight: 700; color: var(--fg);
         letter-spacing: -0.01em;
     }
     .hero__desc {
@@ -557,24 +561,57 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         color: var(--fg-dim); font-size: 13px; line-height: 1.65;
     }
     .hero__desc strong { color: var(--fg); font-weight: 700; }
-    .hero__cta {
-        width: 100%; max-width: 340px; margin-top: 6px;
-        display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-        padding: 12px 16px; border: none; border-radius: 12px;
-        background: var(--grad); color: #fff;
-        font-family: inherit; font-size: 14px; font-weight: 700; cursor: pointer;
-        box-shadow: 0 6px 20px rgba(109,40,217,0.35);
-        transition: filter 0.12s, transform 0.06s;
+
+    /* 카드 묶음 위 안내 라벨 */
+    .hero__hint {
+        align-self: flex-start;
+        margin-top: 14px;
+        color: var(--fg-mute); font-size: 11.5px; font-weight: 500;
     }
-    .hero__cta:hover { filter: brightness(1.08); }
-    .hero__cta:active { transform: translateY(1px); }
-    .hero__cta span { display: inline-flex; }
-    .hero__status {
-        display: inline-flex; align-items: center; gap: 6px;
-        margin-top: 4px;
-        color: #4ADE80; font-size: 11.5px;
+
+    /* 세 기능 카드 — 각 카드가 해당 탭으로 전환 + 분석을 트리거한다 */
+    .hero__cards {
+        width: 100%;
+        display: flex; flex-direction: column; gap: 10px;
+        margin-top: 2px;
     }
-    .hero__status span { display: inline-flex; }
+    .hero-card {
+        --card-accent: var(--accent-violet);
+        display: flex; align-items: flex-start; gap: 12px;
+        width: 100%; text-align: left;
+        padding: 14px; border-radius: 14px;
+        background: var(--surface); border: 1px solid var(--line);
+        font-family: inherit; cursor: pointer;
+        transition: border-color .12s ease, background .12s ease, transform .06s ease;
+    }
+    .hero-card:hover {
+        background: #1D1D21;
+        border-color: var(--card-accent);
+    }
+    .hero-card:active { transform: translateY(1px); }
+    .hero-card--blame    { --card-accent: var(--accent-cyan); --card-soft: rgba(103,232,249,0.13); --card-line: rgba(103,232,249,0.30); }
+    .hero-card--timeline { --card-accent: var(--accent-violet); --card-soft: rgba(167,139,250,0.14); --card-line: rgba(167,139,250,0.32); }
+    .hero-card--issue    { --card-accent: #5EEAD4; --card-soft: rgba(94,234,212,0.13); --card-line: rgba(94,234,212,0.30); }
+    .hero-card__ico {
+        flex-shrink: 0; width: 40px; height: 40px; border-radius: 11px;
+        display: inline-flex; align-items: center; justify-content: center;
+        color: var(--card-accent);
+        background: var(--card-soft);
+        border: 1px solid var(--card-line);
+    }
+    .hero-card__body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+    .hero-card__tag {
+        color: var(--card-accent); font-size: 10.5px; font-weight: 700;
+        letter-spacing: 0.02em;
+    }
+    .hero-card__title { color: var(--fg); font-size: 13.5px; font-weight: 700; line-height: 1.35; }
+    .hero-card__desc { color: var(--fg-dim); font-size: 11.5px; line-height: 1.5; }
+
+    /* 하단 안내 — 클릭을 유도하는 옅은 한 줄 */
+    .hero__foot {
+        margin-top: 12px;
+        color: var(--fg-mute); font-size: 11px;
+    }
 
     /* ── 안내 상태: 커밋 이력 없음(미커밋 라인 등) ────────────────── */
     .info {
@@ -1233,11 +1270,40 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     <div id="pane-blame" class="pane">
     <!-- 설치 직후 첫 화면(환영/온보딩). 탭 바는 이 상태에서 숨기고, 분석 시작·칩 클릭 시 노출한다. -->
     <div id="empty" class="hero">
-        <div class="hero__badge"><span id="ico-hero-shield"></span></div>
+        <img class="hero__logo" src="${iconUri}" alt="CodeWhy" />
         <h1 class="hero__title">이 파일, 왜 이렇게 짰을까?</h1>
-        <p class="hero__desc">CodeWhy가 커밋 히스토리와 기획서를 읽어<br/><strong>모든 결정의 이유</strong>를 이 자리에 정리해 드립니다.</p>
-        <button class="hero__cta" data-action="analyzeFile"><span id="ico-hero-spark"></span> 이 파일 분석하기</button>
-        <div class="hero__status"><span id="ico-hero-check"></span> 저장소 연결됨</div>
+        <p class="hero__desc">CodeWhy가 커밋 히스토리와 이슈를 읽어<br/><strong>모든 결정의 이유</strong>를 이 자리에 정리해 드립니다.</p>
+
+        <div class="hero__hint">분석하면 이런 것들을 볼 수 있어요</div>
+
+        <div class="hero__cards">
+            <button class="hero-card hero-card--blame" data-action="heroCard" data-tab="blame">
+                <span class="hero-card__ico" id="ico-card-blame"></span>
+                <span class="hero-card__body">
+                    <span class="hero-card__tag">돋보기</span>
+                    <span class="hero-card__title">이 코드, 왜 바꿨어?</span>
+                    <span class="hero-card__desc">한 줄을 집으면 변경 이유와 근거가 된 이슈 링크까지.</span>
+                </span>
+            </button>
+            <button class="hero-card hero-card--timeline" data-action="heroCard" data-tab="timeline">
+                <span class="hero-card__ico" id="ico-card-timeline"></span>
+                <span class="hero-card__body">
+                    <span class="hero-card__tag">타임라인</span>
+                    <span class="hero-card__title">이 코드, 어떤 역사를 거쳐왔어?</span>
+                    <span class="hero-card__desc">수많은 변경을 읽어 핵심 변화만 마일스톤으로 묶어요.</span>
+                </span>
+            </button>
+            <button class="hero-card hero-card--issue" data-action="heroCard" data-tab="issue">
+                <span class="hero-card__ico" id="ico-card-issue"></span>
+                <span class="hero-card__body">
+                    <span class="hero-card__tag">이슈</span>
+                    <span class="hero-card__title">이 코드, 누가 왜 만들라 했어?</span>
+                    <span class="hero-card__desc">커밋→PR→이슈로 거슬러 올라가 전용 AI와 대화해요.</span>
+                </span>
+            </button>
+        </div>
+
+        <div class="hero__foot">클릭으로 그 코드의 이야기가 시작됩니다</div>
     </div>
 
     <div id="info" class="info hidden">
@@ -1384,8 +1450,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         caret:  '<svg width="9" height="9" viewBox="0 0 16 16" fill="currentColor"><path d="M6 3.5l5.5 4.5L6 12.5z"/></svg>',
         search: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>',
         check:'<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 8.5l3.2 3.2L13 4.5"/></svg>',
-        shieldBig: '<svg width="30" height="30" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.1"><path d="M8 1l6 2v5c0 4-2.8 6.6-6 7-3.2-.4-6-3-6-7V3l6-2z"/><path d="M5.5 8l1.8 1.8L11 6" stroke-width="1.3"/></svg>',
-        sparkBig: '<svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l1.5 4.5L14 7l-4.5 1.5L8 13l-1.5-4.5L2 7l4.5-1.5L8 1z"/></svg>',
+        // 환영 화면 기능 카드 배지(18px) — 돋보기/타임라인/이슈
+        searchBig:  '<svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>',
+        slidersBig: '<svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M2 4.5h6M12 4.5h2M2 11.5h2M8 11.5h6"/><circle cx="10" cy="4.5" r="1.7" fill="currentColor" stroke="none"/><circle cx="6" cy="11.5" r="1.7" fill="currentColor" stroke="none"/></svg>',
+        targetBig:  '<svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="5.5"/><circle cx="8" cy="8" r="1.8" fill="currentColor" stroke="none"/><path d="M8 0.5v2M8 13.5v2M0.5 8h2M13.5 8h2"/></svg>',
         // 코멘트 수 칩 — 이모지(💬) 대신 SVG 말풍선(웹뷰 폰트에서 깨지지 않음).
         comment: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M2 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H6.5L4 13.5V11H3a1 1 0 0 1-1-1V4z"/></svg>',
         // 첨부 수 칩 — 이모지(📎) 대신 SVG 클립.
@@ -1402,9 +1470,9 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         setIcon('ico-tab-blame', ICON.search);   // '돋보기' 탭 — 용어에 맞춰 돋보기 아이콘
         setIcon('ico-tab-timeline', ICON.clock);
         setIcon('ico-tab-issue', ICON.branch);
-        setIcon('ico-hero-shield', ICON.shieldBig);
-        setIcon('ico-hero-spark', ICON.sparkBig);
-        setIcon('ico-hero-check', ICON.check);
+        setIcon('ico-card-blame', ICON.searchBig);
+        setIcon('ico-card-timeline', ICON.slidersBig);
+        setIcon('ico-card-issue', ICON.targetBig);
         setIcon('ico-is-search', ICON.search);
         setIcon('ico-is-cbanner', ICON.issue);
         setIcon('ico-tl-clear', ICON.trash);
@@ -1424,7 +1492,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
             case 'blResult': blResult(msg.payload); break;
             case 'historyReason': fillHistoryReason(msg.payload.hash, msg.payload.reason); break;
             case 'historyTitles': applyHistoryTitles(msg.payload.titles); break;
-            case 'info': showInfo(msg.payload.message); break;
+            case 'info': if (msg.payload.activate) { showTab('blame'); } showInfo(msg.payload.message); break;
             case 'empty':
                 document.getElementById('info').classList.add('hidden');
                 document.getElementById('empty').classList.remove('hidden');
@@ -2601,6 +2669,9 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     function render(p) {
+        // 명시적 돋보기 트리거면 이 렌더와 같은 메시지로 탭을 전환한다(별도 activateTab 메시지의
+        // 타이밍 경합으로 '2번 눌러야 전환'되던 문제를 막는다). 커서 따라가기(activate 없음)는 안 건드린다.
+        if (p.activate) { showTab('blame'); }
         document.getElementById('empty').classList.add('hidden');
         document.getElementById('info').classList.add('hidden');
         document.getElementById('content').classList.remove('hidden');
@@ -2779,11 +2850,12 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     document.body.addEventListener('click', (e) => {
         const el = e.target.closest('[data-action]');
         if (!el) return;
-        // 환영 화면 CTA — 현재 커서 라인 기준으로 블레임 분석을 시작한다.
-        if (el.dataset.action === 'analyzeFile') {
+        // 환영 화면 기능 카드 — 해당 탭으로 전환하고 현재 커서 라인 기준 분석을 시작한다.
+        if (el.dataset.action === 'heroCard') {
+            const tab = el.dataset.tab === 'timeline' || el.dataset.tab === 'issue' ? el.dataset.tab : 'blame';
             revealTabs(true);
-            showTab('blame');
-            vscode.postMessage({ type: 'switchTab', payload: { tab: 'blame' } });
+            showTab(tab);
+            vscode.postMessage({ type: 'switchTab', payload: { tab } });
             return;
         }
         // 타임라인 파일명 옆 휴지통 — 이 파일의 타임라인 캐시를 비운다(확장이 명령 실행).
