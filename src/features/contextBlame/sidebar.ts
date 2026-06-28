@@ -1345,7 +1345,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
 
     <!-- ─────────────── 타임라인 탭 ─────────────── -->
     <div id="pane-timeline" class="pane hidden">
-        <div id="tl-empty" class="empty">파일을 연 뒤 <strong>타임라인</strong> 탭을 누르면<br/>이 파일의 변경 역사를 요약해 드립니다.</div>
+        <div id="tl-empty" class="info">
+            <span class="info__icon" id="ico-tl-empty"></span>
+            <div class="info__text">파일을 연 뒤 <strong>타임라인</strong> 탭을 누르면<br/>이 파일의 변경 역사를 요약해 드립니다.</div>
+        </div>
         <div id="tl-body" class="body hidden">
             <div class="crumb">
                 <span class="mono crumb__file" id="tl-file"></span>
@@ -1379,7 +1382,10 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
 
     <!-- ─────────────── 이슈 탭 ─────────────── -->
     <div id="pane-issue" class="pane hidden">
-        <div id="is-empty" class="empty"><strong>이슈</strong> 탭을 누르면 이 파일과<br/>연관된 GitHub Issue·기획서를 찾아 드립니다.</div>
+        <div id="is-empty" class="info">
+            <span class="info__icon" id="ico-is-empty"></span>
+            <div class="info__text"><strong>이슈</strong> 탭을 누르면 이 파일과<br/>연관된 GitHub Issue·기획서를 찾아 드립니다.</div>
+        </div>
         <div id="is-loading" class="empty hidden"><span class="spinner"></span> 연관 이슈 찾는 중…</div>
         <div id="is-body" class="body hidden">
             <div id="is-list-view">
@@ -1467,6 +1473,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     try {
         const setIcon = (id, svg) => { const el = document.getElementById(id); if (el) { el.innerHTML = svg; } };
         setIcon('ico-info', ICON.spark);
+        setIcon('ico-tl-empty', ICON.spark);   // 타임라인 빈 상태 — 돋보기 안내 박스와 동일한 스파클
+        setIcon('ico-is-empty', ICON.spark);   // 이슈 빈 상태 — 동일
         setIcon('ico-tab-blame', ICON.search);   // '돋보기' 탭 — 용어에 맞춰 돋보기 아이콘
         setIcon('ico-tab-timeline', ICON.clock);
         setIcon('ico-tab-issue', ICON.branch);
@@ -1585,7 +1593,8 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
         tlShow('body');
     }
     function tlEmpty(message) {
-        if (message) { document.getElementById('tl-empty').innerHTML = decorate(message); }
+        // 박스(.info)는 유지하고 텍스트만 갈아끼운다 — 통째로 덮으면 아이콘이 사라진다.
+        if (message) { document.querySelector('#tl-empty .info__text').innerHTML = decorate(message); }
         tlShow('empty');
     }
     // 주요 변곡점(major) 노드/+아이콘 색상 — 변곡점이 나올 때마다 순환해 서로 구분된다.
@@ -1709,7 +1718,7 @@ export class ContextBlameSidebarProvider implements vscode.WebviewViewProvider {
     }
     function isLoading() { isShow('loading'); }
     function isEmpty(message) {
-        if (message) { document.getElementById('is-empty').innerHTML = decorate(message); }
+        if (message) { document.querySelector('#is-empty .info__text').innerHTML = decorate(message); }
         isShow('empty');
     }
     // 이슈 탭 상태 — 목록과 상세를 한 데이터(isDocs)로 공유하고 isIndex 로 상세 대상을 가린다.
