@@ -162,6 +162,7 @@ class LineTitleCommit(BaseModel):
     linesAdded: int | None = None
     linesRemoved: int | None = None
     changedSymbols: str | None = None
+    changedLines: str | None = None   # 바뀐 라인 실제 텍스트(old → new) — '무엇이 바뀌었나' grounding
 
 
 class LineTitlesRequest(BaseModel):

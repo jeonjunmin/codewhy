@@ -16,6 +16,7 @@ POST /api/blame/context — 한 라인의 변경 사유를 분석해 반환한�
 
 import asyncio
 import logging
+import time
 from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -225,18 +226,49 @@ async def commit_reason(req: ReasonRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/line-titles", response_model=LineTitlesResponse)
-async def line_titles(req: LineTitlesRequest):
+async def line_titles(req: LineTitlesRequest, db: AsyncSession = Depends(get_db)):
     """'라인 수정 이력' 행 타이틀을 원본 커밋 메시지에서 깔끔히 다듬어 배치로 반환한다.
 
-    한 번의 Bedrock 호출(미적중 커밋만)로 처리하고 커밋 해시별로 캐시한다 — 라인 이력 목록은
-    git 메타로 '즉시' 그려지고, 이 응답이 도착하면 프런트가 타이틀만 교체한다(진행형).
+    2계층 캐시: DB(commit_titles, 해시 키)에서 적중분을 먼저 받고(L2), 미적중분만 한 번의
+    Bedrock 호출(빠른 모델)로 다듬어 DB 에 저장한다. 타이틀은 해시에 종속·안정적이라 재방문·
+    서버 재시작 시 LLM 없이 즉시 응답한다. 라인 이력 목록은 git 메타로 '즉시' 그려지고,
+    이 응답이 도착하면 프런트가 타이틀만 교체한다(진행형).
     """
     commits = [c.model_dump() for c in req.commits]
+    hashes = [c["hash"] for c in commits if c.get("hash")]
+    # 단계별 지연 실측 — 5초 지연이 DB/LLM 어디서 나는지 로그로 확정한다.
+    t0 = time.perf_counter()
+    t_read = t_llm = t_save = 0.0
+    n_todo = 0
     try:
-        titles = await asyncio.to_thread(service.generate_line_titles, commits)
+        cached = await crud.get_cached_titles(db, hashes)                      # L2 read
+        t_read = time.perf_counter()
+        todo = [c for c in commits if c.get("hash") and c["hash"] not in cached]
+        n_todo = len(todo)
+        refined: dict[str, str] = {}
+        if todo:
+            refined = await asyncio.to_thread(service.refine_titles, todo)     # 빠른 모델 LLM
+            t_llm = time.perf_counter()
+            if refined:
+                await crud.save_titles(db, refined)                           # L2 write
+        t_save = time.perf_counter()
     except Exception as e:
         logger.exception("라인 타이틀 생성 실패 — repo=%s file=%s", req.repoPath, req.filePath)
         raise HTTPException(status_code=500, detail=f"라인 타이틀 실패: {e}")
+
+    logger.info(
+        "[line-titles] total=%.2fs (read=%.2fs llm=%.2fs save=%.2fs) commits=%d todo=%d cached=%d",
+        time.perf_counter() - t0, t_read - t0,
+        (t_llm - t_read) if t_llm else 0.0,
+        (t_save - t_llm) if (t_save and t_llm) else 0.0,
+        len(hashes), n_todo, len(cached),
+    )
+
+    # 적중 → 신규 → 원본 메시지 순으로 폴백해 모든 커밋의 타이틀을 채운다.
+    titles = {
+        c["hash"]: cached.get(c["hash"]) or refined.get(c["hash"]) or (c.get("subject") or "").strip()
+        for c in commits if c.get("hash")
+    }
     return LineTitlesResponse(titles=titles)
 
 
@@ -270,6 +302,9 @@ async def clear_blame_cache(req: CacheClearRequest, db: AsyncSession = Depends(g
     """
     try:
         deleted = await crud.clear_explanations_for_file(db, req.repoPath, req.filePath)
+        # 라인 타이틀 캐시도 함께 비운다 — 프롬프트/신호를 바꾼 뒤 '새로고침'으로 재생성되게.
+        # (commit_titles 는 해시 키 전역 캐시라 파일 스코프가 없어 전체를 비운다; 테이블이 작아 무방.)
+        await crud.clear_all_titles(db)
     except Exception as e:
         logger.exception("blame 캐시 삭제 실패 — repo=%s file=%s", req.repoPath, req.filePath)
         raise HTTPException(status_code=500, detail=f"blame 캐시 삭제 실패: {e}")

@@ -29,6 +29,7 @@ export interface LineTitleCommit {
     linesAdded?: number;
     linesRemoved?: number;
     changedSymbols?: string;
+    changedLines?: string;   // 바뀐 라인 실제 텍스트(old → new) — '무엇이 바뀌었나' grounding
 }
 
 /**

@@ -37,6 +37,9 @@ class Settings(BaseSettings):
 
     # ── AWS Bedrock ───────────────────────────────────────────────────────────
     BEDROCK_MODEL_ID: str = "global.anthropic.claude-sonnet-4-6"
+    # 라인 타이틀 다듬기 등 '한 줄짜리 가벼운 작업'용 빠른 모델. 프런티어 모델은 과하고 느리다.
+    # 계정/리전에서 활성화돼 있어야 하며, 없으면 .env 의 BEDROCK_FAST_MODEL_ID 로 교체한다.
+    BEDROCK_FAST_MODEL_ID: str = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
 
     # ── PostgreSQL (RDS) ──────────────────────────────────────────────────────
     # 런타임(asyncpg): postgresql+asyncpg://user:pass@host:5432/codewhy
@@ -110,6 +113,10 @@ def get_aws_credentials() -> dict:
 def get_bedrock_model_id() -> str:
     """Converse API 로 호출할 Bedrock 모델 ID (inference profile ID 권장)."""
     return get_settings().BEDROCK_MODEL_ID
+
+def get_bedrock_fast_model_id() -> str:
+    """가벼운 작업(라인 타이틀 등)용 빠른 Bedrock 모델 ID. 기본 Haiku."""
+    return get_settings().BEDROCK_FAST_MODEL_ID
 
 def get_bedrock_kb_id() -> str:
     """기획서 단락을 조회할 Bedrock Knowledge Base ID. 미설정 시 RAG 생략."""

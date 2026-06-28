@@ -1,5 +1,4 @@
-import { execFile, execSync } from 'child_process';
-import { promisify } from 'util';
+import { execSync } from 'child_process';
 import * as vscode from 'vscode';
 import { EditorContext, getEditorContext } from '../../shared/editor';
 import * as localGit from '../../shared/git';
@@ -62,7 +61,7 @@ export function showContextBlameView(
     ensureInitialized(context);
     blameCache.set(cacheKey(ctx.filePath, ctx.line), { ctx, result });
     updateStatusBar(ctx.line, result);
-    pushToSidebar(ctx, result);
+    pushToSidebar(ctx, result, true);   // 명시적 표시 요청 → 돋보기 탭으로 전환
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -204,9 +203,9 @@ function ensureInitialized(context: vscode.ExtensionContext) {
 async function handleAnalyzeAndShow(args: { filePath: string; line: number; repoPath: string }) {
     const entry = blameCache.get(cacheKey(args.filePath, args.line));
     if (entry) {
-        // 캐시 적중 — 스트리밍 없이 즉시 표시.
+        // 캐시 적중 — 스트리밍 없이 즉시 표시. 명시적 돋보기 트리거이므로 돋보기 탭으로 전환(activate)한다.
         updateStatusBar(args.line, entry.result);
-        pushToSidebar(entry.ctx, entry.result);
+        pushToSidebar(entry.ctx, entry.result, true);
         // 라인 이력 타이틀은 사후에 AI 로 다듬어 진행형 교체(해시별 캐시라 재호출도 저렴).
         void applyLineTitles(entry.result.lineHistory, args);
         return;
@@ -238,9 +237,9 @@ function streamBlameInto(args: { filePath: string; line: number; repoPath: strin
             // degraded(Bedrock 폴백)는 일시적 실패이므로 캐싱하지 않는다(다음 분석 때 자동 회복).
             if (!result.aiDegraded) { blameCache.set(key, { ctx, result }); }
             updateStatusBar(args.line, result);
-            // meta 를 본 경우(스트리밍)는 콜아웃 확정만, 아니면(캐시 적중/노이즈 JSON) 전체 렌더.
+            // meta 를 본 경우(스트리밍)는 콜아웃 확정만, 아니면(노이즈 JSON 즉답) 전체 렌더 + 탭 전환.
             if (metaSeen) { sidebar!.blameResult(ctx, result); }
-            else { pushToSidebar(ctx, result); }
+            else { pushToSidebar(ctx, result, true); }
         },
         onError: (message) => vscode.window.showErrorMessage(`돋보기 실패: ${message}`),
     }).catch((err) => vscode.window.showErrorMessage(`돋보기 실패: ${(err as Error).message}`));
@@ -314,11 +313,11 @@ export async function runClearTimelineCache() {
 }
 
 /**
- * 현재 파일의 돋보기(블레임) 설명 캐시를 비우고 곧장 현재 라인을 재분석한다(시연 재분석용).
+ * 현재 파일의 돋보기(블레임) 설명 캐시를 비우기만 한다(재분석은 하지 않음 — 타임라인 캐시 비우기와 동일).
  *
- * 캐시는 두 층이다 — 백엔드 blame_explanations + 확장 메모리 blameCache(라인별).
- * 백엔드만 비우면 라인 재분석이 확장 메모리 캐시에 적중해(handleAnalyzeAndShow) 백엔드를
- * 호출하지 않으므로 화면이 그대로다. 그래서 둘 다 비우고 현재 커서 라인을 다시 분석해 즉시 새로 그린다.
+ * 캐시는 두 층이다 — 백엔드 blame_explanations + 확장 메모리 blameCache(라인별). 둘 다 비워야
+ * 다음에 라인을 클릭할 때 캐시 미스가 나며 최신 형식으로 재분석된다(인메모리만 남으면 옛 결과로 적중).
+ * 비운 직후 자동 재분석은 하지 않으므로, 화면은 사용자가 라인을 다시 누를 때 갱신된다.
  */
 export async function runClearBlameCache() {
     const ctx = getEditorContext();
@@ -328,17 +327,16 @@ export async function runClearBlameCache() {
     try {
         const deleted = await clearBlameCache({ filePath: ctx.filePath, repoPath: ctx.repoPath });
 
-        // 확장 메모리 캐시(현재 파일의 모든 라인)도 함께 비운다 — 안 그러면 재분석이 옛 결과로 적중한다.
+        // 확장 메모리 캐시(현재 파일의 모든 라인)도 함께 비운다 — 안 그러면 다음 분석이 옛 결과로 적중한다.
         for (const key of [...blameCache.keys()]) {
             if (key.startsWith(ctx.filePath + ':')) { blameCache.delete(key); }
         }
 
         vscode.window.showInformationMessage(
-            `CodeWhy: ${fileName} 돋보기 캐시를 비웠습니다(${deleted}건). 현재 라인을 다시 분석합니다…`,
+            deleted > 0
+                ? `CodeWhy: ${fileName} 돋보기 캐시를 비웠습니다(${deleted}건). 라인을 다시 누르면 최신 형식으로 분석합니다.`
+                : `CodeWhy: ${fileName} 에는 비울 돋보기 캐시가 없습니다.`,
         );
-
-        // 현재 커서 라인을 즉시 재분석해 패널을 새로 그린다(캐시 미스 → 스트리밍).
-        runBlameTab();
     } catch (err) {
         vscode.window.showErrorMessage(`CodeWhy: 돋보기 캐시 비우기 실패 — ${(err as Error).message}`);
     }
@@ -499,72 +497,25 @@ function collectGitLog(repoPath: string, filePath: string): CommitInput[] {
     }
 }
 
-interface FileChangeSignal { added: number; removed: number; symbols: string; }
-
 /**
  * 타임라인 하이브리드 요약용 — 이 파일에 대한 커밋별 '실제 코드 변경' 신호를 git diff 에서 추출한다.
  *
- * `git log -p --unified=0` 한 번으로 전체 이력의 패치를 받아, 커밋마다
- *   · +/- 줄 수(diffstat) 와
- *   · @@ 헌크 헤더 뒤에 git 이 달아주는 '함수/섹션 컨텍스트'(바뀐 심볼)
- * 만 추려 들고, 패치 본문은 버린다(토큰·payload 최소화).
- * %x01 은 git 이 출력하는 레코드 구분 바이트(0x01) — 패치 내용과 안 겹치는 안전한 경계.
+ * `git log -p --unified=0` 한 번으로 전체 이력의 패치를 받아, 커밋마다 +/- 줄 수와
+ * 바뀐 함수/섹션 이름만 추린다(파싱은 git.parseChangeSignals 공유). 패치 본문은 버린다.
+ * 라인 타이틀(localGit.getLineChangeSignals)이 '그 라인'만 보는 것과 달리, 타임라인은
+ * 파일 전체 변경을 봐야 하므로 별도 수집기를 둔다.
  *
  * 👤 담당: 개발자 B
  */
-/** `git log -p` 출력을 커밋별 변경 신호(+/-줄 수 + 헌크 함수명)로 파싱한다. */
-function parseFileChangeSignals(out: string): Map<string, FileChangeSignal> {
-    const map = new Map<string, FileChangeSignal>();
-    for (const block of out.split('\x01')) {
-        const nl = block.indexOf('\n');
-        const hash = (nl < 0 ? block : block.slice(0, nl)).trim();
-        if (!hash) { continue; }
-        const body = nl < 0 ? '' : block.slice(nl + 1);
-        let added = 0, removed = 0;
-        const symbols = new Set<string>();
-        for (const line of body.split('\n')) {
-            if (line.startsWith('@@')) {
-                // "@@ -a,b +c,d @@ <context>" — <context> 는 보통 이 헌크가 속한 함수/섹션명.
-                const ctx = line.slice(line.indexOf('@@', 2) + 2).trim();
-                if (ctx) { symbols.add(ctx); }
-            } else if (line.startsWith('+') && !line.startsWith('+++')) {
-                added++;
-            } else if (line.startsWith('-') && !line.startsWith('---')) {
-                removed++;
-            }
-        }
-        // 심볼은 토큰을 아끼려고 최대 4개까지만.
-        map.set(hash, { added, removed, symbols: [...symbols].slice(0, 4).join(', ') });
-    }
-    return map;
-}
-
-const GIT_DIFF_ARGS = (filePath: string) =>
-    ['log', '--follow', '-p', '--unified=0', '--format=%x01%H', '--', filePath];
-
-function collectFileChangeSignals(repoPath: string, filePath: string): Map<string, FileChangeSignal> {
+function collectFileChangeSignals(repoPath: string, filePath: string): Map<string, localGit.FileChangeSignal> {
     try {
         const out = execSync(
             `git log --follow -p --unified=0 --format="%x01%H" -- "${filePath}"`,
             { cwd: repoPath, timeout: 20_000, maxBuffer: 64 * 1024 * 1024 },
         ).toString();
-        return parseFileChangeSignals(out);
+        return localGit.parseChangeSignals(out);
     } catch {
         // diff 수집 실패(대용량/타임아웃 등)는 치명적이지 않다 — 메시지만으로 폴백한다.
-        return new Map();
-    }
-}
-
-const execFileAsync = promisify(execFile);
-
-/** 확장 호스트를 막지 않는 비동기 버전 — 블레임 라인 타이틀처럼 사후 보강에 쓴다. */
-async function collectFileChangeSignalsAsync(repoPath: string, filePath: string): Promise<Map<string, FileChangeSignal>> {
-    try {
-        const { stdout } = await execFileAsync('git', GIT_DIFF_ARGS(filePath), {
-            cwd: repoPath, timeout: 20_000, maxBuffer: 64 * 1024 * 1024,
-        });
-        return parseFileChangeSignals(stdout.toString());
-    } catch {
         return new Map();
     }
 }
@@ -576,22 +527,31 @@ async function collectFileChangeSignalsAsync(repoPath: string, filePath: string)
  */
 async function applyLineTitles(
     lineHistory: { hash: string; subject: string }[] | undefined,
-    ctx: { filePath: string; repoPath: string },
+    ctx: { filePath: string; repoPath: string; line: number },
 ) {
     if (!sidebar || !lineHistory || lineHistory.length === 0) { return; }
     let titles: Record<string, string> = {};
+    const t0 = Date.now();
+    let tGit = t0;
     try {
-        const signals = await collectFileChangeSignalsAsync(ctx.repoPath, ctx.filePath);
+        // 파일 전체가 아니라 '그 라인'의 실제 변경만 신호로 실어, 모호한 메시지를 라인 기준으로 교정한다.
+        // 라인 단위 -L diff 는 출력이 작아 동기 호출로도 확장 호스트를 의미있게 막지 않는다.
+        const signals = localGit.getLineChangeSignals(ctx.repoPath, ctx.filePath, ctx.line);
+        tGit = Date.now();
         const commits = lineHistory.map(h => {
             const s = signals.get(h.hash);
             return s
-                ? { hash: h.hash, subject: h.subject || '', linesAdded: s.added, linesRemoved: s.removed, changedSymbols: s.symbols }
+                ? { hash: h.hash, subject: h.subject || '', linesAdded: s.added, linesRemoved: s.removed, changedSymbols: s.symbols, changedLines: s.changedLines }
                 : { hash: h.hash, subject: h.subject || '' };
         });
         titles = await fetchLineTitles({ filePath: ctx.filePath, repoPath: ctx.repoPath, commits });
-    } catch {
+        // 진단: 클라이언트 구간(git -L vs 네트워크) 지연 + 받은 타이틀이 원본과 다른지.
+        const changed = lineHistory.filter(h => titles[h.hash] && titles[h.hash] !== (h.subject || '')).length;
+        console.log(`[CodeWhy line-titles] git=${tGit - t0}ms fetch=${Date.now() - tGit}ms rows=${lineHistory.length} refined=${changed}`, titles);
+    } catch (e) {
         // 실패 → 원본 메시지를 타이틀로 실어, 웹뷰가 스켈레톤을 풀고 원본으로 즉시 드러내게 한다.
         titles = Object.fromEntries(lineHistory.map(h => [h.hash, h.subject || '']));
+        console.log(`[CodeWhy line-titles] FAILED after ${Date.now() - t0}ms — 원본 폴백`, e);
     }
     // 성공/실패 무관하게 항상 호출 — 모든 행의 스켈레톤이 한 번에 해제되어야 한다.
     sidebar.setHistoryTitles(titles);
@@ -661,10 +621,15 @@ async function handleIssueChat(payload: { issue: any; messages: { role: string; 
     }
 }
 
-function pushToSidebar(ctx: EditorContext, r: BlameResult) {
+/**
+ * 사이드바에 블레임 결과를 민다. activate=true 면 돋보기 탭으로 전환한다(명시적 트리거 전용).
+ * 커서 이동에 따른 수동 따라가기(activate 생략)는 보이는 탭을 건드리지 않는다 — 타임라인을
+ * 읽는 중 커서만 옮겼다고 탭이 튀지 않게.
+ */
+function pushToSidebar(ctx: EditorContext, r: BlameResult, activate = false) {
     if (!sidebar) { return; }
     const isPinned = pinned.has(cacheKey(ctx.filePath, ctx.line));
-    sidebar.setBlame(ctx, r, isPinned);
+    sidebar.setBlame(ctx, r, isPinned, activate);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -27,7 +27,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from app.core import git, vcs
 from app.core.ai_client import call_bedrock, stream_bedrock
 from app.core.commit_classifier import SKIP_TYPES, classify_commit
-from app.core.config import get_team_map
+from app.core.config import get_bedrock_fast_model_id, get_team_map
 from app.core.tickets import extract_issue_numbers, extract_ticket
 from app.core.vcs import Comment, Issue, PullRequest
 from app.db.postgres import AsyncSessionLocal, run_detached
@@ -634,11 +634,9 @@ def _decorate_line_history(history: list[dict]) -> list[dict]:
     ]
 
 
-# ── 라인 수정 이력 '타이틀' 다듬기 (배치 1콜 + 커밋 해시별 인메모리 캐시) ────────────
-# 커밋 해시 → 다듬은 타이틀. 타이틀은 해시에 종속(안정적)이라 프로세스 수명 동안 재사용한다.
-_LINE_TITLE_CACHE: dict[str, str] = {}
-_LINE_TITLE_CACHE_MAX = 1000
-
+# ── 라인 수정 이력 '타이틀' 다듬기 (미적중분만 배치 1콜) ─────────────────────────
+# 커밋 해시 → 다듬은 타이틀. 타이틀은 해시에 종속(안정적)이라 DB(commit_titles)에 영속하고,
+# 캐시 적중/미적중 판단·저장은 라우터(line_titles)가 맡는다. 여기선 순수 LLM 다듬기만 한다.
 _LINE_TITLE_SYSTEM = (
     "당신은 개발자의 거친 커밋 메시지를, 비개발자도 이해할 깔끔한 '변경 타이틀'로 다듬는 도우미입니다. "
     "사실을 지어내지 말고, 주어진 정보 안에서만 다듬으세요."
@@ -649,11 +647,15 @@ def _format_line_diff_signal(c: dict) -> str:
     """라인 타이틀 입력 커밋의 '실제 변경'(git diff) 신호 한 토막 — 없으면 빈 문자열."""
     added, removed = c.get("linesAdded"), c.get("linesRemoved")
     symbols = (c.get("changedSymbols") or "").strip()
+    changed = (c.get("changedLines") or "").strip()
     parts: list[str] = []
     if added is not None or removed is not None:
         parts.append(f"+{added or 0}/-{removed or 0}줄")
     if symbols:
         parts.append(f"함수: {symbols}")
+    if changed:
+        # 카운트/함수명이 못 담는 '무엇이 바뀌었나' — 바뀐 라인의 실제 텍스트(old → new).
+        parts.append(f"코드: {changed}")
     return f"  ⟪실제변경 {' · '.join(parts)}⟫" if parts else ""
 
 
@@ -682,43 +684,36 @@ def _refine_titles(commits: list[dict]) -> list[str]:
         "규칙:\n"
         "- 티켓 번호(#53), 타입 접두어(feat:, fix[blame]:), 군더더기를 제거하세요.\n"
         "- 명사(체언)로 끝맺으세요. '~까지/~부터' 같은 조사·연결어미로 끝내지 마세요.\n"
-        "- ⟪실제변경⟫(있으면)은 git diff 에서 뽑은 '실제 바뀐 것'입니다. 메시지가 모호하면(예: '수정')\n"
-        "  ⟪실제변경⟫ 으로 무슨 변경인지 구체화하고, 메시지와 어긋나면 실제 변경을 우선하세요.\n"
+        "- ⟪실제변경⟫(있으면)은 git diff 에서 뽑은 '실제 바뀐 것'입니다. 특히 '코드:'는 바뀐 라인의\n"
+        "  실제 텍스트(old → new)입니다. 메시지가 모호하거나(예: '수정') 실제 변경과 어긋나면(예: 메시지는\n"
+        "  '문구 수정'인데 코드는 수수료율 변경) '코드:'의 실제 변경을 우선해 무엇이 바뀌었는지 구체화하세요.\n"
         "- 정보가 부족하면 의미를 지어내지 말고 원문을 최소한으로만 정리하세요.\n"
         f"반드시 JSON 문자열 배열로, 입력과 같은 {len(commits)}개·같은 순서로만 반환하세요. 다른 텍스트 금지.\n\n"
         f"[커밋들]\n{lines}"
     )
-    raw = call_bedrock(prompt, system=_LINE_TITLE_SYSTEM, max_tokens=600, temperature=0.2)
+    # 한 줄 명사구 다듬기는 가벼운 작업 — 프런티어 모델 대신 빠른 모델(Haiku)로 지연을 줄인다.
+    raw = call_bedrock(
+        prompt, system=_LINE_TITLE_SYSTEM, max_tokens=600, temperature=0.2,
+        model_id=get_bedrock_fast_model_id(),
+    )
     return _parse_title_array(raw, len(commits))
 
 
-def generate_line_titles(commits: list[dict]) -> dict[str, str]:
-    """'라인 수정 이력' 행 타이틀을 다듬어 {hash: 타이틀} 로 반환한다.
+def refine_titles(commits: list[dict]) -> dict[str, str]:
+    """미적중 커밋들(메시지 있는 것)을 한 번의 Bedrock 호출로 다듬어 {hash: 타이틀} 로 반환한다.
 
-    - 캐시에 있으면 재사용, 없는 것(+메시지 있는 것)만 모아 한 번의 Bedrock 호출로 다듬는다.
-    - 다듬기 실패/빈 결과면 해당 커밋은 원본 메시지를 그대로 돌려준다(프런트가 바꾸지 않음).
+    DB 캐시 적중/저장은 호출부(라우터)가 맡는다 — 여기 들어오는 건 '아직 캐시에 없는' 커밋만.
+    다듬기 실패/빈 결과인 항목은 결과에서 빠지고, 호출부가 원본 메시지로 폴백한다.
     """
-    todo = [
-        c for c in commits
-        if c.get("hash") and c["hash"] not in _LINE_TITLE_CACHE and (c.get("subject") or "").strip()
-    ]
-    if todo:
-        try:
-            refined = _refine_titles(todo)
-        except Exception:
-            logger.warning("라인 타이틀 다듬기 실패 — 원본 유지", exc_info=True)
-            refined = []
-        for c, title in zip(todo, refined):
-            if title:
-                _LINE_TITLE_CACHE[c["hash"]] = title
-        # 단순 크기 제한 — 오래된 항목부터 버린다(insertion order).
-        while len(_LINE_TITLE_CACHE) > _LINE_TITLE_CACHE_MAX:
-            _LINE_TITLE_CACHE.pop(next(iter(_LINE_TITLE_CACHE)), None)
-
-    return {
-        c["hash"]: _LINE_TITLE_CACHE.get(c["hash"], (c.get("subject") or "").strip())
-        for c in commits if c.get("hash")
-    }
+    todo = [c for c in commits if c.get("hash") and (c.get("subject") or "").strip()]
+    if not todo:
+        return {}
+    try:
+        refined = _refine_titles(todo)
+    except Exception:
+        logger.warning("라인 타이틀 다듬기 실패 — 원본 유지", exc_info=True)
+        return {}
+    return {c["hash"]: title for c, title in zip(todo, refined) if title}
 
 
 def _safe_count_linked_issues(message: str) -> int:

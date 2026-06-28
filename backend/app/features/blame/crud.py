@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_team_map
-from app.db.models import BlameExplanation, Commit, File, Repository
+from app.db.models import BlameExplanation, Commit, CommitTitle, File, Repository
 
 import logging
 
@@ -109,6 +109,43 @@ async def clear_explanations_for_file(
     await db.commit()
     deleted = result.rowcount or 0
     logger.info("[crud] clear_explanations_for_file — file_id=%d 삭제=%d건", file.id, deleted)
+    return deleted
+
+
+# ── 라인 수정 이력 타이틀 캐시 (commit_hash 키, 전역) ──────────────────────────
+
+async def get_cached_titles(db: AsyncSession, hashes: list[str]) -> dict[str, str]:
+    """commit_hash → 다듬은 타이틀. 영속 캐시에서 적중분만 돌려준다(없으면 빈 dict)."""
+    if not hashes:
+        return {}
+    rows = (
+        await db.execute(
+            select(CommitTitle.commit_hash, CommitTitle.title).where(
+                CommitTitle.commit_hash.in_(hashes)
+            )
+        )
+    ).all()
+    return {h: t for h, t in rows}
+
+
+async def save_titles(db: AsyncSession, titles: dict[str, str]) -> None:
+    """다듬은 타이틀을 commit_hash 키로 벌크 upsert. 타이틀은 해시 종속·안정이라 충돌 시 무시."""
+    rows = [{"commit_hash": h, "title": t} for h, t in titles.items() if h and t]
+    if not rows:
+        return
+    stmt = pg_insert(CommitTitle).values(rows).on_conflict_do_nothing(
+        index_elements=["commit_hash"]
+    )
+    await db.execute(stmt)
+    await db.commit()
+
+
+async def clear_all_titles(db: AsyncSession) -> int:
+    """라인 타이틀 캐시 전체 삭제 — 프롬프트/신호를 바꾼 뒤 '새로고침'용(테이블이 작아 무방)."""
+    result = await db.execute(delete(CommitTitle))
+    await db.commit()
+    deleted = result.rowcount or 0
+    logger.info("[crud] clear_all_titles — 삭제=%d건", deleted)
     return deleted
 
 

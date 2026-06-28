@@ -207,3 +207,18 @@ class TimelineSummaryCache(Base):
     data: Mapped[dict] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+
+class CommitTitle(Base):
+    """'라인 수정 이력' 행 타이틀 캐시 — commit_hash 로만 키잉한다.
+
+    타이틀은 (커밋 메시지 + 그 라인 diff)에서 다듬은 결과로 commit_hash 에 종속·안정적이다.
+    git sha 는 전역 유일이라 repo 결합이 필요 없다. blame 본문(blame_explanations)처럼
+    DB 에 영속해, 재방문·서버 재시작 시 LLM 재호출 없이 즉시 응답하게 한다.
+    """
+
+    __tablename__ = "commit_titles"
+
+    commit_hash: Mapped[str] = mapped_column(String(40), primary_key=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
