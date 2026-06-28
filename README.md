@@ -82,6 +82,11 @@ CodeWhy는 코드의 **맥락과 의도**를 알려주는 AI 기반 VSCode 확�
 | `CodeWhy: 이 코드, 왜 바꿨어?` | 돋보기 분석 |
 | `CodeWhy: 이 파일의 역사 요약` | 타임라인 요약 |
 | `CodeWhy: 요구사항 찾기` | 연관 요구사항 이슈 찾기 |
+| `CodeWhy: 커밋 상세 보기` | 돋보기 결과에서 참조한 커밋 상세 확인 |
+| `CodeWhy: 현재 라인 돋보기 고정/해제` (`Ctrl+Alt+B`) | 커서 이동과 무관하게 돋보기 결과를 고정 |
+| `CodeWhy: 설정 열기` | CodeWhy 설정 화면 바로가기 |
+| `CodeWhy: 이 파일의 타임라인 캐시 비우기` | 타임라인 요약 캐시 초기화 |
+| `CodeWhy: 이 파일의 돋보기 캐시 비우기` | 돋보기 분석 캐시 초기화 |
 
 ---
 
@@ -91,7 +96,10 @@ VSCode 설정(`settings.json` 또는 설정 UI)에서 조정할 수 있습니다
 
 | 설정 키 | 설명 | 기본값 |
 | --- | --- | --- |
-| `codewhy.backendUrl` | **[고급]** 분석 백엔드 서버 주소. 자체 호스팅 시에만 변경 | `http://localhost:8000` |
+| `codewhy.codeLens.enabled` | 에디터 라인 위에 "🔍 왜 바꿨어?" CodeLens 표시 여부 | `true` |
+| `codewhy.hover.enabled` | 분석된 라인에 마우스를 올렸을 때 돋보기 요약 팝업 표시 여부 | `true` |
+| `codewhy.backendUrl` | **[고급]** 분석 백엔드 서버 주소. 자체 호스팅 시에만 변경 | `http://3.37.125.200:8000` |
+| `codewhy.devBackendUrl` | **[개발자]** F5(Extension Development Host)로 실행할 때 사용할 로컬 백엔드 주소. 설치본(.vsix/마켓플레이스)에서는 무시됨 | `http://localhost:8000` |
 
 ---
 
